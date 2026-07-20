@@ -1,0 +1,31 @@
+{
+  "name": "prism-ts",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "tsc --build",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "test": "vitest run --passWithNoTests",
+    "pack:check": "publint packages/sdk && publint packages/cli && attw --pack packages/sdk --profile esm-only",
+    "verify": "npm run build && npm run lint && npm run format:check && npm run test && npm run pack:check"
+  },
+  "devDependencies": {
+    "@arethetypeswrong/cli": "^0.18.5",
+    "@types/node": "^26.1.1",
+    "@vitest/coverage-v8": "^4.1.10",
+    "eslint": "^10.7.0",
+    "prettier": "^3.9.5",
+    "publint": "^0.3.21",
+    "typescript": "^6.0.3",
+    "typescript-eslint": "^8.64.0",
+    "vitest": "^4.1.10"
+  }
+}

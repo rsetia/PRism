@@ -1,0 +1,20 @@
+{
+  "name": "@rsetia/agent-graph",
+  "version": "0.1.0-alpha.0",
+  "description": "Agent graph SDK: validate, compile, and run dependency graphs of tasks",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "sideEffects": false
+}
