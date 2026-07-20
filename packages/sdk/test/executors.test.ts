@@ -3,7 +3,12 @@ import { builtinExecutors, createExecutorRegistry } from "../src/index.js";
 import type { ExecutionContext, NodeExecutionOutcome } from "../src/index.js";
 
 function ctx(partial?: Partial<ExecutionContext>): ExecutionContext {
-  return { nodeId: "n", inputs: [], ...partial };
+  return {
+    nodeId: "n",
+    inputs: [],
+    signal: new AbortController().signal,
+    ...partial,
+  };
 }
 
 async function run(

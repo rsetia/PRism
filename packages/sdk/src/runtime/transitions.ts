@@ -71,6 +71,22 @@ export function reduceNodeState(
       }
       break;
 
+    case "node_cancelling":
+      if (previous === "running") {
+        return "cancelling";
+      }
+      break;
+
+    case "node_cancelled":
+      if (
+        previous === "pending" ||
+        previous === "ready" ||
+        previous === "cancelling"
+      ) {
+        return "cancelled";
+      }
+      break;
+
     default: {
       const unhandledEvent: never = event;
       throw new Error(`unhandled run event: ${JSON.stringify(unhandledEvent)}`);

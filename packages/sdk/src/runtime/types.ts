@@ -9,16 +9,26 @@ import type { JsonValue } from "../graph/types.js";
  *
  * Legal moves:
  *   pending -> ready -> running -> succeeded | failed
- *   pending -> blocked   (a dependency failed or was blocked; terminal)
+ *   pending -> blocked      (a dependency failed or was blocked; terminal)
+ *   pending | ready -> cancelled            (cancellation accepted directly)
+ *   running -> cancelling -> cancelled      (waits for the executor to settle)
  */
 export type NodeState =
-  "pending" | "ready" | "running" | "succeeded" | "failed" | "blocked";
+  | "pending"
+  | "ready"
+  | "running"
+  | "succeeded"
+  | "failed"
+  | "blocked"
+  | "cancelling"
+  | "cancelled";
 
 /** Terminal states are absorbing: every further event is an invariant error. */
 export const TERMINAL_NODE_STATES: ReadonlySet<NodeState> = new Set([
   "succeeded",
   "failed",
   "blocked",
+  "cancelled",
 ]);
 
 /**
@@ -38,4 +48,11 @@ export interface NodeFailure {
  */
 export type RunOutcome =
   | { readonly status: "succeeded"; readonly output: unknown }
-  | { readonly status: "failed"; readonly failures: readonly NodeFailure[] };
+  | { readonly status: "failed"; readonly failures: readonly NodeFailure[] }
+  | {
+      readonly status: "cancelled";
+      /** The value passed to cancel(); null when none was given. */
+      readonly reason: JsonValue;
+      /** Originating failures observed before cancellation; may be empty. */
+      readonly failures: readonly NodeFailure[];
+    };

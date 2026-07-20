@@ -1,4 +1,4 @@
-import type { CompiledGraph, CompiledNode } from "../graph/types.js";
+import type { CompiledGraph, CompiledNode, JsonValue } from "../graph/types.js";
 import type { PersistedRunEvent, RunEvent } from "./events.js";
 import { normalizeThrownCause } from "./failures.js";
 import type {
@@ -20,6 +20,15 @@ export interface EngineOptions {
    * opt into parallelism.
    */
   readonly maxConcurrency?: number;
+  /**
+   * After cancel() aborts a running node's signal, wait at most this many
+   * milliseconds for its executor to settle before emitting node_cancelled
+   * and abandoning the promise (observed, never unhandled). Default:
+   * wait forever — purely cooperative. In-process "forced termination"
+   * means the engine stops waiting; real process kills arrive with the
+   * subprocess backend (plan §14).
+   */
+  readonly cancelGracePeriodMs?: number;
 }
 
 export interface RunOptions {
@@ -38,6 +47,12 @@ export interface RunHandle {
   readonly id: string;
   readonly events: AsyncIterable<PersistedRunEvent>;
   readonly result: Promise<RunOutcome>;
+  /**
+   * Request cancellation. Resolves once the run is terminal. Idempotent;
+   * a no-op after the run has already completed (the existing outcome
+   * stands). `reason` lands in the cancelled outcome (null when omitted).
+   */
+  readonly cancel: (reason?: JsonValue) => Promise<void>;
 }
 
 export interface Engine {
@@ -45,8 +60,93 @@ export interface Engine {
 }
 
 interface NodeCompletion {
+  readonly kind: "node_completion";
   readonly nodeId: string;
   readonly outcome: NodeExecutionOutcome;
+}
+
+interface CancellationRequest {
+  readonly kind: "cancellation_requested";
+  readonly reason: JsonValue;
+}
+
+interface CancellationTimeout {
+  readonly kind: "cancellation_timeout";
+  readonly nodeId: string;
+}
+
+type SchedulerEvent =
+  NodeCompletion | CancellationRequest | CancellationTimeout;
+
+interface CancellationControl {
+  readonly requested: Promise<CancellationRequest>;
+  readonly isRequested: () => boolean;
+  readonly request: (reason: JsonValue) => void;
+  readonly register: (nodeId: string, controller: AbortController) => void;
+  readonly remove: (nodeId: string) => void;
+  readonly markTerminal: () => void;
+}
+
+function createCancellationControl(): CancellationControl {
+  const controllers = new Map<string, AbortController>();
+  let acceptedRequest: CancellationRequest | undefined;
+  let terminal = false;
+  let resolveRequest: ((request: CancellationRequest) => void) | undefined;
+  const requested = new Promise<CancellationRequest>((resolve) => {
+    resolveRequest = resolve;
+  });
+
+  return {
+    requested,
+    isRequested: () => acceptedRequest !== undefined,
+    request(reason: JsonValue): void {
+      if (terminal || acceptedRequest !== undefined) {
+        return;
+      }
+
+      const request: CancellationRequest = {
+        kind: "cancellation_requested",
+        reason,
+      };
+      acceptedRequest = request;
+      resolveRequest?.(request);
+      for (const controller of controllers.values()) {
+        controller.abort(reason);
+      }
+    },
+    register(nodeId: string, controller: AbortController): void {
+      controllers.set(nodeId, controller);
+      if (acceptedRequest !== undefined) {
+        controller.abort(acceptedRequest.reason);
+      }
+    },
+    remove(nodeId: string): void {
+      controllers.delete(nodeId);
+    },
+    markTerminal(): void {
+      terminal = true;
+      controllers.clear();
+    },
+  };
+}
+
+function withCancellationGrace(
+  settlement: Promise<SchedulerEvent>,
+  nodeId: string,
+  gracePeriodMs: number,
+): Promise<SchedulerEvent> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<CancellationTimeout>((resolve) => {
+    timer = setTimeout(() => {
+      resolve({ kind: "cancellation_timeout", nodeId });
+    }, gracePeriodMs);
+  });
+
+  return Promise.race([settlement, timeout]).finally(() => {
+    if (timer !== undefined) {
+      clearTimeout(timer);
+    }
+  });
 }
 
 function getNode(graph: CompiledGraph, nodeId: string): CompiledNode {
@@ -78,7 +178,8 @@ async function invokeExecutor(
   node: CompiledNode,
   executor: ExecutorDefinition,
   outputs: ReadonlyMap<string, unknown>,
-): Promise<NodeCompletion> {
+  signal: AbortSignal,
+): Promise<SchedulerEvent> {
   const inputs = Object.freeze(
     node.dependsOn.map((dependencyId) => {
       if (!outputs.has(dependencyId)) {
@@ -91,17 +192,24 @@ async function invokeExecutor(
   );
   const context: ExecutionContext = Object.freeze(
     node.config === undefined
-      ? { nodeId: node.id, inputs }
-      : { nodeId: node.id, inputs, config: node.config },
+      ? { nodeId: node.id, inputs, signal }
+      : {
+          nodeId: node.id,
+          inputs,
+          config: node.config,
+          signal,
+        },
   );
 
   try {
     return {
+      kind: "node_completion",
       nodeId: node.id,
       outcome: await executor.execute(context),
     };
   } catch (thrown: unknown) {
     return {
+      kind: "node_completion",
       nodeId: node.id,
       outcome: {
         status: "failed",
@@ -117,6 +225,8 @@ async function executeCreatedRun(
   store: RunStore,
   registry: ExecutorRegistry,
   maxConcurrency: number,
+  cancelGracePeriodMs: number | undefined,
+  cancellation: CancellationControl,
 ): Promise<RunOutcome> {
   const executors = new Map<string, ExecutorDefinition>();
   const preflightFailures: NodeFailure[] = [];
@@ -141,7 +251,10 @@ async function executeCreatedRun(
   const states = new Map<string, NodeState>();
   const outputs = new Map<string, unknown>();
   const originatingFailures = new Map<string, NodeFailure>();
-  const inFlight = new Map<string, Promise<NodeCompletion>>();
+  const inFlight = new Map<string, Promise<SchedulerEvent>>();
+  let cancellationObserved = false;
+  let cancellationAccepted = false;
+  let cancellationReason: JsonValue = null;
 
   for (const nodeId of graph.order) {
     states.set(nodeId, "pending");
@@ -213,7 +326,7 @@ async function executeCreatedRun(
   }
 
   async function dispatchReadyNodes(): Promise<void> {
-    while (inFlight.size < maxConcurrency) {
+    while (inFlight.size < maxConcurrency && !cancellation.isRequested()) {
       const nodeId = graph.order.find(
         (candidateId) => states.get(candidateId) === "ready",
       );
@@ -222,15 +335,69 @@ async function executeCreatedRun(
       }
 
       await applyEvents([{ kind: "node_started", nodeId }]);
+      if (cancellation.isRequested()) {
+        return;
+      }
       const executor = executors.get(nodeId);
       if (executor === undefined) {
         throw new Error(`preflight lost executor for node "${nodeId}"`);
       }
+      const controller = new AbortController();
+      cancellation.register(nodeId, controller);
       inFlight.set(
         nodeId,
-        invokeExecutor(getNode(graph, nodeId), executor, outputs),
+        invokeExecutor(
+          getNode(graph, nodeId),
+          executor,
+          outputs,
+          controller.signal,
+        ),
       );
     }
+  }
+
+  async function acceptCancellation(
+    request: CancellationRequest,
+  ): Promise<boolean> {
+    const events: RunEvent[] = [];
+    const runningNodeIds: string[] = [];
+
+    for (const nodeId of graph.order) {
+      const state = states.get(nodeId);
+      if (state === "pending" || state === "ready") {
+        events.push({ kind: "node_cancelled", nodeId });
+      } else if (state === "running") {
+        events.push({ kind: "node_cancelling", nodeId });
+        runningNodeIds.push(nodeId);
+      }
+    }
+
+    // Every node is already terminal: its persisted completion won.
+    if (events.length === 0) {
+      return false;
+    }
+
+    await applyEvents(events);
+
+    const immediatelyCancelled: RunEvent[] = [];
+    for (const nodeId of runningNodeIds) {
+      const settlement = inFlight.get(nodeId);
+      if (settlement === undefined) {
+        // Cancellation landed in the narrow window after node_started was
+        // persisted but before the executor was invoked.
+        immediatelyCancelled.push({ kind: "node_cancelled", nodeId });
+        cancellation.remove(nodeId);
+      } else if (cancelGracePeriodMs !== undefined) {
+        inFlight.set(
+          nodeId,
+          withCancellationGrace(settlement, nodeId, cancelGracePeriodMs),
+        );
+      }
+    }
+    await applyEvents(immediatelyCancelled);
+
+    cancellationReason = request.reason;
+    return true;
   }
 
   const rootEvents: RunEvent[] = [];
@@ -242,53 +409,97 @@ async function executeCreatedRun(
   await applyEvents(rootEvents);
 
   while (true) {
-    await dispatchReadyNodes();
-    if (inFlight.size === 0) {
+    if (!cancellation.isRequested()) {
+      await dispatchReadyNodes();
+    }
+
+    if (
+      inFlight.size === 0 &&
+      (!cancellation.isRequested() || cancellationObserved)
+    ) {
       break;
     }
 
-    const completion = await Promise.race(inFlight.values());
-    if (!inFlight.delete(completion.nodeId)) {
+    const candidates = [...inFlight.values()];
+    if (!cancellationObserved) {
+      candidates.push(cancellation.requested);
+    }
+    if (candidates.length === 0) {
+      break;
+    }
+
+    const schedulerEvent = await Promise.race(candidates);
+    if (schedulerEvent.kind === "cancellation_requested") {
+      cancellationObserved = true;
+      cancellationAccepted = await acceptCancellation(schedulerEvent);
+      continue;
+    }
+
+    if (!inFlight.delete(schedulerEvent.nodeId)) {
       throw new Error(
-        `completion targets node that is not running: "${completion.nodeId}"`,
+        `settlement targets node that is not running: "${schedulerEvent.nodeId}"`,
+      );
+    }
+    cancellation.remove(schedulerEvent.nodeId);
+
+    const state = states.get(schedulerEvent.nodeId);
+    if (state === undefined) {
+      throw new Error(
+        `settlement targets unknown node "${schedulerEvent.nodeId}"`,
+      );
+    }
+    if (state === "cancelling") {
+      await applyEvents([
+        { kind: "node_cancelled", nodeId: schedulerEvent.nodeId },
+      ]);
+      continue;
+    }
+    if (schedulerEvent.kind === "cancellation_timeout") {
+      throw new Error(
+        `cancellation timeout targeted non-cancelling node "${schedulerEvent.nodeId}"`,
+      );
+    }
+    if (state !== "running") {
+      throw new Error(
+        `node "${schedulerEvent.nodeId}" settled in state "${state}"`,
       );
     }
 
-    switch (completion.outcome.status) {
+    switch (schedulerEvent.outcome.status) {
       case "succeeded": {
         await applyEvents([
           {
             kind: "node_succeeded",
-            nodeId: completion.nodeId,
-            output: completion.outcome.output,
+            nodeId: schedulerEvent.nodeId,
+            output: schedulerEvent.outcome.output,
           },
         ]);
-        outputs.set(completion.nodeId, completion.outcome.output);
+        outputs.set(schedulerEvent.nodeId, schedulerEvent.outcome.output);
         await promoteReadyNodes();
         break;
       }
 
       case "failed": {
         const failure: NodeFailure = {
-          nodeId: completion.nodeId,
-          cause: completion.outcome.cause,
+          nodeId: schedulerEvent.nodeId,
+          cause: schedulerEvent.outcome.cause,
         };
         await applyEvents([
           {
             kind: "node_failed",
-            nodeId: completion.nodeId,
+            nodeId: schedulerEvent.nodeId,
             failure,
           },
         ]);
-        originatingFailures.set(completion.nodeId, failure);
+        originatingFailures.set(schedulerEvent.nodeId, failure);
         await propagateBlockedNodes();
         break;
       }
 
       default: {
-        const unhandledOutcome: never = completion.outcome;
+        const unhandledOutcome: never = schedulerEvent.outcome;
         throw new Error(
-          `executor for node "${completion.nodeId}" returned an invalid outcome`,
+          `executor for node "${schedulerEvent.nodeId}" returned an invalid outcome`,
           { cause: unhandledOutcome },
         );
       }
@@ -296,7 +507,12 @@ async function executeCreatedRun(
   }
 
   for (const [nodeId, state] of states) {
-    if (state !== "succeeded" && state !== "failed" && state !== "blocked") {
+    if (
+      state !== "succeeded" &&
+      state !== "failed" &&
+      state !== "blocked" &&
+      state !== "cancelled"
+    ) {
       throw new Error(`run stopped with node "${nodeId}" in state "${state}"`);
     }
   }
@@ -305,6 +521,13 @@ async function executeCreatedRun(
     const failure = originatingFailures.get(nodeId);
     return failure === undefined ? [] : [failure];
   });
+  if (cancellationAccepted) {
+    return {
+      status: "cancelled",
+      reason: cancellationReason,
+      failures,
+    };
+  }
   if (failures.length > 0) {
     return { status: "failed", failures };
   }
@@ -371,6 +594,15 @@ export function createEngine(options: EngineOptions): Engine {
       "maxConcurrency must be an integer greater than or equal to 1",
     );
   }
+  const cancelGracePeriodMs = options.cancelGracePeriodMs;
+  if (
+    cancelGracePeriodMs !== undefined &&
+    (!Number.isFinite(cancelGracePeriodMs) || cancelGracePeriodMs < 0)
+  ) {
+    throw new Error(
+      "cancelGracePeriodMs must be a finite number greater than or equal to 0",
+    );
+  }
 
   const { store, registry } = options;
   let nextRunNumber = 1;
@@ -378,6 +610,7 @@ export function createEngine(options: EngineOptions): Engine {
   return Object.freeze({
     run(graph: CompiledGraph, runOptions?: RunOptions): RunHandle {
       const runId = runOptions?.runId ?? `run-${String(nextRunNumber++)}`;
+      const cancellation = createCancellationControl();
       const creation = Promise.resolve().then(() =>
         store.createRun({ runId, graph }),
       );
@@ -390,6 +623,8 @@ export function createEngine(options: EngineOptions): Engine {
             store,
             registry,
             maxConcurrency,
+            cancelGracePeriodMs,
+            cancellation,
           );
         } finally {
           await store.finishRun(runId);
@@ -399,11 +634,25 @@ export function createEngine(options: EngineOptions): Engine {
       // Keep engine bugs observable through `result` without producing an
       // unhandled rejection when a caller intentionally consumes only events.
       void result.catch(() => undefined);
+      void result.then(
+        () => {
+          cancellation.markTerminal();
+        },
+        () => {
+          cancellation.markTerminal();
+        },
+      );
+      const cancellationFinished = result.then(() => undefined);
+      void cancellationFinished.catch(() => undefined);
 
       return Object.freeze({
         id: runId,
         events: createEventIterable(store, runId, creation),
         result,
+        cancel: (reason?: JsonValue): Promise<void> => {
+          cancellation.request(reason ?? null);
+          return cancellationFinished;
+        },
       });
     },
   });

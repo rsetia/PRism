@@ -20,6 +20,13 @@ export interface ExecutionContext {
   readonly inputs: readonly unknown[];
   /** The node's opaque config, if any. Executors narrow it themselves. */
   readonly config?: JsonValue;
+  /**
+   * Aborted when the run is cancelled. Cooperative: executors SHOULD
+   * observe it (it composes with fetch, timers, and subprocesses), but
+   * the engine survives executors that ignore it — see
+   * EngineOptions.cancelGracePeriodMs.
+   */
+  readonly signal: AbortSignal;
 }
 
 /**

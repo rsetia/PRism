@@ -27,7 +27,9 @@ export type RunEvent =
       readonly nodeId: string;
       /** The failed-or-blocked dependencies that caused this. */
       readonly blockedBy: readonly string[];
-    };
+    }
+  | { readonly kind: "node_cancelling"; readonly nodeId: string }
+  | { readonly kind: "node_cancelled"; readonly nodeId: string };
 
 /**
  * An event as the store returns it. `seq` is assigned by the store on

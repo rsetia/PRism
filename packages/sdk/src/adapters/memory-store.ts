@@ -18,6 +18,12 @@ function persistEvent(event: RunEvent, seq: number): PersistedRunEvent {
     case "node_started":
       return Object.freeze({ kind: event.kind, nodeId: event.nodeId, seq });
 
+    case "node_cancelling":
+      return Object.freeze({ kind: event.kind, nodeId: event.nodeId, seq });
+
+    case "node_cancelled":
+      return Object.freeze({ kind: event.kind, nodeId: event.nodeId, seq });
+
     case "node_succeeded":
       return Object.freeze({
         kind: event.kind,
