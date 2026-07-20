@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "nodes": {
+    "a": { "executor": "passthrough", "dependsOn": ["b"] },
+    "b": { "executor": "passthrough", "dependsOn": ["a"] }
+  },
+  "finalNode": "a"
+}

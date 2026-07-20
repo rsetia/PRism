@@ -1,8 +1,22 @@
 #!/usr/bin/env node
 /**
- * agent-graph CLI. Imports the SDK strictly by package name — never by
- * relative path into SDK source. Placeholder until section 6.
+ * Process wiring only — all behavior lives in cli.ts. Anything thrown
+ * that reaches here is by definition an unexpected internal error.
  */
-import { SDK_VERSION } from "@rsetia/agent-graph";
+import { EXIT_INTERNAL, runCli } from "./cli.js";
 
-console.log(`agent-graph ${SDK_VERSION}`);
+const io = {
+  stdout: (line: string): void => {
+    process.stdout.write(`${line}\n`);
+  },
+  stderr: (line: string): void => {
+    process.stderr.write(`${line}\n`);
+  },
+};
+
+try {
+  process.exitCode = await runCli(process.argv.slice(2), io);
+} catch (error) {
+  io.stderr(`unexpected internal error: ${String(error)}`);
+  process.exitCode = EXIT_INTERNAL;
+}

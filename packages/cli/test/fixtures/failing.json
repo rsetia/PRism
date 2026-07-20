@@ -1,0 +1,7 @@
+{
+  "version": 1,
+  "nodes": {
+    "doomed": { "executor": "fail", "config": { "reason": "boom" } }
+  },
+  "finalNode": "doomed"
+}

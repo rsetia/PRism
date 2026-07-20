@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "nodes": {
+    "first": { "executor": "constant", "config": { "value": "hello" } },
+    "second": { "executor": "passthrough", "dependsOn": ["first"] }
+  },
+  "finalNode": "second"
+}
