@@ -1,0 +1,82 @@
+import type { CompiledGraph, JsonValue } from "../graph/types.js";
+import type { PersistedRunEvent, RunEvent } from "./events.js";
+
+/**
+ * The seams (plan §4): the engine depends only on these interfaces.
+ * Concrete adapters — memory today, durable/subprocess later — plug in
+ * from outside. Expected failures are data; thrown errors from these
+ * ports mean invalid API use or adapter bugs.
+ */
+
+/** What an executor returns. Failure is an outcome, not an exception. */
+export type NodeExecutionOutcome =
+  | { readonly status: "succeeded"; readonly output: unknown }
+  | { readonly status: "failed"; readonly cause: JsonValue };
+
+/** Everything a node execution gets to see. */
+export interface ExecutionContext {
+  readonly nodeId: string;
+  /** Upstream outputs, in the node's dependsOn order. */
+  readonly inputs: readonly unknown[];
+  /** The node's opaque config, if any. Executors narrow it themselves. */
+  readonly config?: JsonValue;
+}
+
+/**
+ * A named executor. `execute` may return or throw — the engine catches
+ * and normalizes thrown values via normalizeThrownCause; executors
+ * should still prefer returning failure as data.
+ */
+export interface ExecutorDefinition {
+  readonly name: string;
+  readonly execute: (
+    context: ExecutionContext,
+  ) => NodeExecutionOutcome | Promise<NodeExecutionOutcome>;
+}
+
+/**
+ * Immutable lookup of executors, passed to the engine explicitly —
+ * never a global mutable registry.
+ */
+export interface ExecutorRegistry {
+  get(name: string): ExecutorDefinition | undefined;
+  has(name: string): boolean;
+  /** All registered names, in registration order. */
+  readonly names: readonly string[];
+}
+
+export interface CreateRunInput {
+  readonly runId: string;
+  /** Snapshot stored at creation — the down payment for durable resume. */
+  readonly graph: CompiledGraph;
+}
+
+export interface StoredRun {
+  readonly runId: string;
+  readonly graph: CompiledGraph;
+  readonly finished: boolean;
+}
+
+/**
+ * Persistence port. Contract (plan §4, decided):
+ * - createRun rejects a duplicate runId.
+ * - appendEvents assigns `seq` — monotonic per run, gapless, from 0 —
+ *   atomically for the whole batch, and returns the persisted events.
+ *   Rejects for an unknown or finished run.
+ * - readEvents is a cursor over the persisted log starting at `fromSeq`
+ *   (default 0): each call is an independent iterator that yields
+ *   existing events, waits for new ones, and completes once the run is
+ *   finished and the log is drained. Unknown runId rejects on iteration.
+ * - Appending never waits on consumers — the engine only notifies.
+ * - finishRun is idempotent.
+ */
+export interface RunStore {
+  createRun(input: CreateRunInput): Promise<void>;
+  appendEvents(
+    runId: string,
+    events: readonly RunEvent[],
+  ): Promise<readonly PersistedRunEvent[]>;
+  readEvents(runId: string, fromSeq?: number): AsyncIterable<PersistedRunEvent>;
+  getRun(runId: string): Promise<StoredRun | undefined>;
+  finishRun(runId: string): Promise<void>;
+}

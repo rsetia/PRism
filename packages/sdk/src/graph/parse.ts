@@ -1,5 +1,6 @@
 import type { GraphParseError } from "./errors.js";
 import type { GraphDefinition, JsonValue, NodeDefinition } from "./types.js";
+import { isJsonValue, isPlainObject } from "../internal/json.js";
 
 export type ParseResult =
   | { readonly ok: true; readonly graph: GraphDefinition }
@@ -7,55 +8,6 @@ export type ParseResult =
 
 const ROOT_PROPERTIES = new Set(["version", "nodes", "finalNode"]);
 const NODE_PROPERTIES = new Set(["executor", "dependsOn", "config"]);
-
-function isPlainObject(value: unknown): value is Record<string, unknown> {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return false;
-  }
-
-  const prototype: unknown = Object.getPrototypeOf(value);
-  return prototype === Object.prototype || prototype === null;
-}
-
-function isJsonValue(
-  value: unknown,
-  ancestors: ReadonlySet<object> = new Set(),
-): value is JsonValue {
-  if (
-    value === null ||
-    typeof value === "boolean" ||
-    typeof value === "string"
-  ) {
-    return true;
-  }
-
-  if (typeof value === "number") {
-    return Number.isFinite(value);
-  }
-
-  if (typeof value !== "object") {
-    return false;
-  }
-
-  if (ancestors.has(value)) {
-    return false;
-  }
-
-  const nextAncestors = new Set(ancestors);
-  nextAncestors.add(value);
-
-  if (Array.isArray(value)) {
-    return value.every((entry) => isJsonValue(entry, nextAncestors));
-  }
-
-  if (!isPlainObject(value)) {
-    return false;
-  }
-
-  return Reflect.ownKeys(value).every(
-    (key) => typeof key === "string" && isJsonValue(value[key], nextAncestors),
-  );
-}
 
 /**
  * The trust boundary: unknown in, typed graph (or structured errors) out.
