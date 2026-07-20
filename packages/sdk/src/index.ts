@@ -14,5 +14,12 @@ export type {
   NodeDefinition,
 } from "./graph/types.js";
 export type { GraphCompileError, GraphParseError } from "./graph/errors.js";
+export {
+  IllegalTransitionError,
+  reduceNodeState,
+} from "./runtime/transitions.js";
+export { TERMINAL_NODE_STATES } from "./runtime/types.js";
+export type { NodeFailure, NodeState, RunOutcome } from "./runtime/types.js";
+export type { PersistedRunEvent, RunEvent } from "./runtime/events.js";
 
 export const SDK_VERSION = "0.1.0-alpha.0";
