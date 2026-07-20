@@ -30,6 +30,13 @@ export type {
   RunStore,
   StoredRun,
 } from "./runtime/ports.js";
+export { createEngine } from "./runtime/engine.js";
+export type {
+  Engine,
+  EngineOptions,
+  RunHandle,
+  RunOptions,
+} from "./runtime/engine.js";
 export { createExecutorRegistry } from "./runtime/registry.js";
 export { normalizeThrownCause } from "./runtime/failures.js";
 export { createMemoryStore } from "./adapters/memory-store.js";
