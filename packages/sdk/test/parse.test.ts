@@ -15,6 +15,20 @@ const validGraph = {
   finalNode: "second",
 };
 
+/** Parse an input expected to fail; returns its error codes. */
+function failCodes(input: unknown): readonly string[] {
+  const result = parseGraph(input);
+  expect(result.ok).toBe(false);
+  return result.ok ? [] : result.errors.map((e) => e.code);
+}
+
+/** Parse an input expected to fail; returns the full errors for field checks. */
+function failErrors(input: unknown) {
+  const result = parseGraph(input);
+  expect(result.ok).toBe(false);
+  return result.ok ? [] : result.errors;
+}
+
 describe("parseGraph", () => {
   test("accepts the canonical valid graph", () => {
     const result = parseGraph(validGraph);
@@ -27,22 +41,154 @@ describe("parseGraph", () => {
   });
 
   test("rejects a non-object root with INVALID_ROOT", () => {
-    const result = parseGraph(null);
-    expect(result.ok).toBe(false);
-    if (result.ok) return;
-    expect(result.errors.map((e) => e.code)).toContain("INVALID_ROOT");
+    for (const input of [null, undefined, 42, "graph", [validGraph]]) {
+      expect(failCodes(input)).toContain("INVALID_ROOT");
+    }
   });
 
-  // The normative-rules checklist (plan §2) — implement one at a time:
-  test.todo("rejects version !== literal 1 with UNSUPPORTED_VERSION");
-  test.todo("rejects unknown root properties with UNKNOWN_PROPERTY");
-  test.todo("rejects unknown node properties with UNKNOWN_PROPERTY");
-  test.todo("rejects an empty nodes object with EMPTY_GRAPH");
-  test.todo("rejects empty-string node IDs with INVALID_NODE_ID");
-  test.todo("rejects a missing or non-string executor with INVALID_NODE");
-  test.todo("rejects a non-string-array dependsOn with INVALID_NODE");
-  test.todo("rejects duplicate dependsOn entries with DUPLICATE_DEPENDENCY");
-  test.todo("rejects a non-string finalNode with INVALID_FINAL_NODE");
-  test.todo("passes config through untouched (opaque JSON)");
-  test.todo("collects all errors in one pass, not just the first");
+  test("rejects version !== literal 1 with UNSUPPORTED_VERSION", () => {
+    expect(failErrors({ ...validGraph, version: 2 })).toContainEqual({
+      code: "UNSUPPORTED_VERSION",
+      found: 2,
+    });
+    expect(failErrors({ ...validGraph, version: "1" })).toContainEqual({
+      code: "UNSUPPORTED_VERSION",
+      found: "1",
+    });
+    const withoutVersion: Record<string, unknown> = { ...validGraph };
+    delete withoutVersion["version"];
+    expect(failCodes(withoutVersion)).toContain("UNSUPPORTED_VERSION");
+  });
+
+  test("rejects unknown root properties with UNKNOWN_PROPERTY", () => {
+    expect(failErrors({ ...validGraph, finalNodee: "second" })).toContainEqual({
+      code: "UNKNOWN_PROPERTY",
+      path: "finalNodee",
+    });
+  });
+
+  test("rejects unknown node properties with UNKNOWN_PROPERTY", () => {
+    const graph = {
+      version: 1,
+      nodes: { only: { executor: "constant", confg: {} } },
+    };
+    expect(failErrors(graph)).toContainEqual({
+      code: "UNKNOWN_PROPERTY",
+      path: "nodes.only.confg",
+    });
+  });
+
+  test("rejects an empty nodes object with EMPTY_GRAPH", () => {
+    expect(failCodes({ version: 1, nodes: {} })).toContain("EMPTY_GRAPH");
+  });
+
+  test("rejects empty-string node IDs with INVALID_NODE_ID", () => {
+    const graph = { version: 1, nodes: { "": { executor: "noop" } } };
+    expect(failErrors(graph)).toContainEqual({
+      code: "INVALID_NODE_ID",
+      nodeId: "",
+    });
+  });
+
+  test("rejects a missing or non-string executor with INVALID_NODE", () => {
+    for (const node of [{}, { executor: 42 }, { executor: "" }]) {
+      expect(failErrors({ version: 1, nodes: { bad: node } })).toContainEqual({
+        code: "INVALID_NODE",
+        nodeId: "bad",
+        property: "executor",
+      });
+    }
+  });
+
+  test("rejects a non-string-array dependsOn with INVALID_NODE", () => {
+    for (const dependsOn of ["first", { first: true }, [1], ["first", 2]]) {
+      const graph = {
+        version: 1,
+        nodes: {
+          first: { executor: "constant" },
+          bad: { executor: "concat", dependsOn },
+        },
+      };
+      expect(failErrors(graph)).toContainEqual({
+        code: "INVALID_NODE",
+        nodeId: "bad",
+        property: "dependsOn",
+      });
+    }
+  });
+
+  test("rejects duplicate dependsOn entries with DUPLICATE_DEPENDENCY", () => {
+    const graph = {
+      version: 1,
+      nodes: {
+        first: { executor: "constant" },
+        second: { executor: "concat", dependsOn: ["first", "first"] },
+      },
+    };
+    expect(failErrors(graph)).toContainEqual({
+      code: "DUPLICATE_DEPENDENCY",
+      nodeId: "second",
+      dependencyId: "first",
+    });
+  });
+
+  test("rejects a non-string or empty finalNode with INVALID_FINAL_NODE", () => {
+    for (const finalNode of [5, "", ["second"]]) {
+      expect(failCodes({ ...validGraph, finalNode })).toContain(
+        "INVALID_FINAL_NODE",
+      );
+    }
+  });
+
+  test("passes config through untouched (opaque JSON)", () => {
+    const config = { nested: { list: [1, "two", null, false], deep: {} } };
+    const result = parseGraph({
+      version: 1,
+      nodes: { only: { executor: "constant", config } },
+    });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.graph.nodes["only"]?.config).toEqual(config);
+  });
+
+  test("collects all errors in one pass, not just the first", () => {
+    const codes = failCodes({
+      version: 99,
+      bogus: true,
+      nodes: { a: { executor: "" } },
+    });
+    expect(codes).toContain("UNSUPPORTED_VERSION");
+    expect(codes).toContain("UNKNOWN_PROPERTY");
+    expect(codes).toContain("INVALID_NODE");
+  });
+
+  // Behavior beyond the checklist — pinned so it stays spec, not accident:
+
+  test("rejects non-JSON config values (cycles, non-finite numbers)", () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic["self"] = cyclic;
+    for (const config of [cyclic, Number.NaN, Infinity, { fn: () => 1 }]) {
+      expect(
+        failErrors({ version: 1, nodes: { bad: { executor: "x", config } } }),
+      ).toContainEqual({
+        code: "INVALID_NODE",
+        nodeId: "bad",
+        property: "config",
+      });
+    }
+  });
+
+  test('handles a "__proto__" node ID without prototype pollution', () => {
+    // Only JSON.parse can produce an own "__proto__" key — an object
+    // literal would set the prototype instead.
+    const input: unknown = JSON.parse(
+      '{"version":1,"nodes":{"__proto__":{"executor":"noop"}},"finalNode":"__proto__"}',
+    );
+    const result = parseGraph(input);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(Object.hasOwn(result.graph.nodes, "__proto__")).toBe(true);
+    expect(result.graph.nodes["__proto__"]?.executor).toBe("noop");
+    expect(({} as { executor?: unknown }).executor).toBeUndefined();
+  });
 });

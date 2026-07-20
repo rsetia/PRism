@@ -190,7 +190,7 @@ export function parseGraph(input: unknown): ParseResult {
 
       if (executorIsValid && dependsOnIsValid && configIsValid) {
         parsedNodes[nodeId] = hasConfig
-          ? { executor, dependsOn, config }
+          ? { executor, dependsOn, config: config as JsonValue }
           : { executor, dependsOn };
       }
     }
