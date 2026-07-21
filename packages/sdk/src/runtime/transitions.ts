@@ -42,7 +42,7 @@ export function reduceNodeState(
 ): NodeState {
   switch (event.kind) {
     case "node_ready":
-      if (previous === "pending") {
+      if (previous === "pending" || previous === "retry_wait") {
         return "ready";
       }
       break;
@@ -77,11 +77,18 @@ export function reduceNodeState(
       }
       break;
 
+    case "node_retry_wait":
+      if (previous === "running") {
+        return "retry_wait";
+      }
+      break;
+
     case "node_cancelled":
       if (
         previous === "pending" ||
         previous === "ready" ||
-        previous === "cancelling"
+        previous === "cancelling" ||
+        previous === "retry_wait"
       ) {
         return "cancelled";
       }

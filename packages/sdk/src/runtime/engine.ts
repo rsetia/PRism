@@ -2,12 +2,20 @@ import type { CompiledGraph, CompiledNode, JsonValue } from "../graph/types.js";
 import type { PersistedRunEvent, RunEvent } from "./events.js";
 import { normalizeThrownCause } from "./failures.js";
 import type {
+  Clock,
   ExecutionContext,
   ExecutorDefinition,
   ExecutorRegistry,
   NodeExecutionOutcome,
   RunStore,
 } from "./ports.js";
+import {
+  computeBackoffMs,
+  isRetryable,
+  NO_RETRIES,
+  resolveFailureClass,
+  type RetryPolicy,
+} from "./retry.js";
 import { reduceNodeState } from "./transitions.js";
 import type { NodeFailure, NodeState, RunOutcome } from "./types.js";
 
@@ -29,6 +37,16 @@ export interface EngineOptions {
    * subprocess backend (plan §14).
    */
   readonly cancelGracePeriodMs?: number;
+  /**
+   * Retry behavior for failed nodes. Defaults to NO_RETRIES — one
+   * attempt per node, which is exactly the pre-§11 behavior.
+   */
+  readonly retryPolicy?: RetryPolicy;
+  /**
+   * Time source for retry backoff. Required once a policy actually
+   * retries; tests pass a manual clock so backoff is instant.
+   */
+  readonly clock?: Clock;
 }
 
 export interface RunOptions {
@@ -75,8 +93,22 @@ interface CancellationTimeout {
   readonly nodeId: string;
 }
 
+interface RetryReady {
+  readonly kind: "retry_ready";
+  readonly nodeId: string;
+}
+
+interface RetryCancelled {
+  readonly kind: "retry_cancelled";
+  readonly nodeId: string;
+}
+
 type SchedulerEvent =
-  NodeCompletion | CancellationRequest | CancellationTimeout;
+  | NodeCompletion
+  | CancellationRequest
+  | CancellationTimeout
+  | RetryReady
+  | RetryCancelled;
 
 interface CancellationControl {
   readonly requested: Promise<CancellationRequest>;
@@ -147,6 +179,23 @@ function withCancellationGrace(
       clearTimeout(timer);
     }
   });
+}
+
+async function waitForRetry(
+  clock: Clock,
+  delayMs: number,
+  nodeId: string,
+  signal: AbortSignal,
+): Promise<SchedulerEvent> {
+  try {
+    await clock.wait(delayMs, signal);
+    return { kind: "retry_ready", nodeId };
+  } catch (error: unknown) {
+    if (signal.aborted) {
+      return { kind: "retry_cancelled", nodeId };
+    }
+    throw error;
+  }
 }
 
 function getNode(graph: CompiledGraph, nodeId: string): CompiledNode {
@@ -227,6 +276,8 @@ async function executeCreatedRun(
   maxConcurrency: number,
   cancelGracePeriodMs: number | undefined,
   cancellation: CancellationControl,
+  retryPolicy: RetryPolicy,
+  clock: Clock | undefined,
 ): Promise<RunOutcome> {
   const executors = new Map<string, ExecutorDefinition>();
   const preflightFailures: NodeFailure[] = [];
@@ -249,6 +300,7 @@ async function executeCreatedRun(
   }
 
   const states = new Map<string, NodeState>();
+  const attempts = new Map<string, number>();
   const outputs = new Map<string, unknown>();
   const originatingFailures = new Map<string, NodeFailure>();
   const inFlight = new Map<string, Promise<SchedulerEvent>>();
@@ -258,6 +310,7 @@ async function executeCreatedRun(
 
   for (const nodeId of graph.order) {
     states.set(nodeId, "pending");
+    attempts.set(nodeId, 0);
   }
 
   async function applyEvents(events: readonly RunEvent[]): Promise<void> {
@@ -326,7 +379,10 @@ async function executeCreatedRun(
   }
 
   async function dispatchReadyNodes(): Promise<void> {
-    while (inFlight.size < maxConcurrency && !cancellation.isRequested()) {
+    const runningCount = (): number =>
+      [...states.values()].filter((state) => state === "running").length;
+
+    while (runningCount() < maxConcurrency && !cancellation.isRequested()) {
       const nodeId = graph.order.find(
         (candidateId) => states.get(candidateId) === "ready",
       );
@@ -335,6 +391,7 @@ async function executeCreatedRun(
       }
 
       await applyEvents([{ kind: "node_started", nodeId }]);
+      attempts.set(nodeId, (attempts.get(nodeId) ?? 0) + 1);
       if (cancellation.isRequested()) {
         return;
       }
@@ -361,11 +418,15 @@ async function executeCreatedRun(
   ): Promise<boolean> {
     const events: RunEvent[] = [];
     const runningNodeIds: string[] = [];
+    const retryWaitingNodeIds: string[] = [];
 
     for (const nodeId of graph.order) {
       const state = states.get(nodeId);
-      if (state === "pending" || state === "ready") {
+      if (state === "pending" || state === "ready" || state === "retry_wait") {
         events.push({ kind: "node_cancelled", nodeId });
+        if (state === "retry_wait") {
+          retryWaitingNodeIds.push(nodeId);
+        }
       } else if (state === "running") {
         events.push({ kind: "node_cancelling", nodeId });
         runningNodeIds.push(nodeId);
@@ -378,6 +439,11 @@ async function executeCreatedRun(
     }
 
     await applyEvents(events);
+
+    for (const nodeId of retryWaitingNodeIds) {
+      inFlight.delete(nodeId);
+      cancellation.remove(nodeId);
+    }
 
     const immediatelyCancelled: RunEvent[] = [];
     for (const nodeId of runningNodeIds) {
@@ -448,6 +514,34 @@ async function executeCreatedRun(
         `settlement targets unknown node "${schedulerEvent.nodeId}"`,
       );
     }
+
+    if (schedulerEvent.kind === "retry_cancelled") {
+      if (!cancellation.isRequested()) {
+        throw new Error(
+          `retry timer for node "${schedulerEvent.nodeId}" was cancelled without a run cancellation`,
+        );
+      }
+      if (!cancellationObserved) {
+        cancellationObserved = true;
+        cancellationAccepted = await acceptCancellation(
+          await cancellation.requested,
+        );
+      }
+      continue;
+    }
+
+    if (schedulerEvent.kind === "retry_ready") {
+      if (state !== "retry_wait") {
+        throw new Error(
+          `retry timer for node "${schedulerEvent.nodeId}" settled in state "${state}"`,
+        );
+      }
+      await applyEvents([
+        { kind: "node_ready", nodeId: schedulerEvent.nodeId },
+      ]);
+      continue;
+    }
+
     if (state === "cancelling") {
       await applyEvents([
         { kind: "node_cancelled", nodeId: schedulerEvent.nodeId },
@@ -480,10 +574,58 @@ async function executeCreatedRun(
       }
 
       case "failed": {
-        const failure: NodeFailure = {
-          nodeId: schedulerEvent.nodeId,
-          cause: schedulerEvent.outcome.cause,
-        };
+        const failure: NodeFailure =
+          schedulerEvent.outcome.failureClass === undefined
+            ? {
+                nodeId: schedulerEvent.nodeId,
+                cause: schedulerEvent.outcome.cause,
+              }
+            : {
+                nodeId: schedulerEvent.nodeId,
+                cause: schedulerEvent.outcome.cause,
+                failureClass: schedulerEvent.outcome.failureClass,
+              };
+        const attempt = attempts.get(schedulerEvent.nodeId);
+        if (attempt === undefined || attempt < 1) {
+          throw new Error(
+            `node "${schedulerEvent.nodeId}" failed without a recorded attempt`,
+          );
+        }
+
+        if (
+          attempt < retryPolicy.maxAttempts &&
+          isRetryable(retryPolicy, resolveFailureClass(failure))
+        ) {
+          if (clock === undefined) {
+            throw new Error(
+              "clock is required when retryPolicy schedules a retry",
+            );
+          }
+          const delayMs = computeBackoffMs(retryPolicy, attempt);
+          await applyEvents([
+            {
+              kind: "node_retry_wait",
+              nodeId: schedulerEvent.nodeId,
+              attempt,
+              delayMs,
+              failure,
+            },
+          ]);
+
+          const controller = new AbortController();
+          cancellation.register(schedulerEvent.nodeId, controller);
+          inFlight.set(
+            schedulerEvent.nodeId,
+            waitForRetry(
+              clock,
+              delayMs,
+              schedulerEvent.nodeId,
+              controller.signal,
+            ),
+          );
+          break;
+        }
+
         await applyEvents([
           {
             kind: "node_failed",
@@ -604,7 +746,27 @@ export function createEngine(options: EngineOptions): Engine {
     );
   }
 
-  const { store, registry } = options;
+  const retryPolicy = options.retryPolicy ?? NO_RETRIES;
+  if (
+    !Number.isInteger(retryPolicy.maxAttempts) ||
+    retryPolicy.maxAttempts < 1
+  ) {
+    throw new Error(
+      "retryPolicy.maxAttempts must be an integer greater than or equal to 1",
+    );
+  }
+  if (
+    !Number.isFinite(retryPolicy.baseDelayMs) ||
+    retryPolicy.baseDelayMs < 0 ||
+    !Number.isFinite(retryPolicy.maxDelayMs) ||
+    retryPolicy.maxDelayMs < 0
+  ) {
+    throw new Error(
+      "retryPolicy delays must be finite numbers greater than or equal to 0",
+    );
+  }
+
+  const { store, registry, clock } = options;
   let nextRunNumber = 1;
 
   return Object.freeze({
@@ -625,6 +787,8 @@ export function createEngine(options: EngineOptions): Engine {
             maxConcurrency,
             cancelGracePeriodMs,
             cancellation,
+            retryPolicy,
+            clock,
           );
         } finally {
           await store.finishRun(runId);

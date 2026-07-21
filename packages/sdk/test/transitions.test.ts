@@ -4,9 +4,10 @@ import type { NodeState, RunEvent } from "../src/index.js";
 
 /**
  * The exhaustive table: every state × every event kind, generated so no
- * combination can be forgotten. 9 legal transitions; the other 47 must
+ * combination can be forgotten. 12 legal transitions; the other 60 must
  * throw — including everything aimed at a terminal state (absorbing).
- * This is the 100%-branch-coverage file (plan §3; cancellation rows §10).
+ * This is the 100%-branch-coverage file (plan §3; cancellation rows §10,
+ * retry rows §11).
  */
 
 const STATES: readonly NodeState[] = [
@@ -18,6 +19,7 @@ const STATES: readonly NodeState[] = [
   "blocked",
   "cancelling",
   "cancelled",
+  "retry_wait",
 ];
 
 const EVENTS: readonly RunEvent[] = [
@@ -28,6 +30,13 @@ const EVENTS: readonly RunEvent[] = [
   { kind: "node_blocked", nodeId: "n", blockedBy: ["dep"] },
   { kind: "node_cancelling", nodeId: "n" },
   { kind: "node_cancelled", nodeId: "n" },
+  {
+    kind: "node_retry_wait",
+    nodeId: "n",
+    attempt: 1,
+    delayMs: 100,
+    failure: { nodeId: "n", cause: "boom", failureClass: "transient_infra" },
+  },
 ];
 
 const LEGAL = new Map<string, NodeState>([
@@ -40,6 +49,9 @@ const LEGAL = new Map<string, NodeState>([
   ["ready+node_cancelled", "cancelled"],
   ["running+node_cancelling", "cancelling"],
   ["cancelling+node_cancelled", "cancelled"],
+  ["running+node_retry_wait", "retry_wait"],
+  ["retry_wait+node_ready", "ready"],
+  ["retry_wait+node_cancelled", "cancelled"],
 ]);
 
 describe("reduceNodeState", () => {

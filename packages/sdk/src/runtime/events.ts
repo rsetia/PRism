@@ -29,7 +29,21 @@ export type RunEvent =
       readonly blockedBy: readonly string[];
     }
   | { readonly kind: "node_cancelling"; readonly nodeId: string }
-  | { readonly kind: "node_cancelled"; readonly nodeId: string };
+  | { readonly kind: "node_cancelled"; readonly nodeId: string }
+  | {
+      readonly kind: "node_retry_wait";
+      readonly nodeId: string;
+      /** The attempt that just failed, 1-based. */
+      readonly attempt: number;
+      /** Backoff before the next attempt, in milliseconds. */
+      readonly delayMs: number;
+      /**
+       * The failure being retried. Recorded for observability only — a
+       * retried failure is NOT an originating failure, so it never
+       * reaches the run outcome unless retries are exhausted.
+       */
+      readonly failure: NodeFailure;
+    };
 
 /**
  * An event as the store returns it. `seq` is assigned by the store on

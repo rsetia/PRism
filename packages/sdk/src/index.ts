@@ -19,9 +19,26 @@ export {
   reduceNodeState,
 } from "./runtime/transitions.js";
 export { TERMINAL_NODE_STATES } from "./runtime/types.js";
-export type { NodeFailure, NodeState, RunOutcome } from "./runtime/types.js";
+export type {
+  FailureClass,
+  NodeFailure,
+  NodeState,
+  RunOutcome,
+} from "./runtime/types.js";
+export {
+  computeBackoffMs,
+  DEFAULT_FAILURE_CLASS,
+  isRetryable,
+  NO_RETRIES,
+  resolveFailureClass,
+  RETRY_TRANSIENT,
+} from "./runtime/retry.js";
+export type { RetryPolicy } from "./runtime/retry.js";
+export { createManualClock, createSystemClock } from "./adapters/clock.js";
+export type { ManualClock } from "./adapters/clock.js";
 export type { PersistedRunEvent, RunEvent } from "./runtime/events.js";
 export type {
+  Clock,
   CreateRunInput,
   ExecutionContext,
   ExecutorDefinition,

@@ -1,5 +1,6 @@
 import type { CompiledGraph, JsonValue } from "../graph/types.js";
 import type { PersistedRunEvent, RunEvent } from "./events.js";
+import type { FailureClass } from "./types.js";
 
 /**
  * The seams (plan §4): the engine depends only on these interfaces.
@@ -11,7 +12,16 @@ import type { PersistedRunEvent, RunEvent } from "./events.js";
 /** What an executor returns. Failure is an outcome, not an exception. */
 export type NodeExecutionOutcome =
   | { readonly status: "succeeded"; readonly output: unknown }
-  | { readonly status: "failed"; readonly cause: JsonValue };
+  | {
+      readonly status: "failed";
+      readonly cause: JsonValue;
+      /**
+       * Why it failed. Only the executor has the context to say, so only
+       * the executor sets it; omitting it means "unclassified" and the
+       * retry policy applies its default.
+       */
+      readonly failureClass?: FailureClass;
+    };
 
 /** Everything a node execution gets to see. */
 export interface ExecutionContext {
@@ -50,6 +60,22 @@ export interface ExecutorRegistry {
   has(name: string): boolean;
   /** All registered names, in registration order. */
   readonly names: readonly string[];
+}
+
+/**
+ * Time as a port (plan §11): the engine never calls Date.now or
+ * setTimeout directly, so tests advance a manual clock instead of
+ * sleeping through real backoff.
+ */
+export interface Clock {
+  /** Current time as epoch milliseconds. */
+  now(): number;
+  /**
+   * Resolves after `ms` have elapsed. If `signal` is provided and aborts
+   * first, the promise REJECTS with an AbortError-named error — that is
+   * how cancellation interrupts a retry backoff.
+   */
+  wait(ms: number, signal?: AbortSignal): Promise<void>;
 }
 
 export interface CreateRunInput {

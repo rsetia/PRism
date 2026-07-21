@@ -3,15 +3,16 @@ import type { JsonValue } from "../graph/types.js";
 /**
  * Node lifecycle states (plan §3). String union, no payload: outputs and
  * failures live in the run snapshot, not inside the state — and the alpha
- * has no retries, so there's no attempt counter yet. Shaped so
- * `retry_wait`, `cancelling`, and `cancelled` can be added without
- * breaking.
+ * keeps attempt counters in the scheduler rather than encoding them in
+ * the state string.
  *
  * Legal moves:
  *   pending -> ready -> running -> succeeded | failed
  *   pending -> blocked      (a dependency failed or was blocked; terminal)
  *   pending | ready -> cancelled            (cancellation accepted directly)
  *   running -> cancelling -> cancelled      (waits for the executor to settle)
+ *   running -> retry_wait -> ready          (retryable failure; backoff then re-run)
+ *   retry_wait -> cancelled                 (cancellation while waiting to retry)
  */
 export type NodeState =
   | "pending"
@@ -21,7 +22,8 @@ export type NodeState =
   | "failed"
   | "blocked"
   | "cancelling"
-  | "cancelled";
+  | "cancelled"
+  | "retry_wait";
 
 /** Terminal states are absorbing: every further event is an invariant error. */
 export const TERMINAL_NODE_STATES: ReadonlySet<NodeState> = new Set([
@@ -32,13 +34,37 @@ export const TERMINAL_NODE_STATES: ReadonlySet<NodeState> = new Set([
 ]);
 
 /**
+ * Why a node failed — the taxonomy retry decisions key off (plan §11;
+ * adopted verbatim from PRism-py's FailureClass so parity is exact).
+ *
+ * Rough guide: `transient_infra` and `timeout` are the retryable ones by
+ * default; `validation_failed` and `semantic_failed` mean the work was
+ * wrong, not unlucky; `merge_conflict`, `policy_denied`, and
+ * `manual_review_required` need a human or a different strategy.
+ */
+export type FailureClass =
+  | "transient_infra"
+  | "timeout"
+  | "validation_failed"
+  | "semantic_failed"
+  | "merge_conflict"
+  | "policy_denied"
+  | "manual_review_required";
+
+/**
  * An originating node failure. `cause` is already-normalized JSON — the
  * executor adapter (section 4) owns turning thrown values into this shape;
  * by the time a failure is data, it is persistable.
+ *
+ * `failureClass` is optional: only the executor knows why it failed, so
+ * only the executor sets it. Absent means "unclassified" — retry
+ * decisions treat that as `transient_infra` (see resolveFailureClass),
+ * but nothing rewrites the recorded failure.
  */
 export interface NodeFailure {
   readonly nodeId: string;
   readonly cause: JsonValue;
+  readonly failureClass?: FailureClass;
 }
 
 /**

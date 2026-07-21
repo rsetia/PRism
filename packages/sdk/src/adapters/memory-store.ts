@@ -1,6 +1,20 @@
 import type { CompiledGraph } from "../graph/types.js";
 import type { PersistedRunEvent, RunEvent } from "../runtime/events.js";
 import type { RunStore, StoredRun } from "../runtime/ports.js";
+import type { NodeFailure } from "../runtime/types.js";
+
+/** Rebuild a failure for persistence, keeping an optional class. */
+function persistFailure(failure: NodeFailure): NodeFailure {
+  return Object.freeze(
+    failure.failureClass === undefined
+      ? { nodeId: failure.nodeId, cause: failure.cause }
+      : {
+          nodeId: failure.nodeId,
+          cause: failure.cause,
+          failureClass: failure.failureClass,
+        },
+  );
+}
 
 interface MemoryRun {
   readonly runId: string;
@@ -36,10 +50,17 @@ function persistEvent(event: RunEvent, seq: number): PersistedRunEvent {
       return Object.freeze({
         kind: event.kind,
         nodeId: event.nodeId,
-        failure: Object.freeze({
-          nodeId: event.failure.nodeId,
-          cause: event.failure.cause,
-        }),
+        failure: persistFailure(event.failure),
+        seq,
+      });
+
+    case "node_retry_wait":
+      return Object.freeze({
+        kind: event.kind,
+        nodeId: event.nodeId,
+        attempt: event.attempt,
+        delayMs: event.delayMs,
+        failure: persistFailure(event.failure),
         seq,
       });
 
