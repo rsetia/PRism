@@ -52,7 +52,13 @@ function assertContents(
 describe("packed tarball contents", () => {
   test("sdk ships only package.json and dist output", async () => {
     const files = await packedFiles(SDK_DIR);
-    assertContents(files, ["package.json", "dist/index.js", "dist/index.d.ts"]);
+    assertContents(files, [
+      "package.json",
+      "dist/index.js",
+      "dist/index.d.ts",
+      "dist/node/index.js",
+      "dist/node/index.d.ts",
+    ]);
   }, 60_000);
 
   test("cli ships only package.json and dist output, including the bin", async () => {

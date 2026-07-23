@@ -33,6 +33,11 @@ import {
   createMemoryStore,
   parseGraph,
 } from "@rsetia/agent-graph";
+import { createLocalExecutionBackend } from "@rsetia/agent-graph/node";
+
+if (typeof createLocalExecutionBackend !== "function") {
+  throw new Error("the ./node entry point did not resolve");
+}
 
 const parsed = parseGraph({
   version: 1,
