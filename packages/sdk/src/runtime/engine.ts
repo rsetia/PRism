@@ -75,6 +75,16 @@ export interface RunHandle {
 
 export interface Engine {
   run(graph: CompiledGraph, options?: RunOptions): RunHandle;
+  /**
+   * Continue an interrupted run from the store (plan §12). Replays the
+   * run's persisted events to rebuild state, reclassifies any node left
+   * `running` at crash time as a `transient_infra` failure (so the retry
+   * policy can re-run it), then drives the run to completion. The graph
+   * comes from the stored snapshot, not the caller. Rejects for an
+   * unknown run; a run already finished resolves to its recorded outcome
+   * without re-running anything.
+   */
+  resume(runId: string): RunHandle;
 }
 
 interface NodeCompletion {
@@ -268,7 +278,146 @@ async function invokeExecutor(
   }
 }
 
-async function executeCreatedRun(
+interface RunExecutionState {
+  readonly states: Map<string, NodeState>;
+  readonly attempts: Map<string, number>;
+  readonly outputs: Map<string, unknown>;
+  readonly originatingFailures: Map<string, NodeFailure>;
+  readonly retryDelays: Map<string, number>;
+  readonly hasCancelledNodes: boolean;
+}
+
+function createInitialExecutionState(graph: CompiledGraph): RunExecutionState {
+  const states = new Map<string, NodeState>();
+  const attempts = new Map<string, number>();
+  for (const nodeId of graph.order) {
+    states.set(nodeId, "pending");
+    attempts.set(nodeId, 0);
+  }
+  return {
+    states,
+    attempts,
+    outputs: new Map(),
+    originatingFailures: new Map(),
+    retryDelays: new Map(),
+    hasCancelledNodes: false,
+  };
+}
+
+function replayExecutionState(
+  graph: CompiledGraph,
+  events: readonly PersistedRunEvent[],
+): RunExecutionState {
+  const initial = createInitialExecutionState(graph);
+  let hasCancelledNodes = false;
+
+  for (const event of events) {
+    const previous = initial.states.get(event.nodeId);
+    if (previous === undefined) {
+      throw new Error(`stored event targets unknown node "${event.nodeId}"`);
+    }
+    initial.states.set(event.nodeId, reduceNodeState(previous, event));
+
+    switch (event.kind) {
+      case "node_started":
+        initial.attempts.set(
+          event.nodeId,
+          (initial.attempts.get(event.nodeId) ?? 0) + 1,
+        );
+        break;
+      case "node_succeeded":
+        initial.outputs.set(event.nodeId, event.output);
+        break;
+      case "node_failed":
+        initial.originatingFailures.set(event.nodeId, event.failure);
+        break;
+      case "node_retry_wait":
+        initial.retryDelays.set(event.nodeId, event.delayMs);
+        break;
+      case "node_cancelled":
+        hasCancelledNodes = true;
+        break;
+      case "node_ready":
+      case "node_blocked":
+      case "node_cancelling":
+        break;
+      default: {
+        const unhandledEvent: never = event;
+        throw new Error(
+          `unhandled stored event: ${JSON.stringify(unhandledEvent)}`,
+        );
+      }
+    }
+  }
+
+  return { ...initial, hasCancelledNodes };
+}
+
+async function readEventSnapshot(
+  store: RunStore,
+  runId: string,
+  revision: number,
+): Promise<readonly PersistedRunEvent[]> {
+  const iterator = store.readEvents(runId)[Symbol.asyncIterator]();
+  const events: PersistedRunEvent[] = [];
+  try {
+    for (let sequence = 0; sequence < revision; sequence += 1) {
+      const next = await iterator.next();
+      if (next.done) {
+        throw new Error(
+          `run "${runId}" ended before event sequence ${String(sequence)}`,
+        );
+      }
+      if (next.value.seq !== sequence) {
+        throw new Error(
+          `run "${runId}" expected event sequence ${String(sequence)}, received ${String(next.value.seq)}`,
+        );
+      }
+      events.push(next.value);
+    }
+  } finally {
+    await iterator.return?.();
+  }
+  return Object.freeze(events);
+}
+
+function outcomeFromExecutionState(
+  graph: CompiledGraph,
+  execution: RunExecutionState,
+): RunOutcome {
+  for (const [nodeId, state] of execution.states) {
+    if (
+      state !== "succeeded" &&
+      state !== "failed" &&
+      state !== "blocked" &&
+      state !== "cancelled"
+    ) {
+      throw new Error(
+        `finished run has node "${nodeId}" in non-terminal state "${state}"`,
+      );
+    }
+  }
+
+  const failures = graph.order.flatMap((nodeId) => {
+    const failure = execution.originatingFailures.get(nodeId);
+    return failure === undefined ? [] : [failure];
+  });
+  if (execution.hasCancelledNodes) {
+    return { status: "cancelled", reason: null, failures };
+  }
+  if (failures.length > 0) {
+    return { status: "failed", failures };
+  }
+  if (!execution.outputs.has(graph.finalNode)) {
+    throw new Error(`final node "${graph.finalNode}" has no stored output`);
+  }
+  return {
+    status: "succeeded",
+    output: execution.outputs.get(graph.finalNode),
+  };
+}
+
+async function executeRun(
   graph: CompiledGraph,
   runId: string,
   store: RunStore,
@@ -278,12 +427,23 @@ async function executeCreatedRun(
   cancellation: CancellationControl,
   retryPolicy: RetryPolicy,
   clock: Clock | undefined,
+  initialState?: RunExecutionState,
+  initialRevision = 0,
 ): Promise<RunOutcome> {
   const executors = new Map<string, ExecutorDefinition>();
   const preflightFailures: NodeFailure[] = [];
 
   for (const nodeId of graph.order) {
     const node = getNode(graph, nodeId);
+    const resumedState = initialState?.states.get(nodeId);
+    if (
+      resumedState === "succeeded" ||
+      resumedState === "failed" ||
+      resumedState === "blocked" ||
+      resumedState === "cancelled"
+    ) {
+      continue;
+    }
     const executor = registry.get(node.executor);
     if (executor === undefined) {
       preflightFailures.push({
@@ -299,19 +459,14 @@ async function executeCreatedRun(
     return { status: "failed", failures: preflightFailures };
   }
 
-  const states = new Map<string, NodeState>();
-  const attempts = new Map<string, number>();
-  const outputs = new Map<string, unknown>();
-  const originatingFailures = new Map<string, NodeFailure>();
+  const execution = initialState ?? createInitialExecutionState(graph);
+  const { states, attempts, outputs, originatingFailures, retryDelays } =
+    execution;
   const inFlight = new Map<string, Promise<SchedulerEvent>>();
   let cancellationObserved = false;
-  let cancellationAccepted = false;
+  let cancellationAccepted = execution.hasCancelledNodes;
   let cancellationReason: JsonValue = null;
-
-  for (const nodeId of graph.order) {
-    states.set(nodeId, "pending");
-    attempts.set(nodeId, 0);
-  }
+  let revision = initialRevision;
 
   async function applyEvents(events: readonly RunEvent[]): Promise<void> {
     if (events.length === 0) {
@@ -328,7 +483,16 @@ async function executeCreatedRun(
       stagedStates.set(event.nodeId, reduceNodeState(previous, event));
     }
 
-    await store.appendEvents(runId, events);
+    const persisted = await store.appendEvents(runId, events, revision);
+    if (persisted.length !== events.length) {
+      throw new Error("store persisted a different number of events");
+    }
+    for (let index = 0; index < persisted.length; index += 1) {
+      if (persisted[index]?.seq !== revision + index) {
+        throw new Error("store returned a non-gapless event sequence");
+      }
+    }
+    revision += persisted.length;
     for (const [nodeId, state] of stagedStates) {
       states.set(nodeId, state);
     }
@@ -376,6 +540,64 @@ async function executeCreatedRun(
       }
       await applyEvents(events);
     }
+  }
+
+  function startRetryTimer(nodeId: string, delayMs: number): void {
+    if (clock === undefined) {
+      throw new Error("clock is required when retryPolicy schedules a retry");
+    }
+    const controller = new AbortController();
+    cancellation.register(nodeId, controller);
+    inFlight.set(
+      nodeId,
+      waitForRetry(clock, delayMs, nodeId, controller.signal),
+    );
+  }
+
+  async function processNodeFailure(
+    nodeId: string,
+    failed: {
+      readonly cause: JsonValue;
+      readonly failureClass?: NodeFailure["failureClass"];
+    },
+  ): Promise<void> {
+    const failure: NodeFailure =
+      failed.failureClass === undefined
+        ? { nodeId, cause: failed.cause }
+        : { nodeId, cause: failed.cause, failureClass: failed.failureClass };
+    const attempt = attempts.get(nodeId);
+    if (attempt === undefined || attempt < 1) {
+      throw new Error(`node "${nodeId}" failed without a recorded attempt`);
+    }
+
+    if (
+      attempt < retryPolicy.maxAttempts &&
+      isRetryable(retryPolicy, resolveFailureClass(failure))
+    ) {
+      const delayMs = computeBackoffMs(retryPolicy, attempt);
+      // Validate the required adapter before persisting retry_wait, so an
+      // API configuration error does not strand a durable run in that state.
+      if (clock === undefined) {
+        throw new Error("clock is required when retryPolicy schedules a retry");
+      }
+      await applyEvents([
+        {
+          kind: "node_retry_wait",
+          nodeId,
+          attempt,
+          delayMs,
+          failure,
+        },
+      ]);
+      retryDelays.set(nodeId, delayMs);
+      startRetryTimer(nodeId, delayMs);
+      return;
+    }
+
+    await applyEvents([{ kind: "node_failed", nodeId, failure }]);
+    retryDelays.delete(nodeId);
+    originatingFailures.set(nodeId, failure);
+    await propagateBlockedNodes();
   }
 
   async function dispatchReadyNodes(): Promise<void> {
@@ -466,13 +688,33 @@ async function executeCreatedRun(
     return true;
   }
 
-  const rootEvents: RunEvent[] = [];
-  for (const nodeId of graph.order) {
-    if (getNode(graph, nodeId).dependsOn.length === 0) {
-      rootEvents.push({ kind: "node_ready", nodeId });
+  if (initialState !== undefined) {
+    for (const nodeId of graph.order) {
+      const state = states.get(nodeId);
+      if (state === "running" || state === "cancelling") {
+        await processNodeFailure(nodeId, {
+          cause: { code: "INTERRUPTED" },
+          failureClass: "transient_infra",
+        });
+      }
+    }
+
+    for (const nodeId of graph.order) {
+      if (states.get(nodeId) !== "retry_wait") {
+        continue;
+      }
+      const delayMs = retryDelays.get(nodeId);
+      if (delayMs === undefined) {
+        throw new Error(
+          `node "${nodeId}" is retry_wait without a stored retry delay`,
+        );
+      }
+      startRetryTimer(nodeId, delayMs);
     }
   }
-  await applyEvents(rootEvents);
+
+  await propagateBlockedNodes();
+  await promoteReadyNodes();
 
   while (true) {
     if (!cancellation.isRequested()) {
@@ -539,6 +781,7 @@ async function executeCreatedRun(
       await applyEvents([
         { kind: "node_ready", nodeId: schedulerEvent.nodeId },
       ]);
+      retryDelays.delete(schedulerEvent.nodeId);
       continue;
     }
 
@@ -574,67 +817,7 @@ async function executeCreatedRun(
       }
 
       case "failed": {
-        const failure: NodeFailure =
-          schedulerEvent.outcome.failureClass === undefined
-            ? {
-                nodeId: schedulerEvent.nodeId,
-                cause: schedulerEvent.outcome.cause,
-              }
-            : {
-                nodeId: schedulerEvent.nodeId,
-                cause: schedulerEvent.outcome.cause,
-                failureClass: schedulerEvent.outcome.failureClass,
-              };
-        const attempt = attempts.get(schedulerEvent.nodeId);
-        if (attempt === undefined || attempt < 1) {
-          throw new Error(
-            `node "${schedulerEvent.nodeId}" failed without a recorded attempt`,
-          );
-        }
-
-        if (
-          attempt < retryPolicy.maxAttempts &&
-          isRetryable(retryPolicy, resolveFailureClass(failure))
-        ) {
-          if (clock === undefined) {
-            throw new Error(
-              "clock is required when retryPolicy schedules a retry",
-            );
-          }
-          const delayMs = computeBackoffMs(retryPolicy, attempt);
-          await applyEvents([
-            {
-              kind: "node_retry_wait",
-              nodeId: schedulerEvent.nodeId,
-              attempt,
-              delayMs,
-              failure,
-            },
-          ]);
-
-          const controller = new AbortController();
-          cancellation.register(schedulerEvent.nodeId, controller);
-          inFlight.set(
-            schedulerEvent.nodeId,
-            waitForRetry(
-              clock,
-              delayMs,
-              schedulerEvent.nodeId,
-              controller.signal,
-            ),
-          );
-          break;
-        }
-
-        await applyEvents([
-          {
-            kind: "node_failed",
-            nodeId: schedulerEvent.nodeId,
-            failure,
-          },
-        ]);
-        originatingFailures.set(schedulerEvent.nodeId, failure);
-        await propagateBlockedNodes();
+        await processNodeFailure(schedulerEvent.nodeId, schedulerEvent.outcome);
         break;
       }
 
@@ -769,6 +952,40 @@ export function createEngine(options: EngineOptions): Engine {
   const { store, registry, clock } = options;
   let nextRunNumber = 1;
 
+  function createHandle(
+    runId: string,
+    ready: Promise<void>,
+    result: Promise<RunOutcome>,
+    cancellation: CancellationControl,
+  ): RunHandle {
+    // `ready` also gates event-only consumers; observe its rejection when
+    // callers intentionally await only result.
+    void ready.catch(() => undefined);
+    // Keep engine bugs observable through `result` without producing an
+    // unhandled rejection when a caller intentionally consumes only events.
+    void result.catch(() => undefined);
+    void result.then(
+      () => {
+        cancellation.markTerminal();
+      },
+      () => {
+        cancellation.markTerminal();
+      },
+    );
+    const cancellationFinished = result.then(() => undefined);
+    void cancellationFinished.catch(() => undefined);
+
+    return Object.freeze({
+      id: runId,
+      events: createEventIterable(store, runId, ready),
+      result,
+      cancel: (reason?: JsonValue): Promise<void> => {
+        cancellation.request(reason ?? null);
+        return cancellationFinished;
+      },
+    });
+  }
+
   return Object.freeze({
     run(graph: CompiledGraph, runOptions?: RunOptions): RunHandle {
       const runId = runOptions?.runId ?? `run-${String(nextRunNumber++)}`;
@@ -779,7 +996,7 @@ export function createEngine(options: EngineOptions): Engine {
       const result = (async (): Promise<RunOutcome> => {
         await creation;
         try {
-          return await executeCreatedRun(
+          return await executeRun(
             graph,
             runId,
             store,
@@ -794,30 +1011,44 @@ export function createEngine(options: EngineOptions): Engine {
           await store.finishRun(runId);
         }
       })();
+      return createHandle(runId, creation, result, cancellation);
+    },
 
-      // Keep engine bugs observable through `result` without producing an
-      // unhandled rejection when a caller intentionally consumes only events.
-      void result.catch(() => undefined);
-      void result.then(
-        () => {
-          cancellation.markTerminal();
-        },
-        () => {
-          cancellation.markTerminal();
-        },
-      );
-      const cancellationFinished = result.then(() => undefined);
-      void cancellationFinished.catch(() => undefined);
-
-      return Object.freeze({
-        id: runId,
-        events: createEventIterable(store, runId, creation),
-        result,
-        cancel: (reason?: JsonValue): Promise<void> => {
-          cancellation.request(reason ?? null);
-          return cancellationFinished;
-        },
+    resume(runId: string): RunHandle {
+      const cancellation = createCancellationControl();
+      const loading = Promise.resolve().then(async () => {
+        const stored = await store.getRun(runId);
+        if (stored === undefined) {
+          throw new Error(`unknown run: "${runId}"`);
+        }
+        return stored;
       });
+      const ready = loading.then(() => undefined);
+      const result = (async (): Promise<RunOutcome> => {
+        const stored = await loading;
+        const events = await readEventSnapshot(store, runId, stored.revision);
+        const execution = replayExecutionState(stored.graph, events);
+        if (stored.finished) {
+          return outcomeFromExecutionState(stored.graph, execution);
+        }
+
+        const outcome = await executeRun(
+          stored.graph,
+          runId,
+          store,
+          registry,
+          maxConcurrency,
+          cancelGracePeriodMs,
+          cancellation,
+          retryPolicy,
+          clock,
+          execution,
+          stored.revision,
+        );
+        await store.finishRun(runId);
+        return outcome;
+      })();
+      return createHandle(runId, ready, result, cancellation);
     },
   });
 }

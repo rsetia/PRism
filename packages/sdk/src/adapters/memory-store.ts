@@ -127,6 +127,7 @@ export function createMemoryStore(): RunStore {
   function appendEvents(
     runId: string,
     events: readonly RunEvent[],
+    expectedRevision?: number,
   ): Promise<readonly PersistedRunEvent[]> {
     const run = runs.get(runId);
     if (run === undefined) {
@@ -134,6 +135,16 @@ export function createMemoryStore(): RunStore {
     }
     if (run.finished) {
       return Promise.reject(new Error(`run is already finished: "${runId}"`));
+    }
+    if (
+      expectedRevision !== undefined &&
+      expectedRevision !== run.events.length
+    ) {
+      return Promise.reject(
+        new Error(
+          `run revision conflict: expected ${String(expectedRevision)}, actual ${String(run.events.length)}`,
+        ),
+      );
     }
 
     const firstSequence = run.events.length;
@@ -194,6 +205,7 @@ export function createMemoryStore(): RunStore {
         runId: run.runId,
         graph: run.graph,
         finished: run.finished,
+        revision: run.events.length,
       }),
     );
   }

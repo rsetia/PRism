@@ -32,9 +32,16 @@ export class IllegalTransitionError extends Error {
  *   ready    + node_started   -> running
  *   running  + node_succeeded -> succeeded
  *   running  + node_failed    -> failed
+ *   running  + node_retry_wait -> retry_wait
+ *   running  + node_cancelling -> cancelling
+ *   cancelling + node_cancelled -> cancelled
+ *   cancelling + node_failed | node_retry_wait -> failed | retry_wait
+ *     (resume recovery after an interrupted executor)
+ *   retry_wait + node_ready | node_cancelled -> ready | cancelled
+ *   pending | ready + node_cancelled -> cancelled
  *
  * Implementation notes: switch on event.kind with a `never` default arm,
- * so adding a sixth kind refuses to compile until it's handled here.
+ * so adding an event kind refuses to compile until it's handled here.
  */
 export function reduceNodeState(
   previous: NodeState,
@@ -60,7 +67,7 @@ export function reduceNodeState(
       break;
 
     case "node_failed":
-      if (previous === "running") {
+      if (previous === "running" || previous === "cancelling") {
         return "failed";
       }
       break;
@@ -78,7 +85,7 @@ export function reduceNodeState(
       break;
 
     case "node_retry_wait":
-      if (previous === "running") {
+      if (previous === "running" || previous === "cancelling") {
         return "retry_wait";
       }
       break;

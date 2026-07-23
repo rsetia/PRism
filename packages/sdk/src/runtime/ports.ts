@@ -88,6 +88,8 @@ export interface StoredRun {
   readonly runId: string;
   readonly graph: CompiledGraph;
   readonly finished: boolean;
+  /** Next event sequence; an optimistic revision for resume appends. */
+  readonly revision: number;
 }
 
 /**
@@ -95,21 +97,27 @@ export interface StoredRun {
  * - createRun rejects a duplicate runId.
  * - appendEvents assigns `seq` — monotonic per run, gapless, from 0 —
  *   atomically for the whole batch, and returns the persisted events.
- *   Rejects for an unknown or finished run.
+ *   When expectedRevision is supplied, it rejects unless that is the
+ *   run's next sequence. Rejects for an unknown or finished run.
  * - readEvents is a cursor over the persisted log starting at `fromSeq`
  *   (default 0): each call is an independent iterator that yields
  *   existing events, waits for new ones, and completes once the run is
  *   finished and the log is drained. Unknown runId rejects on iteration.
  * - Appending never waits on consumers — the engine only notifies.
  * - finishRun is idempotent.
+ * - close releases any underlying resource (a database handle). Optional:
+ *   a purely in-memory store needs nothing to release. After close, the
+ *   store must not be used again.
  */
 export interface RunStore {
   createRun(input: CreateRunInput): Promise<void>;
   appendEvents(
     runId: string,
     events: readonly RunEvent[],
+    expectedRevision?: number,
   ): Promise<readonly PersistedRunEvent[]>;
   readEvents(runId: string, fromSeq?: number): AsyncIterable<PersistedRunEvent>;
   getRun(runId: string): Promise<StoredRun | undefined>;
   finishRun(runId: string): Promise<void>;
+  close?(): Promise<void>;
 }

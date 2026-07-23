@@ -4,10 +4,10 @@ import type { NodeState, RunEvent } from "../src/index.js";
 
 /**
  * The exhaustive table: every state × every event kind, generated so no
- * combination can be forgotten. 12 legal transitions; the other 60 must
+ * combination can be forgotten. 14 legal transitions; the other 58 must
  * throw — including everything aimed at a terminal state (absorbing).
  * This is the 100%-branch-coverage file (plan §3; cancellation rows §10,
- * retry rows §11).
+ * retry rows §11, interrupted recovery rows §12).
  */
 
 const STATES: readonly NodeState[] = [
@@ -45,11 +45,13 @@ const LEGAL = new Map<string, NodeState>([
   ["ready+node_started", "running"],
   ["running+node_succeeded", "succeeded"],
   ["running+node_failed", "failed"],
+  ["cancelling+node_failed", "failed"],
   ["pending+node_cancelled", "cancelled"],
   ["ready+node_cancelled", "cancelled"],
   ["running+node_cancelling", "cancelling"],
   ["cancelling+node_cancelled", "cancelled"],
   ["running+node_retry_wait", "retry_wait"],
+  ["cancelling+node_retry_wait", "retry_wait"],
   ["retry_wait+node_ready", "ready"],
   ["retry_wait+node_cancelled", "cancelled"],
 ]);
