@@ -50,8 +50,18 @@ export interface LivenessOptions {
   readonly now: number;
 }
 
+export interface LaunchOptions {
+  /**
+   * Working directory for the worker (a provisioned worktree, §14 slice
+   * 2). When set, the worker runs here and its protocol files are created
+   * inside it; when absent, the worker runs in its own node dir under the
+   * backend's baseDir.
+   */
+  readonly cwd?: string;
+}
+
 export interface ExecutionBackend {
-  launch(spec: WorkerSpec): Promise<WorkerHandle>;
+  launch(spec: WorkerSpec, options?: LaunchOptions): Promise<WorkerHandle>;
   poll(handle: WorkerHandle): Promise<WorkerStatus>;
   checkLiveness(
     handle: WorkerHandle,
@@ -189,11 +199,15 @@ export function createLocalExecutionBackend(
   }
 
   return {
-    async launch(spec): Promise<WorkerHandle> {
-      await mkdir(baseDir, { recursive: true });
+    async launch(spec, launchOptions): Promise<WorkerHandle> {
+      // With a workspace, the worker runs there and its protocol files
+      // live inside it; without one, it runs in its own node dir.
+      const workspaceDir = launchOptions?.cwd;
+      const nodeDirParent = workspaceDir ?? baseDir;
+      await mkdir(nodeDirParent, { recursive: true });
       const nodeDir = await mkdtemp(
         join(
-          baseDir,
+          nodeDirParent,
           `worker-${safePathPart(spec.runId)}-${safePathPart(spec.nodeId)}-a${String(spec.attempt)}-`,
         ),
       );
@@ -205,7 +219,7 @@ export function createLocalExecutionBackend(
       await writeFile(join(nodeDir, WORKER_SPEC_FILE), serialized, "utf8");
 
       const child = spawn(options.command, args, {
-        cwd: nodeDir,
+        cwd: workspaceDir ?? nodeDir,
         env: { ...process.env, [NODE_DIR_ENV_VAR]: nodeDir },
         stdio: "ignore",
       });

@@ -234,10 +234,12 @@ function createEventIterable(
 }
 
 async function invokeExecutor(
+  runId: string,
   node: CompiledNode,
   executor: ExecutorDefinition,
   outputs: ReadonlyMap<string, unknown>,
   signal: AbortSignal,
+  attempt: number,
 ): Promise<SchedulerEvent> {
   const inputs = Object.freeze(
     node.dependsOn.map((dependencyId) => {
@@ -251,10 +253,12 @@ async function invokeExecutor(
   );
   const context: ExecutionContext = Object.freeze(
     node.config === undefined
-      ? { nodeId: node.id, kind: node.kind, inputs, signal }
+      ? { runId, nodeId: node.id, kind: node.kind, attempt, inputs, signal }
       : {
+          runId,
           nodeId: node.id,
           kind: node.kind,
+          attempt,
           inputs,
           config: node.config,
           signal,
@@ -627,7 +631,8 @@ async function executeRun(
       }
 
       await applyEvents([{ kind: "node_started", nodeId }]);
-      attempts.set(nodeId, (attempts.get(nodeId) ?? 0) + 1);
+      const attempt = (attempts.get(nodeId) ?? 0) + 1;
+      attempts.set(nodeId, attempt);
       if (cancellation.isRequested()) {
         return;
       }
@@ -640,10 +645,12 @@ async function executeRun(
       inFlight.set(
         nodeId,
         invokeExecutor(
+          runId,
           getNode(graph, nodeId),
           executor,
           outputs,
           controller.signal,
+          attempt,
         ),
       );
     }

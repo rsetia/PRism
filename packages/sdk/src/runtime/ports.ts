@@ -25,9 +25,13 @@ export type NodeExecutionOutcome =
 
 /** Everything a node execution gets to see. */
 export interface ExecutionContext {
+  /** The run this execution belongs to. */
+  readonly runId: string;
   readonly nodeId: string;
   /** The node's category, so an executor can adapt to task vs merge. */
   readonly kind: NodeKind;
+  /** 1-based attempt number, incremented on each retry of this node. */
+  readonly attempt: number;
   /** Upstream outputs, in the node's dependsOn order. */
   readonly inputs: readonly unknown[];
   /** The node's opaque config, if any. Executors narrow it themselves. */

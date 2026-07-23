@@ -13,6 +13,7 @@ export {
 } from "./worker-protocol.js";
 export type {
   ExecutionBackend,
+  LaunchOptions,
   Liveness,
   LivenessOptions,
   LocalExecutionBackendOptions,
@@ -20,3 +21,12 @@ export type {
   WorkerStatus,
 } from "./execution-backend.js";
 export { createLocalExecutionBackend } from "./execution-backend.js";
+export type {
+  GitWorktreeProvisionerOptions,
+  ProvisionInput,
+  WorkspaceHandle,
+  WorkspaceProvisioner,
+} from "./workspace-provisioner.js";
+export { createGitWorktreeProvisioner } from "./workspace-provisioner.js";
+export type { SubprocessExecutorOptions } from "./subprocess-executor.js";
+export { createSubprocessExecutor } from "./subprocess-executor.js";
