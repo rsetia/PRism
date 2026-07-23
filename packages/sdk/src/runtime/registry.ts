@@ -23,6 +23,9 @@ export function createExecutorRegistry(
     const snapshot: ExecutorDefinition = Object.freeze({
       name: executor.name,
       execute: executor.execute,
+      ...(executor.validateConfig === undefined
+        ? {}
+        : { validateConfig: executor.validateConfig }),
     });
     byName.set(snapshot.name, snapshot);
     names.push(snapshot.name);

@@ -2,6 +2,14 @@
  * Graph data model. Pure types — no logic, no Node.js imports.
  */
 
+/**
+ * A node's category (plan §13, from PRism-py). It selects how upstream
+ * outputs are shaped into the node's input — `task` nodes consume text,
+ * `merge` nodes consume ordered upstream artifacts. The union is
+ * extensible; unspecified defaults to `task`.
+ */
+export type NodeKind = "task" | "merge";
+
 /** `config` is opaque JSON: the SDK never interprets it. */
 export type JsonValue =
   | null
@@ -19,6 +27,8 @@ export type JsonValue =
 export interface NodeDefinition {
   readonly executor: string;
   readonly dependsOn: readonly string[];
+  /** Defaults to "task" when the source omits it. */
+  readonly kind?: NodeKind;
   readonly config?: JsonValue;
 }
 
@@ -37,6 +47,8 @@ export interface GraphDefinition {
 export interface CompiledNode {
   readonly id: string;
   readonly executor: string;
+  /** Resolved to a concrete kind — "task" when the source omitted it. */
+  readonly kind: NodeKind;
   readonly dependsOn: readonly string[];
   /** Reverse edges, precomputed so the engine can promote dependents. */
   readonly dependents: readonly string[];

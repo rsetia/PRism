@@ -21,6 +21,11 @@ export type GraphParseError =
       readonly nodeId: string;
       readonly dependencyId: string;
     }
+  | {
+      readonly code: "INVALID_KIND";
+      readonly nodeId: string;
+      readonly found: unknown;
+    }
   | { readonly code: "INVALID_FINAL_NODE" };
 
 /** Cross-node invariant violations found by compileGraph. */

@@ -12,6 +12,7 @@ export type {
   GraphDefinition,
   JsonValue,
   NodeDefinition,
+  NodeKind,
 } from "./graph/types.js";
 export type { GraphCompileError, GraphParseError } from "./graph/errors.js";
 export {

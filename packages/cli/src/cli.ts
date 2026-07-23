@@ -7,6 +7,8 @@
  * stderr. Exit codes are the interface for shell scripts.
  */
 import { readFile } from "node:fs/promises";
+import { extname } from "node:path";
+import { parse as parseYaml } from "yaml";
 import {
   builtinExecutors,
   compileGraph,
@@ -124,6 +126,7 @@ function printJsonGraph(graph: CompiledGraph, io: CliIo): void {
     string,
     {
       readonly executor: string;
+      readonly kind: CompiledGraph["nodes"][string]["kind"];
       readonly dependsOn: readonly string[];
       readonly dependents: readonly string[];
     }
@@ -131,6 +134,7 @@ function printJsonGraph(graph: CompiledGraph, io: CliIo): void {
     string,
     {
       readonly executor: string;
+      readonly kind: CompiledGraph["nodes"][string]["kind"];
       readonly dependsOn: readonly string[];
       readonly dependents: readonly string[];
     }
@@ -140,6 +144,7 @@ function printJsonGraph(graph: CompiledGraph, io: CliIo): void {
     const node = getCompiledNode(graph, nodeId);
     nodes[nodeId] = {
       executor: node.executor,
+      kind: node.kind,
       dependsOn: node.dependsOn,
       dependents: node.dependents,
     };
@@ -176,10 +181,14 @@ async function loadGraph(
   }
 
   let input: unknown;
+  const extension = extname(file).toLowerCase();
+  const format =
+    extension === ".yaml" || extension === ".yml" ? "YAML" : "JSON";
   try {
-    input = JSON.parse(source) as unknown;
+    input =
+      format === "YAML" ? parseYaml(source) : (JSON.parse(source) as unknown);
   } catch (error: unknown) {
-    io.stderr(`invalid JSON in "${file}": ${describeError(error)}`);
+    io.stderr(`invalid ${format} in "${file}": ${describeError(error)}`);
     return undefined;
   }
 

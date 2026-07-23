@@ -237,6 +237,7 @@ export function compileGraph(graph: GraphDefinition): CompileResult {
     const compiledNode = {
       id: nodeId,
       executor: node.executor,
+      kind: node.kind ?? "task",
       dependsOn: [...node.dependsOn],
       dependents: [...(dependentsByNodeId.get(nodeId) ?? [])],
     };

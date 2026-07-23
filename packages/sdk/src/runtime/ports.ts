@@ -1,4 +1,4 @@
-import type { CompiledGraph, JsonValue } from "../graph/types.js";
+import type { CompiledGraph, JsonValue, NodeKind } from "../graph/types.js";
 import type { PersistedRunEvent, RunEvent } from "./events.js";
 import type { FailureClass } from "./types.js";
 
@@ -26,6 +26,8 @@ export type NodeExecutionOutcome =
 /** Everything a node execution gets to see. */
 export interface ExecutionContext {
   readonly nodeId: string;
+  /** The node's category, so an executor can adapt to task vs merge. */
+  readonly kind: NodeKind;
   /** Upstream outputs, in the node's dependsOn order. */
   readonly inputs: readonly unknown[];
   /** The node's opaque config, if any. Executors narrow it themselves. */
@@ -49,6 +51,14 @@ export interface ExecutorDefinition {
   readonly execute: (
     context: ExecutionContext,
   ) => NodeExecutionOutcome | Promise<NodeExecutionOutcome>;
+  /**
+   * Optional config check run at preflight, before any node starts
+   * (plan §13, PRism-py's validate_config). Throw an Error describing the
+   * problem to reject the whole run as misconfigured — a config mistake
+   * is a bad graph, not a node failure, so it never starts a run. Absent
+   * means "any config accepted". Pure: no I/O, no side effects.
+   */
+  readonly validateConfig?: (config: JsonValue | undefined) => void;
 }
 
 /**

@@ -111,11 +111,15 @@ describe("agent-graph CLI", () => {
       version: number;
       order: string[];
       finalNode: string;
-      nodes: Record<string, { executor: string; dependsOn: string[] }>;
+      nodes: Record<
+        string,
+        { executor: string; kind: string; dependsOn: string[] }
+      >;
     };
     expect(plan.version).toBe(1);
     expect(plan.order).toEqual(["first", "second"]);
     expect(plan.finalNode).toBe("second");
+    expect(plan.nodes["second"]?.kind).toBe("task");
     expect(plan.nodes["second"]?.dependsOn).toEqual(["first"]);
   });
 
@@ -156,5 +160,25 @@ describe("agent-graph CLI", () => {
     const result = await cli("run", fixture("invalid.json"));
     expect(result.code).toBe(2);
     expect(result.stdout).toBe("");
+  });
+
+  test("run: a YAML graph runs like its JSON equivalent", async () => {
+    const result = await cli("run", fixture("valid.yaml"), "--json");
+    expect(result.code).toBe(0);
+    expect(JSON.parse(result.stdout)).toEqual({
+      version: 1,
+      status: "succeeded",
+      output: "hello",
+    });
+  });
+
+  test("graph: a YAML graph compiles to the same plan", async () => {
+    const result = await cli("graph", fixture("valid.yaml"));
+    expect(result.code).toBe(0);
+    expect(result.stdout).toBe(
+      ["first (constant)", "second (passthrough) <- first", "final: second"]
+        .map((line) => `${line}\n`)
+        .join(""),
+    );
   });
 });

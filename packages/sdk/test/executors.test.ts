@@ -5,6 +5,7 @@ import type { ExecutionContext, NodeExecutionOutcome } from "../src/index.js";
 function ctx(partial?: Partial<ExecutionContext>): ExecutionContext {
   return {
     nodeId: "n",
+    kind: "task",
     inputs: [],
     signal: new AbortController().signal,
     ...partial,

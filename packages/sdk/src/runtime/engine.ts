@@ -251,9 +251,10 @@ async function invokeExecutor(
   );
   const context: ExecutionContext = Object.freeze(
     node.config === undefined
-      ? { nodeId: node.id, inputs, signal }
+      ? { nodeId: node.id, kind: node.kind, inputs, signal }
       : {
           nodeId: node.id,
+          kind: node.kind,
           inputs,
           config: node.config,
           signal,
@@ -451,7 +452,20 @@ async function executeRun(
         cause: { code: "UNKNOWN_EXECUTOR", executor: node.executor },
       });
     } else {
-      executors.set(nodeId, executor);
+      try {
+        executor.validateConfig?.(node.config);
+        executors.set(nodeId, executor);
+      } catch (error: unknown) {
+        preflightFailures.push({
+          nodeId,
+          cause: {
+            code: "INVALID_CONFIG",
+            executor: node.executor,
+            message: error instanceof Error ? error.message : String(error),
+          },
+          failureClass: "validation_failed",
+        });
+      }
     }
   }
 

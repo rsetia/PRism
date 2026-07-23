@@ -14,6 +14,7 @@
     "dist"
   ],
   "dependencies": {
-    "@rsetia/agent-graph": "0.1.0-alpha.0"
+    "@rsetia/agent-graph": "0.1.0-alpha.0",
+    "yaml": "^2.6.0"
   }
 }

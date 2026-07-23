@@ -1,0 +1,8 @@
+{
+  "version": 1,
+  "nodes": {
+    "a": { "executor": "constant", "config": { "value": "hi" } },
+    "b": { "executor": "join", "kind": "merge", "dependsOn": ["a"] }
+  },
+  "finalNode": "b"
+}

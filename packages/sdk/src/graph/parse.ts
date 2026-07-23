@@ -1,5 +1,10 @@
 import type { GraphParseError } from "./errors.js";
-import type { GraphDefinition, JsonValue, NodeDefinition } from "./types.js";
+import type {
+  GraphDefinition,
+  JsonValue,
+  NodeDefinition,
+  NodeKind,
+} from "./types.js";
 import { isJsonValue, isPlainObject } from "../internal/json.js";
 
 export type ParseResult =
@@ -7,7 +12,7 @@ export type ParseResult =
   | { readonly ok: false; readonly errors: readonly GraphParseError[] };
 
 const ROOT_PROPERTIES = new Set(["version", "nodes", "finalNode"]);
-const NODE_PROPERTIES = new Set(["executor", "dependsOn", "config"]);
+const NODE_PROPERTIES = new Set(["executor", "dependsOn", "kind", "config"]);
 
 /**
  * The trust boundary: unknown in, typed graph (or structured errors) out.
@@ -19,6 +24,7 @@ const NODE_PROPERTIES = new Set(["executor", "dependsOn", "config"]);
  * - nodes must be a non-empty object                     -> EMPTY_GRAPH
  * - node IDs are non-empty strings                       -> INVALID_NODE_ID
  * - executor: non-empty string; dependsOn: string array  -> INVALID_NODE
+ * - kind, when present, is "task" or "merge"            -> INVALID_KIND
  * - duplicate dependsOn entries rejected                 -> DUPLICATE_DEPENDENCY
  * - finalNode, when present, is a non-empty string       -> INVALID_FINAL_NODE
  * - omitted dependsOn normalizes to []
@@ -140,10 +146,20 @@ export function parseGraph(input: unknown): ParseResult {
         });
       }
 
-      if (executorIsValid && dependsOnIsValid && configIsValid) {
-        parsedNodes[nodeId] = hasConfig
-          ? { executor, dependsOn, config: config as JsonValue }
-          : { executor, dependsOn };
+      const hasKind = Object.hasOwn(candidate, "kind");
+      const kind = candidate["kind"];
+      const kindIsValid = !hasKind || kind === "task" || kind === "merge";
+      if (!kindIsValid) {
+        errors.push({ code: "INVALID_KIND", nodeId, found: kind });
+      }
+
+      if (executorIsValid && dependsOnIsValid && configIsValid && kindIsValid) {
+        parsedNodes[nodeId] = {
+          executor,
+          dependsOn,
+          ...(hasKind ? { kind: kind as NodeKind } : {}),
+          ...(hasConfig ? { config: config as JsonValue } : {}),
+        };
       }
     }
   }

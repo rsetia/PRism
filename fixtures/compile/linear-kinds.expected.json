@@ -1,0 +1,19 @@
+{
+  "ok": true,
+  "order": ["a", "b"],
+  "finalNode": "b",
+  "nodes": {
+    "a": {
+      "executor": "constant",
+      "kind": "task",
+      "dependsOn": [],
+      "dependents": ["b"]
+    },
+    "b": {
+      "executor": "join",
+      "kind": "merge",
+      "dependsOn": ["a"],
+      "dependents": []
+    }
+  }
+}

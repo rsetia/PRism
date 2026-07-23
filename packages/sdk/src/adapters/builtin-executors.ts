@@ -15,6 +15,11 @@ function freezeExecutor(executor: ExecutorDefinition): ExecutorDefinition {
 
 const constant = freezeExecutor({
   name: "constant",
+  validateConfig(config) {
+    if (!isPlainObject(config) || !Object.hasOwn(config, "value")) {
+      throw new Error("constant requires config.value");
+    }
+  },
   execute(context) {
     if (
       !isPlainObject(context.config) ||
@@ -29,6 +34,11 @@ const constant = freezeExecutor({
 
 const passthrough = freezeExecutor({
   name: "passthrough",
+  validateConfig(config) {
+    if (config !== undefined) {
+      throw new Error("passthrough does not accept config");
+    }
+  },
   execute(context) {
     if (context.inputs.length !== 1) {
       return failed("INVALID_PASSTHROUGH_INPUTS");
@@ -40,6 +50,18 @@ const passthrough = freezeExecutor({
 
 const concat = freezeExecutor({
   name: "concat",
+  validateConfig(config) {
+    if (config === undefined) {
+      return;
+    }
+    if (
+      !isPlainObject(config) ||
+      (Object.hasOwn(config, "separator") &&
+        typeof config["separator"] !== "string")
+    ) {
+      throw new Error("concat config.separator must be a string");
+    }
+  },
   execute(context) {
     const inputs: string[] = [];
     for (const input of context.inputs) {
@@ -70,6 +92,7 @@ const concat = freezeExecutor({
 
 const fail = freezeExecutor({
   name: "fail",
+  validateConfig() {},
   execute(context) {
     return {
       status: "failed",
