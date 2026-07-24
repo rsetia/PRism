@@ -15,6 +15,8 @@ export type {
   NodeKind,
 } from "./graph/types.js";
 export type { GraphCompileError, GraphParseError } from "./graph/errors.js";
+export { buildBeadsGraph, parseBeadsJsonl } from "./beads/generate.js";
+export type { Bead, BeadsGraphOptions, ReviewGate } from "./beads/generate.js";
 export {
   IllegalTransitionError,
   reduceNodeState,
