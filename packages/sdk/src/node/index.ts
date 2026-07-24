@@ -68,3 +68,21 @@ export {
   parseImplementConfig,
   parseMergeResolveConfig,
 } from "./codex-contracts.js";
+export type {
+  CommandResult,
+  CommandRunner,
+  RunCommandOptions,
+} from "./command-runner.js";
+export { createExecFileRunner } from "./command-runner.js";
+export type {
+  BeadsUpdateConfig,
+  BeadsUpdateExecutorOptions,
+  MergePrConfig,
+  MergePrExecutorOptions,
+} from "./cli-builtins.js";
+export {
+  createBeadsUpdateExecutor,
+  createMergePrExecutor,
+  parseBeadsUpdateConfig,
+  parseMergePrConfig,
+} from "./cli-builtins.js";
