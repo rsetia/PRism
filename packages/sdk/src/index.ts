@@ -39,6 +39,8 @@ export {
 export type { RetryPolicy } from "./runtime/retry.js";
 export { createManualClock, createSystemClock } from "./adapters/clock.js";
 export type { ManualClock } from "./adapters/clock.js";
+export { inspectRun } from "./runtime/inspect.js";
+export type { NodeInspection, RunInspection } from "./runtime/inspect.js";
 export type { PersistedRunEvent, RunEvent } from "./runtime/events.js";
 export type {
   Clock,
