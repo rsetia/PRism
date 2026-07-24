@@ -37,7 +37,10 @@ function subprocessExecutor(
   return createSubprocessExecutor({
     name: "worker",
     backend,
-    idleTimeoutMs: 200,
+    // Process startup competes with the rest of Vitest's worker pool.
+    // Keep the ordinary success path tolerant of a delayed first CPU slice;
+    // the dedicated timeout test below uses the short liveness deadline.
+    idleTimeoutMs: 1_000,
     pollIntervalMs: 10,
     ...overrides,
   });
@@ -112,7 +115,8 @@ describe("createSubprocessExecutor", () => {
       nodes: { w: { executor: "worker", config: { mode: "stall" } } },
       finalNode: "w",
     });
-    const outcome = await run(graph, subprocessExecutor()).result;
+    const outcome = await run(graph, subprocessExecutor({ idleTimeoutMs: 200 }))
+      .result;
     expect(outcome.status).toBe("failed");
     if (outcome.status === "failed") {
       expect(outcome.failures[0]?.failureClass).toBe("timeout");

@@ -30,3 +30,28 @@ export type {
 export { createGitWorktreeProvisioner } from "./workspace-provisioner.js";
 export type { SubprocessExecutorOptions } from "./subprocess-executor.js";
 export { createSubprocessExecutor } from "./subprocess-executor.js";
+export type {
+  ArtifactLocator,
+  ArtifactRef,
+  ArtifactStore,
+  LocalArtifactStoreOptions,
+  PutArtifactInput,
+} from "./artifact-store.js";
+export { createLocalArtifactStore } from "./artifact-store.js";
+export type {
+  FileLogBackendOptions,
+  LogBackend,
+  LogTarget,
+  LogWriter,
+  ReadLogOptions,
+} from "./log-backend.js";
+export { createFileLogBackend } from "./log-backend.js";
+export type {
+  CodexEngine,
+  CodexEngineOptions,
+  CodexExecutionInput,
+  CodexExecutorContract,
+  CodexPromptInput,
+  CodexSandbox,
+} from "./codex-engine.js";
+export { buildCodexPrompt, createCodexEngine } from "./codex-engine.js";
