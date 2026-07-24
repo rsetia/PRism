@@ -55,3 +55,16 @@ export type {
   CodexSandbox,
 } from "./codex-engine.js";
 export { buildCodexPrompt, createCodexEngine } from "./codex-engine.js";
+export type {
+  ImplementConfig,
+  MergeResolveConfig,
+  ReviewConfig,
+  WorkItem,
+} from "./codex-contracts.js";
+export {
+  buildImplementContract,
+  buildMergeResolveContract,
+  codexContractForSpec,
+  parseImplementConfig,
+  parseMergeResolveConfig,
+} from "./codex-contracts.js";
