@@ -1,8 +1,10 @@
 import { execFile } from "node:child_process";
-import { existsSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { describe, expect, test } from "vitest";
+import { afterAll, describe, expect, test } from "vitest";
 
 /**
  * Integration tests spawn the BUILT executable — in-process calls prove
@@ -180,5 +182,175 @@ describe("agent-graph CLI", () => {
         .map((line) => `${line}\n`)
         .join(""),
     );
+  });
+});
+
+describe("agent-graph CLI: persisted runs", () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "agent-graph-cli-store-"));
+  afterAll(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  let counter = 0;
+  function db(): string {
+    counter += 1;
+    return join(tempDir, `runs-${String(counter)}.db`);
+  }
+
+  function runIdFrom(stderr: string): string {
+    const match = /^run (.+)$/mu.exec(stderr);
+    if (match?.[1] === undefined) {
+      throw new Error(`run id missing from stderr: ${stderr}`);
+    }
+    return match[1];
+  }
+
+  test("run --store persists, then inspect reports node states", async () => {
+    const store = db();
+    const ran = await cli(
+      "run",
+      fixture("valid.json"),
+      "--store",
+      store,
+      "--run-id",
+      "r1",
+    );
+    expect(ran.code).toBe(0);
+    expect(runIdFrom(ran.stderr)).toBe("r1");
+
+    const inspected = await cli("inspect", "r1", "--store", store);
+    expect(inspected.code).toBe(0);
+    expect(inspected.stdout).toContain("first: succeeded");
+    expect(inspected.stdout).toContain("second: succeeded");
+    expect(inspected.stdout).toContain("finished: true");
+  });
+
+  test("inspect --json is a versioned envelope", async () => {
+    const store = db();
+    await cli("run", fixture("valid.json"), "--store", store, "--run-id", "r2");
+    const inspected = await cli("inspect", "r2", "--store", store, "--json");
+    expect(inspected.code).toBe(0);
+    const parsed = JSON.parse(inspected.stdout) as {
+      version: number;
+      runId: string;
+      finished: boolean;
+      nodes: { nodeId: string; state: string }[];
+    };
+    expect(parsed.version).toBe(1);
+    expect(parsed.runId).toBe("r2");
+    expect(parsed.finished).toBe(true);
+    expect(parsed.nodes.map((n) => n.state)).toEqual([
+      "succeeded",
+      "succeeded",
+    ]);
+  });
+
+  test("events lists the persisted event log in order", async () => {
+    const store = db();
+    await cli("run", fixture("valid.json"), "--store", store, "--run-id", "r3");
+    const events = await cli("events", "r3", "--store", store);
+    expect(events.code).toBe(0);
+    const lines = events.stdout.trim().split("\n");
+    expect(lines[0]).toBe("0 node_ready first");
+    expect(events.stdout).toContain("node_succeeded second");
+  });
+
+  test("events --json preserves full ordered event payloads", async () => {
+    const store = db();
+    await cli("run", fixture("valid.json"), "--store", store, "--run-id", "r4");
+    const result = await cli("events", "r4", "--store", store, "--json");
+    expect(result.code).toBe(0);
+    const parsed = JSON.parse(result.stdout) as {
+      version: number;
+      runId: string;
+      events: {
+        seq: number;
+        kind: string;
+        nodeId: string;
+        output?: unknown;
+      }[];
+    };
+    expect(parsed.version).toBe(1);
+    expect(parsed.runId).toBe("r4");
+    expect(parsed.events.map((event) => event.seq)).toEqual(
+      parsed.events.map((_event, index) => index),
+    );
+    expect(parsed.events.at(-1)).toMatchObject({
+      kind: "node_succeeded",
+      nodeId: "second",
+      output: "hello",
+    });
+  });
+
+  test("inspect of an unknown run exits 2", async () => {
+    const inspected = await cli("inspect", "ghost", "--store", db());
+    expect(inspected.code).toBe(2);
+    expect(inspected.stdout).toBe("");
+  });
+
+  test("inspect without --store is a usage error", async () => {
+    const inspected = await cli("inspect", "r1");
+    expect(inspected.code).toBe(2);
+    expect(inspected.stderr).toContain("Usage:");
+  });
+
+  test("events of an unknown run exits 2", async () => {
+    const events = await cli("events", "ghost", "--store", db());
+    expect(events.code).toBe(2);
+    expect(events.stdout).toBe("");
+    expect(events.stderr).toContain("unknown run");
+  });
+
+  test("persistent runs without explicit ids receive unique durable ids", async () => {
+    const store = db();
+    const first = await cli("run", fixture("valid.json"), "--store", store);
+    const second = await cli("run", fixture("valid.json"), "--store", store);
+    expect(first.code).toBe(0);
+    expect(second.code).toBe(0);
+    const firstId = runIdFrom(first.stderr);
+    const secondId = runIdFrom(second.stderr);
+    expect(firstId).not.toBe(secondId);
+    expect(firstId).toMatch(/^run-/u);
+    expect((await cli("inspect", firstId, "--store", store)).code).toBe(0);
+    expect((await cli("inspect", secondId, "--store", store)).code).toBe(0);
+  });
+
+  test("a duplicate explicit run id is a usage error", async () => {
+    const store = db();
+    await cli(
+      "run",
+      fixture("valid.json"),
+      "--store",
+      store,
+      "--run-id",
+      "duplicate",
+    );
+    const duplicate = await cli(
+      "run",
+      fixture("valid.json"),
+      "--store",
+      store,
+      "--run-id",
+      "duplicate",
+    );
+    expect(duplicate.code).toBe(2);
+    expect(duplicate.stdout).toBe("");
+    expect(duplicate.stderr).toContain("run already exists");
+  });
+
+  test("a persisted failing run reports failed and blocked", async () => {
+    const store = db();
+    await cli(
+      "run",
+      fixture("failing.json"),
+      "--store",
+      store,
+      "--run-id",
+      "rf",
+    );
+    const inspected = await cli("inspect", "rf", "--store", store);
+    expect(inspected.code).toBe(0);
+    expect(inspected.stdout).toContain("doomed: failed");
+    expect(inspected.stdout).toContain('failure doomed: {"reason":"boom"}');
   });
 });

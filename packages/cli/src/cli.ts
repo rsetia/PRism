@@ -7,6 +7,7 @@
  * stderr. Exit codes are the interface for shell scripts.
  */
 import { readFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { extname } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
@@ -15,6 +16,8 @@ import {
   createEngine,
   createExecutorRegistry,
   createMemoryStore,
+  createSqliteStore,
+  inspectRun,
   parseGraph,
 } from "@rsetia/agent-graph";
 import type {
@@ -22,6 +25,9 @@ import type {
   GraphCompileError,
   GraphParseError,
   NodeFailure,
+  PersistedRunEvent,
+  RunOutcome,
+  RunStore,
 } from "@rsetia/agent-graph";
 
 /** stdout: data only. stderr: humans only. */
@@ -41,38 +47,133 @@ export const EXIT_INTERNAL = 3;
 export const USAGE = `Usage: agent-graph <command> [options]
 
 Commands:
-  validate <file>        Check a graph file; exit 0 if valid
-  graph <file> [--json]  Print the compiled plan
-  run <file> [--json]    Execute the graph with the built-in executors`;
+  validate <file>                     Check a graph file; exit 0 if valid
+  graph <file> [--json]               Print the compiled plan
+  run <file> [--json] [--store <db>] [--run-id <id>]
+                                      Execute the graph (persists with --store)
+  inspect <run-id> --store <db> [--json]
+                                      Show a persisted run's node states
+  events <run-id> --store <db> [--json]
+                                      Show a persisted run's event log`;
 
-type Command = "validate" | "graph" | "run";
-
-interface Invocation {
-  readonly command: Command;
+interface ValidateInvocation {
+  readonly command: "validate";
+  readonly file: string;
+}
+interface GraphInvocation {
+  readonly command: "graph";
   readonly file: string;
   readonly json: boolean;
 }
+interface RunInvocation {
+  readonly command: "run";
+  readonly file: string;
+  readonly json: boolean;
+  readonly store: string | undefined;
+  readonly runId: string | undefined;
+}
+interface ReadInvocation {
+  readonly command: "inspect" | "events";
+  readonly runId: string;
+  readonly json: boolean;
+  readonly store: string;
+}
+type Invocation =
+  ValidateInvocation | GraphInvocation | RunInvocation | ReadInvocation;
+
+interface ParsedFlags {
+  readonly positional: string | undefined;
+  readonly json: boolean;
+  readonly store: string | undefined;
+  readonly runId: string | undefined;
+}
+
+/** One positional plus --json / --store <v> / --run-id <v>; else undefined. */
+function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
+  let positional: string | undefined;
+  let json = false;
+  let store: string | undefined;
+  let runId: string | undefined;
+
+  for (let index = 0; index < rest.length; index += 1) {
+    const arg = rest[index];
+    if (arg === "--json") {
+      if (json) return undefined;
+      json = true;
+    } else if (arg === "--store" || arg === "--run-id") {
+      const value = rest[index + 1];
+      if (value === undefined || value.startsWith("--")) return undefined;
+      index += 1;
+      if (arg === "--store") {
+        if (store !== undefined) return undefined;
+        store = value;
+      } else {
+        if (runId !== undefined) return undefined;
+        runId = value;
+      }
+    } else if (arg?.startsWith("--") === true) {
+      return undefined;
+    } else if (arg !== undefined) {
+      if (positional !== undefined) return undefined;
+      positional = arg;
+    }
+  }
+
+  return { positional, json, store, runId };
+}
 
 function parseInvocation(argv: readonly string[]): Invocation | undefined {
-  const [command, file, ...rest] = argv;
-  if (command !== "validate" && command !== "graph" && command !== "run") {
-    return undefined;
-  }
-  if (file === undefined || file.startsWith("--")) {
-    return undefined;
-  }
+  const [command, ...rest] = argv;
+  const flags = parseFlags(rest);
+  if (flags === undefined) return undefined;
 
-  if (command === "validate") {
-    return rest.length === 0 ? { command, file, json: false } : undefined;
+  switch (command) {
+    case "validate":
+      if (
+        flags.positional === undefined ||
+        flags.json ||
+        flags.store !== undefined ||
+        flags.runId !== undefined
+      ) {
+        return undefined;
+      }
+      return { command, file: flags.positional };
+    case "graph":
+      if (
+        flags.positional === undefined ||
+        flags.store !== undefined ||
+        flags.runId !== undefined
+      ) {
+        return undefined;
+      }
+      return { command, file: flags.positional, json: flags.json };
+    case "run":
+      if (flags.positional === undefined) return undefined;
+      return {
+        command,
+        file: flags.positional,
+        json: flags.json,
+        store: flags.store,
+        runId: flags.runId,
+      };
+    case "inspect":
+    case "events":
+      if (
+        flags.positional === undefined ||
+        flags.store === undefined ||
+        flags.runId !== undefined
+      ) {
+        return undefined;
+      }
+      return {
+        command,
+        runId: flags.positional,
+        json: flags.json,
+        store: flags.store,
+      };
+    default:
+      return undefined;
   }
-
-  if (rest.length === 0) {
-    return { command, file, json: false };
-  }
-  if (rest.length === 1 && rest[0] === "--json") {
-    return { command, file, json: true };
-  }
-  return undefined;
 }
 
 function describeError(error: unknown): string {
@@ -208,14 +309,39 @@ async function loadGraph(
 
 async function runGraph(
   graph: CompiledGraph,
-  json: boolean,
+  invocation: RunInvocation,
   io: CliIo,
 ): Promise<number> {
-  const engine = createEngine({
-    store: createMemoryStore(),
-    registry: createExecutorRegistry(builtinExecutors),
-  });
-  const outcome = await engine.run(graph).result;
+  const json = invocation.json;
+  const store =
+    invocation.store === undefined
+      ? createMemoryStore()
+      : createSqliteStore({ path: invocation.store });
+  let outcome: RunOutcome;
+  try {
+    const engine = createEngine({
+      store,
+      registry: createExecutorRegistry(builtinExecutors),
+    });
+    const runId =
+      invocation.runId ??
+      (invocation.store === undefined ? undefined : `run-${randomUUID()}`);
+    const handle = engine.run(graph, runId === undefined ? {} : { runId });
+    // The run id is a human diagnostic (stderr) so `inspect`/`events` can
+    // target it; stdout stays pure data.
+    io.stderr(`run ${handle.id}`);
+    try {
+      outcome = await handle.result;
+    } catch (error: unknown) {
+      if (isDuplicateRunError(error)) {
+        io.stderr(`cannot start run "${handle.id}": run already exists`);
+        return EXIT_USAGE;
+      }
+      throw error;
+    }
+  } finally {
+    await store.close?.();
+  }
 
   if (outcome.status === "succeeded") {
     io.stdout(
@@ -244,42 +370,121 @@ async function runGraph(
   return EXIT_RUN_FAILED;
 }
 
+/** Read a bounded snapshot of a run's persisted events (no live follow). */
+async function readEventSnapshot(
+  store: RunStore,
+  runId: string,
+  revision: number,
+): Promise<PersistedRunEvent[]> {
+  if (!Number.isSafeInteger(revision) || revision < 0) {
+    throw new Error(`run "${runId}" has invalid revision ${String(revision)}`);
+  }
+  const iterator = store.readEvents(runId)[Symbol.asyncIterator]();
+  const events: PersistedRunEvent[] = [];
+  try {
+    for (let sequence = 0; sequence < revision; sequence += 1) {
+      const next = await iterator.next();
+      if (next.done) {
+        throw new Error(
+          `run "${runId}" ended before event sequence ${String(sequence)}`,
+        );
+      }
+      if (next.value.seq !== sequence) {
+        throw new Error(
+          `run "${runId}" expected event sequence ${String(sequence)}, received ${String(next.value.seq)}`,
+        );
+      }
+      events.push(next.value);
+    }
+  } finally {
+    await iterator.return?.();
+  }
+  return events;
+}
+
+async function inspectCommand(
+  invocation: ReadInvocation,
+  io: CliIo,
+): Promise<number> {
+  let store: RunStore | undefined;
+  try {
+    store = createSqliteStore({ path: invocation.store });
+    const inspection = await inspectRun(store, invocation.runId);
+    if (invocation.json) {
+      io.stdout(
+        stringifyJson({
+          version: 1,
+          runId: inspection.runId,
+          finished: inspection.finished,
+          nodes: inspection.nodes,
+          failures: inspection.failures,
+        }),
+      );
+    } else {
+      for (const node of inspection.nodes) {
+        io.stdout(`${node.nodeId}: ${node.state}`);
+      }
+      for (const failure of inspection.failures) {
+        io.stdout(`failure ${failure.nodeId}: ${stringifyJson(failure.cause)}`);
+      }
+      io.stdout(`finished: ${String(inspection.finished)}`);
+    }
+    return EXIT_SUCCESS;
+  } catch (error: unknown) {
+    io.stderr(`cannot inspect "${invocation.runId}": ${describeError(error)}`);
+    return EXIT_USAGE;
+  } finally {
+    await store?.close?.();
+  }
+}
+
+function isDuplicateRunError(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    (/^run already exists:/u.test(error.message) ||
+      /UNIQUE constraint failed:\s*runs\.run_id/iu.test(error.message))
+  );
+}
+
+async function eventsCommand(
+  invocation: ReadInvocation,
+  io: CliIo,
+): Promise<number> {
+  let store: RunStore | undefined;
+  try {
+    store = createSqliteStore({ path: invocation.store });
+    const run = await store.getRun(invocation.runId);
+    if (run === undefined) {
+      io.stderr(`unknown run: "${invocation.runId}"`);
+      return EXIT_USAGE;
+    }
+    const events = await readEventSnapshot(
+      store,
+      invocation.runId,
+      run.revision,
+    );
+    if (invocation.json) {
+      io.stdout(stringifyJson({ version: 1, runId: invocation.runId, events }));
+    } else {
+      for (const event of events) {
+        io.stdout(`${String(event.seq)} ${event.kind} ${event.nodeId}`);
+      }
+    }
+    return EXIT_SUCCESS;
+  } catch (error: unknown) {
+    io.stderr(
+      `cannot read events for "${invocation.runId}": ${describeError(error)}`,
+    );
+    return EXIT_USAGE;
+  } finally {
+    await store?.close?.();
+  }
+}
+
 /**
- * Implement per the decided spec below. Import ONLY
- * from "@rsetia/agent-graph" (the public entry point) — never from SDK
- * source paths.
- *
- * Dispatch:
- * - No command, unknown command, missing <file>, or an unrecognized
- *   flag -> USAGE to stderr, return EXIT_USAGE.
- * - Read the file; unreadable file or malformed JSON -> one stderr
- *   diagnostic, EXIT_USAGE.
- * - parseGraph/compileGraph errors -> one stderr line per error in the
- *   form `error <CODE> <json-of-other-fields>`, EXIT_USAGE.
- *
- * validate <file>:
- * - Valid -> nothing on stdout (a human note on stderr is fine),
- *   EXIT_SUCCESS.
- *
- * graph <file> (text; this IS data, so it goes to stdout, exactly):
- *   <id> (<executor>)            for each node in compiled order,
- *   <id> (<executor>) <- a, b    with deps listed in dependsOn order,
- *   final: <finalNode>           last line.
- *
- * graph <file> --json (one line to stdout):
- *   {"version":1,"order":[...],"finalNode":"...","nodes":{id:{executor,
- *   dependsOn,dependents}}}
- *
- * run <file>:
- * - Engine = createEngine({ store: createMemoryStore(), registry:
- *   createExecutorRegistry(builtinExecutors) }).
- * - Success: JSON.stringify(output) to stdout, EXIT_SUCCESS.
- * - Failure: nothing on stdout; per-failure stderr diagnostics
- *   (mention the nodeId), EXIT_RUN_FAILED.
- *
- * run <file> --json (one line to stdout, versioned, no decoration):
- * - {"version":1,"status":"succeeded","output":...} -> EXIT_SUCCESS
- * - {"version":1,"status":"failed","failures":[...]} -> EXIT_RUN_FAILED
+ * Dispatch. stdout carries data only; diagnostics and the run id go to
+ * stderr. Exit codes: 0 success, 1 graph run failed, 2 invalid input or
+ * usage, 3 unexpected internal error (assigned by main.ts).
  */
 export async function runCli(
   argv: readonly string[],
@@ -291,29 +496,37 @@ export async function runCli(
     return EXIT_USAGE;
   }
 
-  const graph = await loadGraph(invocation.file, io);
-  if (graph === undefined) {
-    return EXIT_USAGE;
-  }
-
   switch (invocation.command) {
     case "validate":
-      return EXIT_SUCCESS;
-
     case "graph":
-      if (invocation.json) {
-        printJsonGraph(graph, io);
-      } else {
-        printTextGraph(graph, io);
+    case "run": {
+      const graph = await loadGraph(invocation.file, io);
+      if (graph === undefined) {
+        return EXIT_USAGE;
       }
-      return EXIT_SUCCESS;
+      if (invocation.command === "validate") {
+        return EXIT_SUCCESS;
+      }
+      if (invocation.command === "graph") {
+        if (invocation.json) {
+          printJsonGraph(graph, io);
+        } else {
+          printTextGraph(graph, io);
+        }
+        return EXIT_SUCCESS;
+      }
+      return runGraph(graph, invocation, io);
+    }
 
-    case "run":
-      return runGraph(graph, invocation.json, io);
+    case "inspect":
+      return inspectCommand(invocation, io);
+
+    case "events":
+      return eventsCommand(invocation, io);
 
     default: {
-      const unhandledCommand: never = invocation.command;
-      throw new Error(`unhandled command: ${String(unhandledCommand)}`);
+      const unhandledCommand: never = invocation;
+      throw new Error(`unhandled command: ${JSON.stringify(unhandledCommand)}`);
     }
   }
 }
