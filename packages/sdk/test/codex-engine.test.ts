@@ -107,6 +107,8 @@ describe("createCodexEngine", () => {
         "workspace-write",
         "--skip-git-repo-check",
         "--ephemeral",
+        "--add-dir",
+        location.nodeDir,
         "-",
       ]),
     );

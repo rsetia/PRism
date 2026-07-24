@@ -10,13 +10,14 @@
   ],
   "scripts": {
     "build": "tsc --build",
+    "typecheck": "tsc -p packages/sdk/tsconfig.json --noEmit && tsc -p packages/cli/tsconfig.json --noEmit",
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
     "test": "vitest run --passWithNoTests",
     "pack:check": "publint packages/sdk && publint packages/cli && attw --pack packages/sdk --profile esm-only",
     "smoke": "node scripts/package-smoke.mjs",
-    "verify": "npm run build && npm run lint && npm run format:check && npm run test && npm run pack:check && npm run smoke"
+    "verify": "npm run build && npm run typecheck && npm run lint && npm run format:check && npm run test && npm run pack:check && npm run smoke"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",

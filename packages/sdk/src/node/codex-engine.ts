@@ -190,6 +190,7 @@ export function createCodexEngine(
         commandArgs,
         execArgs,
         worktreeDir,
+        nodeDir,
         lastMessagePath,
         additionalWritableDirs,
         input.contract,
@@ -279,6 +280,7 @@ function buildCommandArgs(
   commandArgs: readonly string[],
   execArgs: readonly string[],
   worktreeDir: string,
+  nodeDir: string,
   lastMessagePath: string,
   additionalWritableDirs: readonly string[],
   contract: CodexExecutorContract,
@@ -296,7 +298,7 @@ function buildCommandArgs(
   if (options.model !== undefined) {
     args.push("--model", options.model);
   }
-  for (const directory of additionalWritableDirs) {
+  for (const directory of new Set([nodeDir, ...additionalWritableDirs])) {
     args.push("--add-dir", directory);
   }
   args.push("-o", lastMessagePath, ...execArgs, "-");
