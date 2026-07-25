@@ -23,7 +23,7 @@ import {
   parseGraph,
   resetRun,
   watchRun,
-} from "@rsetia/agent-graph";
+} from "@rsetia/prism";
 import type {
   CompiledGraph,
   GraphCompileError,
@@ -33,7 +33,7 @@ import type {
   RunInspection,
   RunOutcome,
   RunStore,
-} from "@rsetia/agent-graph";
+} from "@rsetia/prism";
 
 /** stdout: data only. stderr: humans only. */
 export interface CliIo {
@@ -49,7 +49,7 @@ export const EXIT_USAGE = 2;
 /** Unexpected internal error — our bug. Assigned by main.ts. */
 export const EXIT_INTERNAL = 3;
 
-export const USAGE = `Usage: agent-graph <command> [options]
+export const USAGE = `Usage: prism <command> [options]
 
 Commands:
   validate <file>                     Check a graph file; exit 0 if valid

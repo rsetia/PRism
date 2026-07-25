@@ -13,7 +13,7 @@ export const WORKER_RESULT_FILE = "result.json";
 export const WORKER_HEARTBEAT_FILE = "heartbeat.json";
 
 /** Env var telling the worker which directory holds its protocol files. */
-export const NODE_DIR_ENV_VAR = "AGENT_GRAPH_NODE_DIR";
+export const NODE_DIR_ENV_VAR = "PRISM_NODE_DIR";
 
 /**
  * What the orchestrator hands a worker: everything it needs to do the

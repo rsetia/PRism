@@ -6,7 +6,7 @@ import { afterAll, describe, expect, test } from "vitest";
 import { createLocalArtifactStore } from "../src/node/index.js";
 import type { ArtifactStore, PutArtifactInput } from "../src/node/index.js";
 
-const root = mkdtempSync(join(tmpdir(), "agent-graph-artifacts-"));
+const root = mkdtempSync(join(tmpdir(), "prism-artifacts-"));
 afterAll(() => {
   rmSync(root, { recursive: true, force: true });
 });

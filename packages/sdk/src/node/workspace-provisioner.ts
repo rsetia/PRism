@@ -37,7 +37,7 @@ export interface GitWorktreeProvisionerOptions {
   readonly baseDir: string;
   /** Ref the new branch starts from. Default "HEAD". */
   readonly baseRef?: string;
-  /** Branch-name prefix for provisioned worktrees. Default "agent-graph/". */
+  /** Branch-name prefix for provisioned worktrees. Default "prism/". */
   readonly branchPrefix?: string;
 }
 
@@ -52,7 +52,7 @@ export function createGitWorktreeProvisioner(
   const repoDir = resolve(options.repoDir);
   const baseDir = resolve(options.baseDir);
   const baseRef = options.baseRef ?? "HEAD";
-  const branchPrefix = options.branchPrefix ?? "agent-graph/";
+  const branchPrefix = options.branchPrefix ?? "prism/";
 
   return Object.freeze({
     async provision(input: ProvisionInput): Promise<WorkspaceHandle> {
@@ -139,7 +139,7 @@ function sanitizeBranchName(value: string): string {
     .filter((component) => component.length > 0)
     .map(safeRefComponent);
   if (components.length === 0) {
-    return "agent-graph/workspace";
+    return "prism/workspace";
   }
   return components.join("/");
 }

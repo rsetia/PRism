@@ -4,12 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import {
-  compileGraph,
-  createSqliteStore,
-  parseGraph,
-} from "@rsetia/agent-graph";
-import type { CompiledGraph } from "@rsetia/agent-graph";
+import { compileGraph, createSqliteStore, parseGraph } from "@rsetia/prism";
+import type { CompiledGraph } from "@rsetia/prism";
 import { afterAll, describe, expect, test } from "vitest";
 
 /**
@@ -76,7 +72,7 @@ async function cli(...args: readonly string[]): Promise<CliResult> {
   }
 }
 
-describe("agent-graph CLI", () => {
+describe("prism CLI", () => {
   test("no command prints usage to stderr, exit 2", async () => {
     const result = await cli();
     expect(result.code).toBe(2);
@@ -210,8 +206,8 @@ describe("agent-graph CLI", () => {
   });
 });
 
-describe("agent-graph CLI: persisted runs", () => {
-  const tempDir = mkdtempSync(join(tmpdir(), "agent-graph-cli-store-"));
+describe("prism CLI: persisted runs", () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "prism-cli-store-"));
   afterAll(() => {
     rmSync(tempDir, { recursive: true, force: true });
   });

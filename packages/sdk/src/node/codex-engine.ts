@@ -112,7 +112,7 @@ export function buildCodexPrompt(input: CodexPromptInput): string {
     .map((rule) => `- ${rule}`)
     .join("\n");
 
-  return `You are executing exactly one agent-graph node inside an isolated worktree.
+  return `You are executing exactly one prism node inside an isolated worktree.
 
 Read the complete node spec at:
 ${input.specPath}

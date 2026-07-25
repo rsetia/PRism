@@ -10,7 +10,7 @@ const WORKER = fileURLToPath(
   new URL("./fixtures/worker-echo.mjs", import.meta.url),
 );
 
-const tempDir = mkdtempSync(join(tmpdir(), "agent-graph-backend-"));
+const tempDir = mkdtempSync(join(tmpdir(), "prism-backend-"));
 afterAll(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });

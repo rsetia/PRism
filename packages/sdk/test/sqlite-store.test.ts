@@ -19,7 +19,7 @@ runStoreContract("createSqliteStore(:memory:)", () =>
   createSqliteStore({ path: ":memory:" }),
 );
 
-const tempDir = mkdtempSync(join(tmpdir(), "agent-graph-sqlite-"));
+const tempDir = mkdtempSync(join(tmpdir(), "prism-sqlite-"));
 afterAll(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });

@@ -1,5 +1,5 @@
 /**
- * Public entry point for @rsetia/agent-graph. Everything importable by
+ * Public entry point for @rsetia/prism. Everything importable by
  * consumers is re-exported here — internal modules are not reachable.
  */
 export { parseGraph } from "./graph/parse.js";

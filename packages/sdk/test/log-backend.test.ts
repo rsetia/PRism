@@ -5,7 +5,7 @@ import { afterAll, describe, expect, test } from "vitest";
 import { createFileLogBackend } from "../src/node/index.js";
 import type { LogBackend, LogTarget } from "../src/node/index.js";
 
-const root = mkdtempSync(join(tmpdir(), "agent-graph-logs-"));
+const root = mkdtempSync(join(tmpdir(), "prism-logs-"));
 afterAll(() => {
   rmSync(root, { recursive: true, force: true });
 });

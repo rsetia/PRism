@@ -1,7 +1,7 @@
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 
-const nodeDir = process.env.AGENT_GRAPH_NODE_DIR;
+const nodeDir = process.env.PRISM_NODE_DIR;
 if (nodeDir === undefined) {
   process.exit(20);
 }

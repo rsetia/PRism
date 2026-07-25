@@ -157,7 +157,7 @@ export function createCodexExecutor(
         nodeDir = await mkdtemp(
           join(
             nodeDirBase,
-            `.agent-graph-${safePathPart(context.runId)}-${safePathPart(context.nodeId)}-a${String(context.attempt)}-`,
+            `.prism-${safePathPart(context.runId)}-${safePathPart(context.nodeId)}-a${String(context.attempt)}-`,
           ),
         );
         await writeFile(

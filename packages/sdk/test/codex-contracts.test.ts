@@ -33,7 +33,7 @@ describe("parseImplementConfig", () => {
   test("extracts a valid config", () => {
     const parsed = parseImplementConfig(
       implementConfig({
-        branchName: "agent-graph/mc-1",
+        branchName: "prism/mc-1",
         maxIterations: 4,
         validationCommands: ["npm test", "npm run lint"],
         review: {
@@ -50,7 +50,7 @@ describe("parseImplementConfig", () => {
     expect(parsed.workItem.id).toBe("MC-1");
     expect(parsed.targetBranch).toBe("main");
     expect(parsed.review.by).toBe("greptile");
-    expect(parsed.branchName).toBe("agent-graph/mc-1");
+    expect(parsed.branchName).toBe("prism/mc-1");
     expect(parsed.maxIterations).toBe(4);
     expect(parsed.validationCommands).toEqual(["npm test", "npm run lint"]);
     expect(parsed.review).toMatchObject({

@@ -9,7 +9,7 @@ import type { WorkspaceProvisioner } from "../src/node/index.js";
 
 const execFileAsync = promisify(execFile);
 
-const root = mkdtempSync(join(tmpdir(), "agent-graph-worktree-"));
+const root = mkdtempSync(join(tmpdir(), "prism-worktree-"));
 const repoDir = join(root, "repo");
 const worktreesDir = join(root, "worktrees");
 

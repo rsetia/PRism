@@ -32,8 +32,8 @@ import {
   createExecutorRegistry,
   createMemoryStore,
   parseGraph,
-} from "@rsetia/agent-graph";
-import { createLocalExecutionBackend } from "@rsetia/agent-graph/node";
+} from "@rsetia/prism";
+import { createLocalExecutionBackend } from "@rsetia/prism/node";
 
 if (typeof createLocalExecutionBackend !== "function") {
   throw new Error("the ./node entry point did not resolve");
@@ -62,8 +62,8 @@ console.log("js consumer ok (SDK " + SDK_VERSION + ")");
 `;
 
 const TS_CONSUMER = `
-import { compileGraph, parseGraph } from "@rsetia/agent-graph";
-import type { CompiledGraph } from "@rsetia/agent-graph";
+import { compileGraph, parseGraph } from "@rsetia/prism";
+import type { CompiledGraph } from "@rsetia/prism";
 
 const parsed = parseGraph({
   version: 1,
@@ -103,7 +103,7 @@ const EXAMPLE_GRAPH = JSON.stringify({
   finalNode: "second",
 });
 
-const workDir = await mkdtemp(path.join(tmpdir(), "agent-graph-smoke-"));
+const workDir = await mkdtemp(path.join(tmpdir(), "prism-smoke-"));
 try {
   const pack = async (packageName) => {
     const { stdout } = await run(
@@ -164,7 +164,7 @@ try {
 
   log("running the packed CLI binary");
   await writeFile(path.join(consumerDir, "graph.json"), EXAMPLE_GRAPH);
-  const cliBin = path.join(consumerDir, "node_modules", ".bin", "agent-graph");
+  const cliBin = path.join(consumerDir, "node_modules", ".bin", "prism");
   const { stdout: cliOut } = await run(
     cliBin,
     ["run", "graph.json", "--json"],

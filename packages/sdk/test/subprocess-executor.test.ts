@@ -19,7 +19,7 @@ import {
 const WORKER = fileURLToPath(
   new URL("./fixtures/worker-echo.mjs", import.meta.url),
 );
-const tempDir = mkdtempSync(join(tmpdir(), "agent-graph-subproc-"));
+const tempDir = mkdtempSync(join(tmpdir(), "prism-subproc-"));
 afterAll(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });

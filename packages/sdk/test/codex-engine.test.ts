@@ -19,7 +19,7 @@ import type {
 const FAKE_CODEX = fileURLToPath(
   new URL("./fixtures/fake-codex.mjs", import.meta.url),
 );
-const root = mkdtempSync(join(tmpdir(), "agent-graph-codex-"));
+const root = mkdtempSync(join(tmpdir(), "prism-codex-"));
 afterAll(() => {
   rmSync(root, { recursive: true, force: true });
 });
@@ -74,7 +74,7 @@ describe("buildCodexPrompt", () => {
       heartbeatPath: "/tmp/node/heartbeat.json",
       contract,
     });
-    expect(prompt).toContain("exactly one agent-graph node");
+    expect(prompt).toContain("exactly one prism node");
     expect(prompt).toContain(contract.instructions);
     expect(prompt).toContain("Do not touch unrelated files.");
     expect(prompt).toContain("/tmp/node/result.json");

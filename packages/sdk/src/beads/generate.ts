@@ -34,7 +34,7 @@ export interface BeadsGraphOptions {
   readonly targetBranch?: string;
   /** Review gate for every implement node. Default "none". */
   readonly review?: ReviewGate;
-  /** Prefix for generated feature branch names. Default "agent-graph/". */
+  /** Prefix for generated feature branch names. Default "prism/". */
   readonly branchPrefix?: string;
   /** Add a merge_resolve node after each implement. Default true. */
   readonly includeMerge?: boolean;
@@ -105,7 +105,7 @@ export function buildBeadsGraph(
 
   const targetBranch = options?.targetBranch ?? "main";
   const review = options?.review ?? "none";
-  const branchPrefix = options?.branchPrefix ?? "agent-graph/";
+  const branchPrefix = options?.branchPrefix ?? "prism/";
   const includeMerge = options?.includeMerge ?? true;
   const includeBeadsUpdate = options?.includeBeadsUpdate ?? true;
   validateOptions(

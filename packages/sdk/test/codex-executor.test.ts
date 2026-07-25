@@ -23,7 +23,7 @@ import type {
   WorkspaceProvisioner,
 } from "../src/node/index.js";
 
-const tempDir = mkdtempSync(join(tmpdir(), "agent-graph-codex-exec-"));
+const tempDir = mkdtempSync(join(tmpdir(), "prism-codex-exec-"));
 afterAll(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });
@@ -113,7 +113,7 @@ describe("createCodexExecutor", () => {
   test("runs an implement node and maps a succeeded result", async () => {
     const { engine, inputs } = fakeEngine({
       status: "succeeded",
-      output: { branch: "agent-graph/mc-1", pr_number: 5 },
+      output: { branch: "prism/mc-1", pr_number: 5 },
     });
     const executor = createCodexExecutor({
       name: "implement",
@@ -125,7 +125,7 @@ describe("createCodexExecutor", () => {
       .result;
     expect(outcome).toEqual({
       status: "succeeded",
-      output: { branch: "agent-graph/mc-1", pr_number: 5 },
+      output: { branch: "prism/mc-1", pr_number: 5 },
     });
 
     // The engine received the implement contract (git + GitHub permissions).

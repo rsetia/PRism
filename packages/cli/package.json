@@ -1,20 +1,20 @@
 {
-  "name": "@rsetia/agent-graph-cli",
+  "name": "@rsetia/prism-cli",
   "version": "0.1.0-alpha.0",
-  "description": "CLI for @rsetia/agent-graph",
+  "description": "CLI for @rsetia/prism",
   "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=24"
   },
   "bin": {
-    "agent-graph": "./dist/main.js"
+    "prism": "./dist/main.js"
   },
   "files": [
     "dist"
   ],
   "dependencies": {
-    "@rsetia/agent-graph": "0.1.0-alpha.0",
+    "@rsetia/prism": "0.1.0-alpha.0",
     "yaml": "^2.6.0"
   }
 }

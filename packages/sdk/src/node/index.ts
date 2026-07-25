@@ -1,5 +1,5 @@
 /**
- * Node-only entry point: `@rsetia/agent-graph/node`. Everything here
+ * Node-only entry point: `@rsetia/prism/node`. Everything here
  * touches Node built-ins (child_process, fs), so it is kept out of the
  * core `.` entry — a core-only consumer never loads it (plan §7/§14).
  */
