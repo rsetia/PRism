@@ -4,6 +4,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import {
+  compileGraph,
+  createSqliteStore,
+  parseGraph,
+} from "@rsetia/agent-graph";
+import type { CompiledGraph } from "@rsetia/agent-graph";
 import { afterAll, describe, expect, test } from "vitest";
 
 /**
@@ -21,6 +27,25 @@ const execFileAsync = promisify(execFile);
 
 function fixture(name: string): string {
   return fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
+}
+
+function resumableGraph(): CompiledGraph {
+  const parsed = parseGraph({
+    version: 1,
+    nodes: {
+      first: { executor: "constant", config: { value: "hello" } },
+      second: { executor: "passthrough", dependsOn: ["first"] },
+    },
+    finalNode: "second",
+  });
+  if (!parsed.ok) {
+    throw new Error("resumable graph fixture did not parse");
+  }
+  const compiled = compileGraph(parsed.graph);
+  if (!compiled.ok) {
+    throw new Error("resumable graph fixture did not compile");
+  }
+  return compiled.graph;
 }
 
 interface CliResult {
@@ -458,5 +483,179 @@ describe("agent-graph CLI: persisted runs", () => {
     );
     expect(invalid.code).toBe(2);
     expect(invalid.stderr).toContain("Usage:");
+  });
+
+  test("resume of a finished run reports its recorded outcome", async () => {
+    const store = db();
+    await cli(
+      "run",
+      fixture("valid.json"),
+      "--store",
+      store,
+      "--run-id",
+      "res1",
+    );
+    const resumed = await cli("resume", "res1", "--store", store, "--json");
+    expect(resumed.code).toBe(0);
+    expect(JSON.parse(resumed.stdout)).toEqual({
+      version: 1,
+      status: "succeeded",
+      output: "hello",
+    });
+  });
+
+  test("resume continues a partially completed durable run", async () => {
+    const path = db();
+    const store = createSqliteStore({ path });
+    await store.createRun({
+      runId: "interrupted",
+      graph: resumableGraph(),
+    });
+    await store.appendEvents("interrupted", [
+      { kind: "node_ready", nodeId: "first" },
+      { kind: "node_started", nodeId: "first" },
+      { kind: "node_succeeded", nodeId: "first", output: "hello" },
+      { kind: "node_ready", nodeId: "second" },
+    ]);
+    await store.close?.();
+
+    const resumed = await cli(
+      "resume",
+      "interrupted",
+      "--store",
+      path,
+      "--json",
+    );
+    expect(resumed.code).toBe(0);
+    expect(JSON.parse(resumed.stdout)).toEqual({
+      version: 1,
+      status: "succeeded",
+      output: "hello",
+    });
+
+    const inspected = await cli(
+      "inspect",
+      "interrupted",
+      "--store",
+      path,
+      "--json",
+    );
+    expect(inspected.code).toBe(0);
+    const inspection = JSON.parse(inspected.stdout) as {
+      finished: boolean;
+      nodes: { state: string }[];
+    };
+    expect(inspection.finished).toBe(true);
+    expect(inspection.nodes.map((node) => node.state)).toEqual([
+      "succeeded",
+      "succeeded",
+    ]);
+  });
+
+  test("resume of a finished failing run reports failed, exit 1", async () => {
+    const store = db();
+    await cli(
+      "run",
+      fixture("failing.json"),
+      "--store",
+      store,
+      "--run-id",
+      "resf",
+    );
+    const resumed = await cli("resume", "resf", "--store", store, "--json");
+    expect(resumed.code).toBe(1);
+    expect((JSON.parse(resumed.stdout) as { status: string }).status).toBe(
+      "failed",
+    );
+  });
+
+  test("resume of an unknown run exits 2", async () => {
+    const resumed = await cli("resume", "ghost", "--store", db());
+    expect(resumed.code).toBe(2);
+    expect(resumed.stdout).toBe("");
+    expect(resumed.stderr).toContain("cannot resume");
+  });
+
+  test("resume without --store is a usage error", async () => {
+    const resumed = await cli("resume", "res1");
+    expect(resumed.code).toBe(2);
+    expect(resumed.stderr).toContain("Usage:");
+  });
+
+  test("rerun-node resets a node and downstream, then resume re-runs them", async () => {
+    const store = db();
+    await cli("run", fixture("valid.json"), "--store", store, "--run-id", "rr");
+    // both nodes are succeeded; reset the root + downstream
+    const reset = await cli(
+      "rerun-node",
+      "rr",
+      "first",
+      "--store",
+      store,
+      "--json",
+    );
+    expect(reset.code).toBe(0);
+    expect(JSON.parse(reset.stdout)).toEqual({
+      version: 1,
+      runId: "rr",
+      reset: "first",
+      includeDownstream: true,
+    });
+
+    const afterReset = await cli("inspect", "rr", "--store", store);
+    expect(afterReset.stdout).toContain("first: pending");
+    expect(afterReset.stdout).toContain("second: pending");
+
+    const resumed = await cli("resume", "rr", "--store", store, "--json");
+    expect(resumed.code).toBe(0);
+    expect(JSON.parse(resumed.stdout)).toEqual({
+      version: 1,
+      status: "succeeded",
+      output: "hello",
+    });
+  });
+
+  test("signal resets a single node, leaving dependents intact", async () => {
+    const store = db();
+    await cli("run", fixture("valid.json"), "--store", store, "--run-id", "sg");
+    const signalled = await cli("signal", "sg", "first", "--store", store);
+    expect(signalled.code).toBe(0);
+
+    const inspected = await cli("inspect", "sg", "--store", store);
+    expect(inspected.stdout).toContain("first: pending");
+    expect(inspected.stdout).toContain("second: succeeded");
+  });
+
+  test("abort forces a stuck run to cancelled+finished", async () => {
+    const path = db();
+    const store = createSqliteStore({ path });
+    // Seed a run stuck with a node mid-flight (started, never settled).
+    await store.createRun({ runId: "stuck", graph: resumableGraph() });
+    await store.appendEvents("stuck", [
+      { kind: "node_ready", nodeId: "first" },
+      { kind: "node_started", nodeId: "first" },
+    ]);
+    await store.close?.();
+
+    const aborted = await cli("abort", "stuck", "--store", path);
+    expect(aborted.code).toBe(0);
+
+    const inspected = await cli("inspect", "stuck", "--store", path);
+    expect(inspected.stdout).toContain("first: cancelled");
+    expect(inspected.stdout).toContain("finished: true");
+  });
+
+  test("signal of an unknown node exits 2", async () => {
+    const store = db();
+    await cli("run", fixture("valid.json"), "--store", store, "--run-id", "s2");
+    const signalled = await cli("signal", "s2", "ghost", "--store", store);
+    expect(signalled.code).toBe(2);
+    expect(signalled.stderr).toContain("cannot signal");
+  });
+
+  test("signal requires both run and node positionals", async () => {
+    const missing = await cli("signal", "onlyrun", "--store", db());
+    expect(missing.code).toBe(2);
+    expect(missing.stderr).toContain("Usage:");
   });
 });

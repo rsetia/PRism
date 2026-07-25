@@ -116,7 +116,7 @@ async function inspectRunSnapshot(
     states.set(nodeId, "pending");
   }
 
-  const failures: NodeFailure[] = [];
+  const failureByNode = new Map<string, NodeFailure>();
   const events = await readEventSnapshot(store, runId, stored.revision);
   for (const event of events) {
     const previous = states.get(event.nodeId);
@@ -125,9 +125,16 @@ async function inspectRunSnapshot(
     }
     states.set(event.nodeId, reduceNodeState(previous, event));
     if (event.kind === "node_failed") {
-      failures.push(event.failure);
+      failureByNode.set(event.nodeId, event.failure);
+    } else if (event.kind === "node_reset") {
+      // An administrative reset drops the node's recorded failure.
+      failureByNode.delete(event.nodeId);
     }
   }
+  const failures = stored.graph.order.flatMap((nodeId) => {
+    const failure = failureByNode.get(nodeId);
+    return failure === undefined ? [] : [failure];
+  });
 
   const nodes = stored.graph.order.map((nodeId) => {
     const state = states.get(nodeId);

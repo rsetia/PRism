@@ -101,6 +101,13 @@ export function reduceNodeState(
       }
       break;
 
+    case "node_reset":
+      // Administrative recovery: legal from EVERY state, including
+      // terminal ones. This is the one sanctioned break from absorbing
+      // terminal states (plan §16) — an operator resets a node to pending
+      // so a later resume re-runs it.
+      return "pending";
+
     default: {
       const unhandledEvent: never = event;
       throw new Error(`unhandled run event: ${JSON.stringify(unhandledEvent)}`);

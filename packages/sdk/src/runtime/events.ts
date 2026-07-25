@@ -43,6 +43,17 @@ export type RunEvent =
        * reaches the run outcome unless retries are exhausted.
        */
       readonly failure: NodeFailure;
+    }
+  | {
+      /**
+       * Administrative recovery (plan §16, signal / rerun-node): move a
+       * node back to `pending` from ANY state, including a terminal one.
+       * This is the sanctioned exception to absorbing terminal states —
+       * an operator resets a node so a later resume re-runs it. The caller
+       * is responsible for ensuring no live worker still owns the node.
+       */
+      readonly kind: "node_reset";
+      readonly nodeId: string;
     };
 
 /**

@@ -38,6 +38,9 @@ function persistEvent(event: RunEvent, seq: number): PersistedRunEvent {
     case "node_cancelled":
       return Object.freeze({ kind: event.kind, nodeId: event.nodeId, seq });
 
+    case "node_reset":
+      return Object.freeze({ kind: event.kind, nodeId: event.nodeId, seq });
+
     case "node_succeeded":
       return Object.freeze({
         kind: event.kind,
@@ -224,6 +227,15 @@ export function createMemoryStore(): RunStore {
     return Promise.resolve();
   }
 
+  function reopenRun(runId: string): Promise<void> {
+    const run = runs.get(runId);
+    if (run === undefined) {
+      return Promise.reject(new Error(`unknown run: "${runId}"`));
+    }
+    run.finished = false;
+    return Promise.resolve();
+  }
+
   function listRuns(): Promise<readonly RunSummary[]> {
     const summaries = [...runs.values()]
       .reverse()
@@ -240,5 +252,6 @@ export function createMemoryStore(): RunStore {
     getRun,
     listRuns,
     finishRun,
+    reopenRun,
   });
 }

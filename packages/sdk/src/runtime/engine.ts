@@ -314,7 +314,7 @@ function replayExecutionState(
   events: readonly PersistedRunEvent[],
 ): RunExecutionState {
   const initial = createInitialExecutionState(graph);
-  let hasCancelledNodes = false;
+  const cancelledNodes = new Set<string>();
 
   for (const event of events) {
     const previous = initial.states.get(event.nodeId);
@@ -340,7 +340,17 @@ function replayExecutionState(
         initial.retryDelays.set(event.nodeId, event.delayMs);
         break;
       case "node_cancelled":
-        hasCancelledNodes = true;
+        cancelledNodes.add(event.nodeId);
+        break;
+      case "node_reset":
+        // Administrative reset wipes the node's accumulated history so a
+        // resume re-runs it fresh — attempts, output, failure, backoff,
+        // and any prior cancellation.
+        initial.attempts.delete(event.nodeId);
+        initial.outputs.delete(event.nodeId);
+        initial.originatingFailures.delete(event.nodeId);
+        initial.retryDelays.delete(event.nodeId);
+        cancelledNodes.delete(event.nodeId);
         break;
       case "node_ready":
       case "node_blocked":
@@ -355,7 +365,7 @@ function replayExecutionState(
     }
   }
 
-  return { ...initial, hasCancelledNodes };
+  return { ...initial, hasCancelledNodes: cancelledNodes.size > 0 };
 }
 
 async function readEventSnapshot(

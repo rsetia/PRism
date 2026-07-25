@@ -4,10 +4,11 @@ import type { NodeState, RunEvent } from "../src/index.js";
 
 /**
  * The exhaustive table: every state × every event kind, generated so no
- * combination can be forgotten. 14 legal transitions; the other 58 must
- * throw — including everything aimed at a terminal state (absorbing).
+ * combination can be forgotten. node_reset is legal from EVERY state (the
+ * sanctioned administrative escape from absorbing terminals, §16); every
+ * other event that reaches a terminal state must throw.
  * This is the 100%-branch-coverage file (plan §3; cancellation rows §10,
- * retry rows §11, interrupted recovery rows §12).
+ * retry rows §11, interrupted recovery rows §12, reset rows §16).
  */
 
 const STATES: readonly NodeState[] = [
@@ -37,9 +38,14 @@ const EVENTS: readonly RunEvent[] = [
     delayMs: 100,
     failure: { nodeId: "n", cause: "boom", failureClass: "transient_infra" },
   },
+  { kind: "node_reset", nodeId: "n" },
 ];
 
 const LEGAL = new Map<string, NodeState>([
+  // node_reset -> pending from every state (administrative recovery).
+  ...STATES.map(
+    (state) => [`${state}+node_reset`, "pending"] as [string, NodeState],
+  ),
   ["pending+node_ready", "ready"],
   ["pending+node_blocked", "blocked"],
   ["ready+node_started", "running"],

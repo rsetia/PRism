@@ -151,6 +151,26 @@ export function runStoreContract(
       await expect(s.finishRun("r")).resolves.toBeUndefined();
     });
 
+    test("reopenRun clears the finished flag and re-enables appends", async () => {
+      const s = open();
+      await s.createRun({ runId: "r", graph: fixtureGraph() });
+      await s.finishRun("r");
+      await s.reopenRun("r");
+
+      const run = await s.getRun("r");
+      expect(run?.finished).toBe(false);
+      // A reopened run accepts new events again.
+      await expect(s.appendEvents("r", [ready("a")])).resolves.toBeDefined();
+    });
+
+    test("reopenRun rejects an unknown run and is idempotent", async () => {
+      const s = open();
+      await expect(s.reopenRun("nope")).rejects.toThrow();
+      await s.createRun({ runId: "r", graph: fixtureGraph() });
+      await s.reopenRun("r");
+      await expect(s.reopenRun("r")).resolves.toBeUndefined();
+    });
+
     test("listRuns is empty for a fresh store", async () => {
       expect(await open().listRuns()).toEqual([]);
     });

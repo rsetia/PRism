@@ -11,6 +11,7 @@ import { randomUUID } from "node:crypto";
 import { extname } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
+  abortRun,
   builtinExecutors,
   compileGraph,
   createEngine,
@@ -20,6 +21,7 @@ import {
   createSystemClock,
   inspectRun,
   parseGraph,
+  resetRun,
   watchRun,
 } from "@rsetia/agent-graph";
 import type {
@@ -60,7 +62,15 @@ Commands:
                                       Show a persisted run's event log
   status --store <db> [--json]        List persisted runs
   watch <run-id> --store <db> [--json] [--interval <ms>]
-                                      Poll a run until it finishes`;
+                                      Poll a run until it finishes
+  resume <run-id> --store <db> [--json]
+                                      Continue an interrupted run to completion
+  abort <run-id> --store <db> [--json]
+                                      Force a stuck run to a cancelled, finished state
+  signal <run-id> <node-id> --store <db> [--json]
+                                      Reset a node so a later resume re-runs it
+  rerun-node <run-id> <node-id> --store <db> [--json]
+                                      Reset a node and its downstream, then resume`;
 
 interface ValidateInvocation {
   readonly command: "validate";
@@ -96,25 +106,47 @@ interface WatchInvocation {
   readonly store: string;
   readonly intervalMs: number;
 }
+interface ResumeInvocation {
+  readonly command: "resume";
+  readonly runId: string;
+  readonly json: boolean;
+  readonly store: string;
+}
+interface AbortInvocation {
+  readonly command: "abort";
+  readonly runId: string;
+  readonly json: boolean;
+  readonly store: string;
+}
+interface NodeTargetInvocation {
+  readonly command: "signal" | "rerun-node";
+  readonly runId: string;
+  readonly nodeId: string;
+  readonly json: boolean;
+  readonly store: string;
+}
 type Invocation =
   | ValidateInvocation
   | GraphInvocation
   | RunInvocation
   | ReadInvocation
   | StatusInvocation
-  | WatchInvocation;
+  | WatchInvocation
+  | ResumeInvocation
+  | AbortInvocation
+  | NodeTargetInvocation;
 
 interface ParsedFlags {
-  readonly positional: string | undefined;
+  readonly positionals: readonly string[];
   readonly json: boolean;
   readonly store: string | undefined;
   readonly runId: string | undefined;
   readonly interval: string | undefined;
 }
 
-/** One positional plus known scalar flags; anything else is invalid. */
+/** Positional args plus known scalar flags; an unknown flag is invalid. */
 function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
-  let positional: string | undefined;
+  const positionals: string[] = [];
   let json = false;
   let store: string | undefined;
   let runId: string | undefined;
@@ -146,12 +178,11 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
     } else if (arg?.startsWith("--") === true) {
       return undefined;
     } else if (arg !== undefined) {
-      if (positional !== undefined) return undefined;
-      positional = arg;
+      positionals.push(arg);
     }
   }
 
-  return { positional, json, store, runId, interval };
+  return { positionals, json, store, runId, interval };
 }
 
 function parseInvocation(argv: readonly string[]): Invocation | undefined {
@@ -159,43 +190,47 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
   const flags = parseFlags(rest);
   if (flags === undefined) return undefined;
 
+  const [first, second] = flags.positionals;
+  const count = flags.positionals.length;
+  const noExtras =
+    flags.store === undefined &&
+    flags.runId === undefined &&
+    flags.interval === undefined;
+
   switch (command) {
     case "validate":
-      if (
-        flags.positional === undefined ||
-        flags.json ||
-        flags.store !== undefined ||
-        flags.runId !== undefined ||
-        flags.interval !== undefined
-      ) {
+      if (count !== 1 || first === undefined || flags.json || !noExtras) {
         return undefined;
       }
-      return { command, file: flags.positional };
+      return { command, file: first };
     case "graph":
       if (
-        flags.positional === undefined ||
+        count !== 1 ||
+        first === undefined ||
         flags.store !== undefined ||
         flags.runId !== undefined ||
         flags.interval !== undefined
       ) {
         return undefined;
       }
-      return { command, file: flags.positional, json: flags.json };
+      return { command, file: first, json: flags.json };
     case "run":
-      if (flags.positional === undefined || flags.interval !== undefined) {
+      if (count !== 1 || first === undefined || flags.interval !== undefined) {
         return undefined;
       }
       return {
         command,
-        file: flags.positional,
+        file: first,
         json: flags.json,
         store: flags.store,
         runId: flags.runId,
       };
     case "inspect":
     case "events":
+    case "resume":
       if (
-        flags.positional === undefined ||
+        count !== 1 ||
+        first === undefined ||
         flags.store === undefined ||
         flags.runId !== undefined ||
         flags.interval !== undefined
@@ -204,13 +239,43 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
       }
       return {
         command,
-        runId: flags.positional,
+        runId: first,
+        json: flags.json,
+        store: flags.store,
+      };
+    case "abort":
+      if (
+        count !== 1 ||
+        first === undefined ||
+        flags.store === undefined ||
+        flags.runId !== undefined ||
+        flags.interval !== undefined
+      ) {
+        return undefined;
+      }
+      return { command, runId: first, json: flags.json, store: flags.store };
+    case "signal":
+    case "rerun-node":
+      if (
+        count !== 2 ||
+        first === undefined ||
+        second === undefined ||
+        flags.store === undefined ||
+        flags.runId !== undefined ||
+        flags.interval !== undefined
+      ) {
+        return undefined;
+      }
+      return {
+        command,
+        runId: first,
+        nodeId: second,
         json: flags.json,
         store: flags.store,
       };
     case "status":
       if (
-        flags.positional !== undefined ||
+        count !== 0 ||
         flags.store === undefined ||
         flags.runId !== undefined ||
         flags.interval !== undefined
@@ -220,7 +285,8 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
       return { command, json: flags.json, store: flags.store };
     case "watch": {
       if (
-        flags.positional === undefined ||
+        count !== 1 ||
+        first === undefined ||
         flags.store === undefined ||
         flags.runId !== undefined
       ) {
@@ -233,7 +299,7 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
       }
       return {
         command,
-        runId: flags.positional,
+        runId: first,
         json: flags.json,
         store: flags.store,
         intervalMs,
@@ -337,6 +403,55 @@ function reportRunFailures(failures: readonly NodeFailure[], io: CliIo): void {
   }
 }
 
+/** Render a terminal run outcome; shared by `run` and `resume`. */
+function reportOutcome(outcome: RunOutcome, json: boolean, io: CliIo): number {
+  switch (outcome.status) {
+    case "succeeded":
+      io.stdout(
+        json
+          ? stringifyJson({
+              version: 1,
+              status: outcome.status,
+              output: outcome.output,
+            })
+          : stringifyJson(outcome.output),
+      );
+      return EXIT_SUCCESS;
+    case "failed":
+      if (json) {
+        io.stdout(
+          stringifyJson({
+            version: 1,
+            status: outcome.status,
+            failures: outcome.failures,
+          }),
+        );
+      } else {
+        reportRunFailures(outcome.failures, io);
+      }
+      return EXIT_RUN_FAILED;
+    case "cancelled":
+      if (json) {
+        io.stdout(
+          stringifyJson({
+            version: 1,
+            status: outcome.status,
+            reason: outcome.reason,
+            failures: outcome.failures,
+          }),
+        );
+      } else {
+        io.stderr(`run cancelled: ${stringifyJson(outcome.reason)}`);
+        reportRunFailures(outcome.failures, io);
+      }
+      return EXIT_RUN_FAILED;
+    default: {
+      const unhandled: never = outcome;
+      throw new Error(`unhandled outcome: ${JSON.stringify(unhandled)}`);
+    }
+  }
+}
+
 async function loadGraph(
   file: string,
   io: CliIo,
@@ -411,31 +526,7 @@ async function runGraph(
     await store.close?.();
   }
 
-  if (outcome.status === "succeeded") {
-    io.stdout(
-      json
-        ? stringifyJson({
-            version: 1,
-            status: outcome.status,
-            output: outcome.output,
-          })
-        : stringifyJson(outcome.output),
-    );
-    return EXIT_SUCCESS;
-  }
-
-  if (json) {
-    io.stdout(
-      stringifyJson({
-        version: 1,
-        status: outcome.status,
-        failures: outcome.failures,
-      }),
-    );
-  } else {
-    reportRunFailures(outcome.failures, io);
-  }
-  return EXIT_RUN_FAILED;
+  return reportOutcome(outcome, json, io);
 }
 
 /** Read a bounded snapshot of a run's persisted events (no live follow). */
@@ -542,6 +633,85 @@ async function eventsCommand(
   } catch (error: unknown) {
     io.stderr(
       `cannot read events for "${invocation.runId}": ${describeError(error)}`,
+    );
+    return EXIT_USAGE;
+  } finally {
+    await store?.close?.();
+  }
+}
+
+async function resumeCommand(
+  invocation: ResumeInvocation,
+  io: CliIo,
+): Promise<number> {
+  let store: RunStore | undefined;
+  try {
+    store = createSqliteStore({ path: invocation.store });
+    const engine = createEngine({
+      store,
+      registry: createExecutorRegistry(builtinExecutors),
+    });
+    const handle = engine.resume(invocation.runId);
+    io.stderr(`resume ${handle.id}`);
+    const outcome = await handle.result;
+    return reportOutcome(outcome, invocation.json, io);
+  } catch (error: unknown) {
+    io.stderr(`cannot resume "${invocation.runId}": ${describeError(error)}`);
+    return EXIT_USAGE;
+  } finally {
+    await store?.close?.();
+  }
+}
+
+async function abortCommand(
+  invocation: AbortInvocation,
+  io: CliIo,
+): Promise<number> {
+  let store: RunStore | undefined;
+  try {
+    store = createSqliteStore({ path: invocation.store });
+    await abortRun(store, invocation.runId);
+    io.stderr(`aborted ${invocation.runId}`);
+    if (invocation.json) {
+      io.stdout(stringifyJson({ version: 1, aborted: invocation.runId }));
+    }
+    return EXIT_SUCCESS;
+  } catch (error: unknown) {
+    io.stderr(`cannot abort "${invocation.runId}": ${describeError(error)}`);
+    return EXIT_USAGE;
+  } finally {
+    await store?.close?.();
+  }
+}
+
+async function resetCommand(
+  invocation: NodeTargetInvocation,
+  io: CliIo,
+): Promise<number> {
+  let store: RunStore | undefined;
+  try {
+    store = createSqliteStore({ path: invocation.store });
+    await resetRun(
+      store,
+      invocation.runId,
+      [invocation.nodeId],
+      invocation.command === "rerun-node" ? { includeDownstream: true } : {},
+    );
+    io.stderr(`reset ${invocation.runId}/${invocation.nodeId}`);
+    if (invocation.json) {
+      io.stdout(
+        stringifyJson({
+          version: 1,
+          runId: invocation.runId,
+          reset: invocation.nodeId,
+          includeDownstream: invocation.command === "rerun-node",
+        }),
+      );
+    }
+    return EXIT_SUCCESS;
+  } catch (error: unknown) {
+    io.stderr(
+      `cannot ${invocation.command} "${invocation.runId}/${invocation.nodeId}": ${describeError(error)}`,
     );
     return EXIT_USAGE;
   } finally {
@@ -681,6 +851,16 @@ export async function runCli(
 
     case "watch":
       return watchCommand(invocation, io);
+
+    case "resume":
+      return resumeCommand(invocation, io);
+
+    case "abort":
+      return abortCommand(invocation, io);
+
+    case "signal":
+    case "rerun-node":
+      return resetCommand(invocation, io);
 
     default: {
       const unhandledCommand: never = invocation;

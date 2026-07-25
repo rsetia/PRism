@@ -45,6 +45,8 @@ export type {
   RunInspection,
   WatchRunOptions,
 } from "./runtime/inspect.js";
+export { abortRun, resetRun } from "./runtime/admin.js";
+export type { ResetRunOptions } from "./runtime/admin.js";
 export type { PersistedRunEvent, RunEvent } from "./runtime/events.js";
 export type {
   Clock,

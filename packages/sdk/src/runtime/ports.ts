@@ -125,6 +125,9 @@ export interface RunSummary {
  *   finished and the log is drained. Unknown runId rejects on iteration.
  * - Appending never waits on consumers — the engine only notifies.
  * - finishRun is idempotent.
+ * - reopenRun clears the finished flag so a reset run can be resumed;
+ *   idempotent, and rejects an unknown run. It is administrative recovery
+ *   (plan §16) — the caller is responsible for the run's consistency.
  * - listRuns returns every run's summary, most-recent-created first.
  * - close releases any underlying resource (a database handle). Optional:
  *   a purely in-memory store needs nothing to release. After close, the
@@ -141,5 +144,6 @@ export interface RunStore {
   getRun(runId: string): Promise<StoredRun | undefined>;
   listRuns(): Promise<readonly RunSummary[]>;
   finishRun(runId: string): Promise<void>;
+  reopenRun(runId: string): Promise<void>;
   close?(): Promise<void>;
 }

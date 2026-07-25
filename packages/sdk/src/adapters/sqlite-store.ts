@@ -153,6 +153,9 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   const finishRunStatement = db.prepare(
     "UPDATE runs SET finished = 1 WHERE run_id = ?",
   );
+  const reopenRunStatement = db.prepare(
+    "UPDATE runs SET finished = 0 WHERE run_id = ?",
+  );
 
   function assertOpen(): void {
     if (closed) {
@@ -311,6 +314,16 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     });
   }
 
+  function reopenRun(runId: string): Promise<void> {
+    return capture(() => {
+      assertOpen();
+      const result = reopenRunStatement.run(runId);
+      if (result.changes === 0) {
+        throw new Error(`unknown run: "${runId}"`);
+      }
+    });
+  }
+
   function listRuns(): Promise<readonly RunSummary[]> {
     return capture(() => {
       assertOpen();
@@ -344,6 +357,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     getRun,
     listRuns,
     finishRun,
+    reopenRun,
     close,
   });
 }
