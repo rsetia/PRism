@@ -1,12 +1,32 @@
 {
   "name": "@rsetia/prism",
   "version": "0.1.0-alpha.0",
-  "description": "Agent graph SDK: validate, compile, and run dependency graphs of tasks",
+  "description": "Prism — an agent-graph SDK: compile and run dependency graphs of tasks with bounded concurrency, failure-classified retry, cancellation, durable resume, and streamed events.",
+  "keywords": [
+    "agent",
+    "agents",
+    "agent-graph",
+    "graph",
+    "dag",
+    "orchestration",
+    "workflow",
+    "pipeline",
+    "task-runner",
+    "engine"
+  ],
   "license": "MIT",
+  "author": "Ravpreet Setia <ravpreetsetia@gmail.com>",
   "type": "module",
   "engines": {
     "node": ">=24"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rsetia/PRism.git",
+    "directory": "packages/sdk"
+  },
+  "homepage": "https://github.com/rsetia/PRism#readme",
+  "bugs": "https://github.com/rsetia/PRism/issues",
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -18,7 +38,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "README.md"
   ],
   "sideEffects": false
 }
