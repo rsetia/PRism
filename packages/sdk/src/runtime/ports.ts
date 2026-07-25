@@ -106,6 +106,12 @@ export interface StoredRun {
   readonly revision: number;
 }
 
+/** A lightweight run listing, without the graph or events. */
+export interface RunSummary {
+  readonly runId: string;
+  readonly finished: boolean;
+}
+
 /**
  * Persistence port. Contract (plan §4, decided):
  * - createRun rejects a duplicate runId.
@@ -119,6 +125,7 @@ export interface StoredRun {
  *   finished and the log is drained. Unknown runId rejects on iteration.
  * - Appending never waits on consumers — the engine only notifies.
  * - finishRun is idempotent.
+ * - listRuns returns every run's summary, most-recent-created first.
  * - close releases any underlying resource (a database handle). Optional:
  *   a purely in-memory store needs nothing to release. After close, the
  *   store must not be used again.
@@ -132,6 +139,7 @@ export interface RunStore {
   ): Promise<readonly PersistedRunEvent[]>;
   readEvents(runId: string, fromSeq?: number): AsyncIterable<PersistedRunEvent>;
   getRun(runId: string): Promise<StoredRun | undefined>;
+  listRuns(): Promise<readonly RunSummary[]>;
   finishRun(runId: string): Promise<void>;
   close?(): Promise<void>;
 }

@@ -1,6 +1,6 @@
 import type { PersistedRunEvent } from "./events.js";
 import { reduceNodeState } from "./transitions.js";
-import type { RunStore } from "./ports.js";
+import type { Clock, RunStore } from "./ports.js";
 import type { NodeFailure, NodeState } from "./types.js";
 
 /**
@@ -25,6 +25,15 @@ export interface RunInspection {
   readonly failures: readonly NodeFailure[];
 }
 
+export interface WatchRunOptions {
+  /** Polling time source. Required so SDK watches remain deterministic. */
+  readonly clock: Clock;
+  /** Delay between snapshots in milliseconds. Default 1000. */
+  readonly intervalMs?: number;
+  /** Interrupt an in-flight polling wait. */
+  readonly signal?: AbortSignal;
+}
+
 /**
  * Rebuild a run's current state from the store, without running anything.
  * Works on finished and in-progress runs alike.
@@ -47,6 +56,45 @@ export function inspectRun(
   runId: string,
 ): Promise<RunInspection> {
   return inspectRunSnapshot(store, runId);
+}
+
+/**
+ * Poll immutable run inspections until the durable run is finished.
+ * The first snapshot is immediate; subsequent reads use the Clock port.
+ */
+export function watchRun(
+  store: RunStore,
+  runId: string,
+  options: WatchRunOptions,
+): AsyncIterable<RunInspection> {
+  const intervalMs = options.intervalMs ?? 1_000;
+  if (!Number.isFinite(intervalMs) || intervalMs <= 0) {
+    throw new Error("watch intervalMs must be a finite number greater than 0");
+  }
+  return watchRunSnapshots(
+    store,
+    runId,
+    options.clock,
+    intervalMs,
+    options.signal,
+  );
+}
+
+async function* watchRunSnapshots(
+  store: RunStore,
+  runId: string,
+  clock: Clock,
+  intervalMs: number,
+  signal: AbortSignal | undefined,
+): AsyncIterable<RunInspection> {
+  while (true) {
+    const inspection = await inspectRun(store, runId);
+    yield inspection;
+    if (inspection.finished) {
+      return;
+    }
+    await clock.wait(intervalMs, signal);
+  }
 }
 
 async function inspectRunSnapshot(

@@ -53,6 +53,22 @@ async function collect(
 }
 
 describe("sqlite durability", () => {
+  test("run summaries survive reopen in newest-first order", async () => {
+    const path = tempDbPath();
+    const store = createSqliteStore({ path });
+    await store.createRun({ runId: "older", graph: fixtureGraph() });
+    await store.createRun({ runId: "newer", graph: fixtureGraph() });
+    await store.finishRun("older");
+    await store.close?.();
+
+    const reopened = createSqliteStore({ path });
+    expect(await reopened.listRuns()).toEqual([
+      { runId: "newer", finished: false },
+      { runId: "older", finished: true },
+    ]);
+    await reopened.close?.();
+  });
+
   test("a run and its events survive close and reopen", async () => {
     const path = tempDbPath();
     const store = createSqliteStore({ path });

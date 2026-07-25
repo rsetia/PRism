@@ -3,7 +3,7 @@ import type { DatabaseSync as Database } from "node:sqlite";
 import type { CompiledGraph } from "../graph/types.js";
 import { isPlainObject } from "../internal/json.js";
 import type { PersistedRunEvent, RunEvent } from "../runtime/events.js";
-import type { RunStore, StoredRun } from "../runtime/ports.js";
+import type { RunStore, RunSummary, StoredRun } from "../runtime/ports.js";
 
 export interface SqliteStoreOptions {
   /**
@@ -137,6 +137,9 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     `SELECT run_id, graph_json, finished, schema_version,
        (SELECT COUNT(*) FROM events WHERE events.run_id = runs.run_id) AS revision
      FROM runs WHERE run_id = ?`,
+  );
+  const selectRuns = db.prepare(
+    "SELECT run_id, finished FROM runs ORDER BY rowid DESC",
   );
   const selectNextSequence = db.prepare(
     "SELECT COALESCE(MAX(seq) + 1, 0) AS next_seq FROM events WHERE run_id = ?",
@@ -308,6 +311,19 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     });
   }
 
+  function listRuns(): Promise<readonly RunSummary[]> {
+    return capture(() => {
+      assertOpen();
+      const summaries = selectRuns.all().map((row) =>
+        Object.freeze({
+          runId: readString(row, "run_id"),
+          finished: readNumber(row, "finished") === 1,
+        }),
+      );
+      return Object.freeze(summaries);
+    });
+  }
+
   function close(): Promise<void> {
     return capture(() => {
       if (closed) {
@@ -326,6 +342,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     appendEvents,
     readEvents,
     getRun,
+    listRuns,
     finishRun,
     close,
   });

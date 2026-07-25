@@ -151,6 +151,38 @@ export function runStoreContract(
       await expect(s.finishRun("r")).resolves.toBeUndefined();
     });
 
+    test("listRuns is empty for a fresh store", async () => {
+      expect(await open().listRuns()).toEqual([]);
+    });
+
+    test("listRuns returns summaries, most-recent-created first", async () => {
+      const s = open();
+      await s.createRun({ runId: "a", graph: fixtureGraph() });
+      await s.createRun({ runId: "b", graph: fixtureGraph() });
+      await s.finishRun("b");
+
+      const runs = await s.listRuns();
+      expect(runs.map((run) => run.runId)).toEqual(["b", "a"]);
+      expect(runs.find((run) => run.runId === "b")?.finished).toBe(true);
+      expect(runs.find((run) => run.runId === "a")?.finished).toBe(false);
+      expect(Object.isFrozen(runs)).toBe(true);
+      expect(runs.every((run) => Object.isFrozen(run))).toBe(true);
+    });
+
+    test("listRuns returns a point-in-time snapshot", async () => {
+      const s = open();
+      await s.createRun({ runId: "a", graph: fixtureGraph() });
+      const beforeFinish = await s.listRuns();
+      await s.finishRun("a");
+      await s.createRun({ runId: "b", graph: fixtureGraph() });
+
+      expect(beforeFinish).toEqual([{ runId: "a", finished: false }]);
+      expect(await s.listRuns()).toEqual([
+        { runId: "b", finished: false },
+        { runId: "a", finished: true },
+      ]);
+    });
+
     test("persisted events survive with their full payload", async () => {
       const s = open();
       await s.createRun({ runId: "r", graph: fixtureGraph() });

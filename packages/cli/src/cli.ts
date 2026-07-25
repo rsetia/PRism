@@ -17,8 +17,10 @@ import {
   createExecutorRegistry,
   createMemoryStore,
   createSqliteStore,
+  createSystemClock,
   inspectRun,
   parseGraph,
+  watchRun,
 } from "@rsetia/agent-graph";
 import type {
   CompiledGraph,
@@ -26,6 +28,7 @@ import type {
   GraphParseError,
   NodeFailure,
   PersistedRunEvent,
+  RunInspection,
   RunOutcome,
   RunStore,
 } from "@rsetia/agent-graph";
@@ -54,7 +57,10 @@ Commands:
   inspect <run-id> --store <db> [--json]
                                       Show a persisted run's node states
   events <run-id> --store <db> [--json]
-                                      Show a persisted run's event log`;
+                                      Show a persisted run's event log
+  status --store <db> [--json]        List persisted runs
+  watch <run-id> --store <db> [--json] [--interval <ms>]
+                                      Poll a run until it finishes`;
 
 interface ValidateInvocation {
   readonly command: "validate";
@@ -78,38 +84,64 @@ interface ReadInvocation {
   readonly json: boolean;
   readonly store: string;
 }
+interface StatusInvocation {
+  readonly command: "status";
+  readonly json: boolean;
+  readonly store: string;
+}
+interface WatchInvocation {
+  readonly command: "watch";
+  readonly runId: string;
+  readonly json: boolean;
+  readonly store: string;
+  readonly intervalMs: number;
+}
 type Invocation =
-  ValidateInvocation | GraphInvocation | RunInvocation | ReadInvocation;
+  | ValidateInvocation
+  | GraphInvocation
+  | RunInvocation
+  | ReadInvocation
+  | StatusInvocation
+  | WatchInvocation;
 
 interface ParsedFlags {
   readonly positional: string | undefined;
   readonly json: boolean;
   readonly store: string | undefined;
   readonly runId: string | undefined;
+  readonly interval: string | undefined;
 }
 
-/** One positional plus --json / --store <v> / --run-id <v>; else undefined. */
+/** One positional plus known scalar flags; anything else is invalid. */
 function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
   let positional: string | undefined;
   let json = false;
   let store: string | undefined;
   let runId: string | undefined;
+  let interval: string | undefined;
 
   for (let index = 0; index < rest.length; index += 1) {
     const arg = rest[index];
     if (arg === "--json") {
       if (json) return undefined;
       json = true;
-    } else if (arg === "--store" || arg === "--run-id") {
+    } else if (
+      arg === "--store" ||
+      arg === "--run-id" ||
+      arg === "--interval"
+    ) {
       const value = rest[index + 1];
       if (value === undefined || value.startsWith("--")) return undefined;
       index += 1;
       if (arg === "--store") {
         if (store !== undefined) return undefined;
         store = value;
-      } else {
+      } else if (arg === "--run-id") {
         if (runId !== undefined) return undefined;
         runId = value;
+      } else {
+        if (interval !== undefined) return undefined;
+        interval = value;
       }
     } else if (arg?.startsWith("--") === true) {
       return undefined;
@@ -119,7 +151,7 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
     }
   }
 
-  return { positional, json, store, runId };
+  return { positional, json, store, runId, interval };
 }
 
 function parseInvocation(argv: readonly string[]): Invocation | undefined {
@@ -133,7 +165,8 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
         flags.positional === undefined ||
         flags.json ||
         flags.store !== undefined ||
-        flags.runId !== undefined
+        flags.runId !== undefined ||
+        flags.interval !== undefined
       ) {
         return undefined;
       }
@@ -142,13 +175,16 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
       if (
         flags.positional === undefined ||
         flags.store !== undefined ||
-        flags.runId !== undefined
+        flags.runId !== undefined ||
+        flags.interval !== undefined
       ) {
         return undefined;
       }
       return { command, file: flags.positional, json: flags.json };
     case "run":
-      if (flags.positional === undefined) return undefined;
+      if (flags.positional === undefined || flags.interval !== undefined) {
+        return undefined;
+      }
       return {
         command,
         file: flags.positional,
@@ -161,7 +197,8 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
       if (
         flags.positional === undefined ||
         flags.store === undefined ||
-        flags.runId !== undefined
+        flags.runId !== undefined ||
+        flags.interval !== undefined
       ) {
         return undefined;
       }
@@ -171,6 +208,37 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
         json: flags.json,
         store: flags.store,
       };
+    case "status":
+      if (
+        flags.positional !== undefined ||
+        flags.store === undefined ||
+        flags.runId !== undefined ||
+        flags.interval !== undefined
+      ) {
+        return undefined;
+      }
+      return { command, json: flags.json, store: flags.store };
+    case "watch": {
+      if (
+        flags.positional === undefined ||
+        flags.store === undefined ||
+        flags.runId !== undefined
+      ) {
+        return undefined;
+      }
+      const intervalMs =
+        flags.interval === undefined ? 1_000 : Number(flags.interval);
+      if (!Number.isSafeInteger(intervalMs) || intervalMs <= 0) {
+        return undefined;
+      }
+      return {
+        command,
+        runId: flags.positional,
+        json: flags.json,
+        store: flags.store,
+        intervalMs,
+      };
+    }
     default:
       return undefined;
   }
@@ -481,6 +549,90 @@ async function eventsCommand(
   }
 }
 
+async function statusCommand(
+  invocation: StatusInvocation,
+  io: CliIo,
+): Promise<number> {
+  let store: RunStore | undefined;
+  try {
+    store = createSqliteStore({ path: invocation.store });
+    const runs = await store.listRuns();
+    if (invocation.json) {
+      io.stdout(stringifyJson({ version: 1, runs }));
+    } else {
+      for (const run of runs) {
+        io.stdout(`${run.runId}\t${run.finished ? "finished" : "running"}`);
+      }
+    }
+    return EXIT_SUCCESS;
+  } catch (error: unknown) {
+    io.stderr(`cannot list runs: ${describeError(error)}`);
+    return EXIT_USAGE;
+  } finally {
+    await store?.close?.();
+  }
+}
+
+function printWatchSnapshot(
+  inspection: RunInspection,
+  json: boolean,
+  io: CliIo,
+): void {
+  if (json) {
+    io.stdout(
+      stringifyJson({
+        version: 1,
+        runId: inspection.runId,
+        finished: inspection.finished,
+        nodes: inspection.nodes,
+        failures: inspection.failures,
+      }),
+    );
+    return;
+  }
+
+  io.stdout(
+    `run ${inspection.runId}: ${inspection.finished ? "finished" : "running"}`,
+  );
+  for (const node of inspection.nodes) {
+    io.stdout(`${node.nodeId}: ${node.state}`);
+  }
+  for (const failure of inspection.failures) {
+    io.stdout(`failure ${failure.nodeId}: ${stringifyJson(failure.cause)}`);
+  }
+}
+
+function inspectionFailed(inspection: RunInspection): boolean {
+  return inspection.nodes.some((node) => node.state !== "succeeded");
+}
+
+async function watchCommand(
+  invocation: WatchInvocation,
+  io: CliIo,
+): Promise<number> {
+  let store: RunStore | undefined;
+  try {
+    store = createSqliteStore({ path: invocation.store });
+    let terminal: RunInspection | undefined;
+    for await (const inspection of watchRun(store, invocation.runId, {
+      clock: createSystemClock(),
+      intervalMs: invocation.intervalMs,
+    })) {
+      printWatchSnapshot(inspection, invocation.json, io);
+      terminal = inspection;
+    }
+    if (terminal === undefined) {
+      throw new Error(`watch produced no snapshots for "${invocation.runId}"`);
+    }
+    return inspectionFailed(terminal) ? EXIT_RUN_FAILED : EXIT_SUCCESS;
+  } catch (error: unknown) {
+    io.stderr(`cannot watch "${invocation.runId}": ${describeError(error)}`);
+    return EXIT_USAGE;
+  } finally {
+    await store?.close?.();
+  }
+}
+
 /**
  * Dispatch. stdout carries data only; diagnostics and the run id go to
  * stderr. Exit codes: 0 success, 1 graph run failed, 2 invalid input or
@@ -523,6 +675,12 @@ export async function runCli(
 
     case "events":
       return eventsCommand(invocation, io);
+
+    case "status":
+      return statusCommand(invocation, io);
+
+    case "watch":
+      return watchCommand(invocation, io);
 
     default: {
       const unhandledCommand: never = invocation;

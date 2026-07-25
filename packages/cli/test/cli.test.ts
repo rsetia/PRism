@@ -353,4 +353,110 @@ describe("agent-graph CLI: persisted runs", () => {
     expect(inspected.stdout).toContain("doomed: failed");
     expect(inspected.stdout).toContain('failure doomed: {"reason":"boom"}');
   });
+
+  test("status lists persisted runs, most-recent first", async () => {
+    const store = db();
+    await cli("run", fixture("valid.json"), "--store", store, "--run-id", "s1");
+    await cli(
+      "run",
+      fixture("failing.json"),
+      "--store",
+      store,
+      "--run-id",
+      "s2",
+    );
+    const status = await cli("status", "--store", store);
+    expect(status.code).toBe(0);
+    const lines = status.stdout.trim().split("\n");
+    expect(lines[0]?.startsWith("s2")).toBe(true);
+    expect(lines[1]?.startsWith("s1")).toBe(true);
+    expect(status.stdout).toContain("finished");
+  });
+
+  test("status --json is a versioned envelope", async () => {
+    const store = db();
+    await cli("run", fixture("valid.json"), "--store", store, "--run-id", "s3");
+    const status = await cli("status", "--store", store, "--json");
+    expect(status.code).toBe(0);
+    const parsed = JSON.parse(status.stdout) as {
+      version: number;
+      runs: { runId: string; finished: boolean }[];
+    };
+    expect(parsed.version).toBe(1);
+    expect(parsed.runs.map((run) => run.runId)).toContain("s3");
+  });
+
+  test("status without --store is a usage error", async () => {
+    const status = await cli("status");
+    expect(status.code).toBe(2);
+    expect(status.stderr).toContain("Usage:");
+  });
+
+  test("watch emits a finished JSON snapshot and exits successfully", async () => {
+    const store = db();
+    await cli(
+      "run",
+      fixture("valid.json"),
+      "--store",
+      store,
+      "--run-id",
+      "watch-ok",
+    );
+    const watched = await cli(
+      "watch",
+      "watch-ok",
+      "--store",
+      store,
+      "--json",
+      "--interval",
+      "1",
+    );
+    expect(watched.code).toBe(0);
+    const snapshot = JSON.parse(watched.stdout) as {
+      version: number;
+      runId: string;
+      finished: boolean;
+      nodes: { state: string }[];
+    };
+    expect(snapshot.version).toBe(1);
+    expect(snapshot.runId).toBe("watch-ok");
+    expect(snapshot.finished).toBe(true);
+    expect(snapshot.nodes.every((node) => node.state === "succeeded")).toBe(
+      true,
+    );
+  });
+
+  test("watch exits 1 when the persisted run failed", async () => {
+    const store = db();
+    await cli(
+      "run",
+      fixture("failing.json"),
+      "--store",
+      store,
+      "--run-id",
+      "watch-failed",
+    );
+    const watched = await cli("watch", "watch-failed", "--store", store);
+    expect(watched.code).toBe(1);
+    expect(watched.stdout).toContain("doomed: failed");
+    expect(watched.stdout).toContain('failure doomed: {"reason":"boom"}');
+  });
+
+  test("watch rejects unknown runs and invalid intervals", async () => {
+    const unknown = await cli("watch", "ghost", "--store", db());
+    expect(unknown.code).toBe(2);
+    expect(unknown.stdout).toBe("");
+    expect(unknown.stderr).toContain("unknown run");
+
+    const invalid = await cli(
+      "watch",
+      "ghost",
+      "--store",
+      db(),
+      "--interval",
+      "0",
+    );
+    expect(invalid.code).toBe(2);
+    expect(invalid.stderr).toContain("Usage:");
+  });
 });

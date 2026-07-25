@@ -1,6 +1,6 @@
 import type { CompiledGraph } from "../graph/types.js";
 import type { PersistedRunEvent, RunEvent } from "../runtime/events.js";
-import type { RunStore, StoredRun } from "../runtime/ports.js";
+import type { RunStore, RunSummary, StoredRun } from "../runtime/ports.js";
 import type { NodeFailure } from "../runtime/types.js";
 
 /** Rebuild a failure for persistence, keeping an optional class. */
@@ -224,11 +224,21 @@ export function createMemoryStore(): RunStore {
     return Promise.resolve();
   }
 
+  function listRuns(): Promise<readonly RunSummary[]> {
+    const summaries = [...runs.values()]
+      .reverse()
+      .map((run) =>
+        Object.freeze({ runId: run.runId, finished: run.finished }),
+      );
+    return Promise.resolve(Object.freeze(summaries));
+  }
+
   return Object.freeze({
     createRun,
     appendEvents,
     readEvents,
     getRun,
+    listRuns,
     finishRun,
   });
 }
