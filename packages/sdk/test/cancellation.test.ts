@@ -50,7 +50,7 @@ function settle(): Promise<void> {
 interface ControlledStart {
   readonly nodeId: string;
   readonly signal: AbortSignal;
-  readonly succeed: (output: unknown) => void;
+  readonly succeed: (output: JsonValue) => void;
   readonly fail: (cause: JsonValue) => void;
 }
 
@@ -233,6 +233,54 @@ describe("cancellation", () => {
 
     const outcome = await handle.result;
     expect(outcome.status).toBe("cancelled");
+  });
+
+  test("persists the cancellation reason for finished-run resume", async () => {
+    const store = createMemoryStore();
+    const controlled = createControlledExecutor();
+    const engine = createEngine({
+      store,
+      registry: createExecutorRegistry([
+        ...builtinExecutors,
+        controlled.definition,
+      ]),
+    });
+    const graph = buildGraph({
+      version: 1,
+      nodes: { slow: { executor: "controlled" } },
+      finalNode: "slow",
+    });
+    const handle = engine.run(graph, { runId: "cancelled" });
+    const start = await controlled.nextStart();
+    const cancelled = handle.cancel({ requestedBy: "operator" });
+    await settle();
+    start.succeed("late");
+    await cancelled;
+
+    const outcome = await handle.result;
+    expect((await store.getRun("cancelled"))?.outcome).toEqual(outcome);
+    await expect(engine.resume("cancelled").result).resolves.toEqual(outcome);
+  });
+
+  test("rejects a non-JSON cancellation reason without cancelling", async () => {
+    const controlled = createControlledExecutor();
+    const graph = buildGraph({
+      version: 1,
+      nodes: { slow: { executor: "controlled" } },
+      finalNode: "slow",
+    });
+    const handle = engineWith([controlled.definition]).run(graph);
+    const start = await controlled.nextStart();
+
+    await expect(
+      handle.cancel(BigInt(1) as unknown as JsonValue),
+    ).rejects.toThrow("JSON-safe");
+    expect(start.signal.aborted).toBe(false);
+    start.succeed("done");
+    await expect(handle.result).resolves.toEqual({
+      status: "succeeded",
+      output: "done",
+    });
   });
 
   test("grace period abandons a non-cooperative executor", async () => {

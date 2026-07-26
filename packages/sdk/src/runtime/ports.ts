@@ -1,6 +1,7 @@
 import type { CompiledGraph, JsonValue, NodeKind } from "../graph/types.js";
 import type { PersistedRunEvent, RunEvent } from "./events.js";
 import type { FailureClass } from "./types.js";
+import type { RunOutcome } from "./types.js";
 
 /**
  * The seams (plan §4): the engine depends only on these interfaces.
@@ -11,7 +12,7 @@ import type { FailureClass } from "./types.js";
 
 /** What an executor returns. Failure is an outcome, not an exception. */
 export type NodeExecutionOutcome =
-  | { readonly status: "succeeded"; readonly output: unknown }
+  | { readonly status: "succeeded"; readonly output: JsonValue }
   | {
       readonly status: "failed";
       readonly cause: JsonValue;
@@ -33,7 +34,7 @@ export interface ExecutionContext {
   /** 1-based attempt number, incremented on each retry of this node. */
   readonly attempt: number;
   /** Upstream outputs, in the node's dependsOn order. */
-  readonly inputs: readonly unknown[];
+  readonly inputs: readonly JsonValue[];
   /** The node's opaque config, if any. Executors narrow it themselves. */
   readonly config?: JsonValue;
   /**
@@ -98,13 +99,26 @@ export interface CreateRunInput {
   readonly graph: CompiledGraph;
 }
 
-export interface StoredRun {
+interface StoredRunBase {
   readonly runId: string;
   readonly graph: CompiledGraph;
-  readonly finished: boolean;
   /** Next event sequence; an optimistic revision for resume appends. */
   readonly revision: number;
 }
+
+/**
+ * A persisted run. The v1 model makes the terminal invariant explicit:
+ * unfinished runs have no outcome, and finished runs always have one.
+ */
+export type StoredRun =
+  | (StoredRunBase & {
+      readonly finished: false;
+      readonly outcome?: never;
+    })
+  | (StoredRunBase & {
+      readonly finished: true;
+      readonly outcome: RunOutcome;
+    });
 
 /** A lightweight run listing, without the graph or events. */
 export interface RunSummary {
@@ -124,7 +138,8 @@ export interface RunSummary {
  *   existing events, waits for new ones, and completes once the run is
  *   finished and the log is drained. Unknown runId rejects on iteration.
  * - Appending never waits on consumers — the engine only notifies.
- * - finishRun is idempotent.
+ * - finishRun atomically persists the terminal outcome and marks the run
+ *   finished. It is idempotent; the first persisted outcome wins.
  * - reopenRun clears the finished flag so a reset run can be resumed;
  *   idempotent, and rejects an unknown run. It is administrative recovery
  *   (plan §16) — the caller is responsible for the run's consistency.
@@ -143,7 +158,7 @@ export interface RunStore {
   readEvents(runId: string, fromSeq?: number): AsyncIterable<PersistedRunEvent>;
   getRun(runId: string): Promise<StoredRun | undefined>;
   listRuns(): Promise<readonly RunSummary[]>;
-  finishRun(runId: string): Promise<void>;
+  finishRun(runId: string, outcome: RunOutcome): Promise<void>;
   reopenRun(runId: string): Promise<void>;
   close?(): Promise<void>;
 }

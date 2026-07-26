@@ -250,7 +250,7 @@ function defaultShapeInput(context: ExecutionContext): JsonValue {
   if (context.inputs.length === 1) {
     return context.inputs[0] as JsonValue;
   }
-  return context.inputs as readonly JsonValue[];
+  return context.inputs;
 }
 
 function safePathPart(value: string): string {

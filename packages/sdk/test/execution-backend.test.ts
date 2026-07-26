@@ -81,6 +81,9 @@ describe("createLocalExecutionBackend", () => {
     await waitForExit(b, handle);
     const result = await b.collect(handle);
     expect(result.status).toBe("failed");
+    if (result.status !== "failed") {
+      throw new Error("expected worker failure");
+    }
     expect(result.error).toBe("boom");
     expect(result.failureClass).toBe("semantic_failed");
   });

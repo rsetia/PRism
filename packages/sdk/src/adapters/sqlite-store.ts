@@ -2,8 +2,13 @@ import { createRequire } from "node:module";
 import type { DatabaseSync as Database } from "node:sqlite";
 import type { CompiledGraph } from "../graph/types.js";
 import { isPlainObject } from "../internal/json.js";
+import {
+  snapshotRunEvent,
+  snapshotRunOutcome,
+} from "../internal/persistence.js";
 import type { PersistedRunEvent, RunEvent } from "../runtime/events.js";
 import type { RunStore, RunSummary, StoredRun } from "../runtime/ports.js";
+import type { RunOutcome } from "../runtime/types.js";
 
 export interface SqliteStoreOptions {
   /**
@@ -37,7 +42,8 @@ function openDatabase(path: string): Database {
  *     run_id TEXT PRIMARY KEY,
  *     graph_json TEXT NOT NULL,
  *     finished INTEGER NOT NULL DEFAULT 0,
- *     schema_version INTEGER NOT NULL
+ *     schema_version INTEGER NOT NULL,
+ *     outcome_json TEXT
  *   )
  *   events(
  *     run_id TEXT NOT NULL,
@@ -46,8 +52,8 @@ function openDatabase(path: string): Database {
  *     PRIMARY KEY (run_id, seq)
  *   )
  * Set `PRAGMA journal_mode = WAL` and `PRAGMA foreign_keys = ON`.
- * Store a `schema_version` and refuse to open a newer one — migrations
- * are forward-only.
+ * This unreleased package starts with schema version 1. Store that version
+ * and refuse to open a newer one.
  *
  * Behavior parity with the memory store:
  * - createRun: INSERT the run; a duplicate run_id violates the primary
@@ -63,7 +69,8 @@ function openDatabase(path: string): Database {
  *   followers itself; complete the iterator when the run is finished and
  *   the cursor has drained. (Cross-process follow is out of scope — ADR.)
  * - getRun: SELECT and rebuild StoredRun (parse graph_json).
- * - finishRun: UPDATE finished = 1; idempotent.
+ * - finishRun: atomically persist the outcome and set finished = 1;
+ *   idempotent, with the first outcome winning.
  * - close: db.close(). After close the store must not be used.
  *
  * Reopen: constructing a new store over an existing file must expose the
@@ -92,7 +99,12 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
       run_id TEXT PRIMARY KEY,
       graph_json TEXT NOT NULL,
       finished INTEGER NOT NULL DEFAULT 0 CHECK (finished IN (0, 1)),
-      schema_version INTEGER NOT NULL
+      schema_version INTEGER NOT NULL,
+      outcome_json TEXT,
+      CHECK (
+        (finished = 0 AND outcome_json IS NULL) OR
+        (finished = 1 AND outcome_json IS NOT NULL)
+      )
     ) STRICT;
     CREATE TABLE IF NOT EXISTS events (
       run_id TEXT NOT NULL,
@@ -134,7 +146,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     "INSERT INTO runs (run_id, graph_json, schema_version) VALUES (?, ?, ?)",
   );
   const selectRun = db.prepare(
-    `SELECT run_id, graph_json, finished, schema_version,
+    `SELECT run_id, graph_json, finished, schema_version, outcome_json,
        (SELECT COUNT(*) FROM events WHERE events.run_id = runs.run_id) AS revision
      FROM runs WHERE run_id = ?`,
   );
@@ -151,10 +163,10 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     "SELECT seq, event_json FROM events WHERE run_id = ? AND seq >= ? ORDER BY seq",
   );
   const finishRunStatement = db.prepare(
-    "UPDATE runs SET finished = 1 WHERE run_id = ?",
+    "UPDATE runs SET finished = 1, outcome_json = ? WHERE run_id = ?",
   );
   const reopenRunStatement = db.prepare(
-    "UPDATE runs SET finished = 0 WHERE run_id = ?",
+    "UPDATE runs SET finished = 0, outcome_json = NULL WHERE run_id = ?",
   );
 
   function assertOpen(): void {
@@ -221,8 +233,8 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
           );
         }
         const persisted = events.map((event) => {
-          const saved = Object.freeze({ ...event, seq: sequence });
-          insertEvent.run(runId, sequence, JSON.stringify(event));
+          const saved = snapshotRunEvent(event, sequence);
+          insertEvent.run(runId, sequence, JSON.stringify(saved));
           sequence += 1;
           return saved;
         });
@@ -294,22 +306,42 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
       if (row === undefined) {
         return undefined;
       }
-      return Object.freeze({
+      const finished = readNumber(row, "finished") === 1;
+      const outcomeJson = readNullableString(row, "outcome_json");
+      const base = {
         runId: readString(row, "run_id"),
         graph: decodeGraph(readString(row, "graph_json")),
-        finished: readNumber(row, "finished") === 1,
         revision: readNumber(row, "revision"),
-      });
+      };
+      if (finished) {
+        if (outcomeJson === undefined) {
+          throw new Error(`finished run is missing its outcome: "${runId}"`);
+        }
+        return Object.freeze({
+          ...base,
+          finished: true,
+          outcome: decodeOutcome(outcomeJson),
+        });
+      }
+      if (outcomeJson !== undefined) {
+        throw new Error(`unfinished run has a terminal outcome: "${runId}"`);
+      }
+      return Object.freeze({ ...base, finished: false });
     });
   }
 
-  function finishRun(runId: string): Promise<void> {
+  function finishRun(runId: string, outcome: RunOutcome): Promise<void> {
     return capture(() => {
       assertOpen();
-      const result = finishRunStatement.run(runId);
-      if (result.changes === 0) {
+      const run = selectRun.get(runId);
+      if (run === undefined) {
         throw new Error(`unknown run: "${runId}"`);
       }
+      if (readNumber(run, "finished") === 1) {
+        return;
+      }
+      const persistedOutcome = snapshotRunOutcome(outcome);
+      finishRunStatement.run(JSON.stringify(persistedOutcome), runId);
       wakeReaders(runId);
     });
   }
@@ -398,6 +430,20 @@ function readNullableNumber(
   return value;
 }
 
+function readNullableString(
+  row: Record<string, unknown> | undefined,
+  column: string,
+): string | undefined {
+  const value = row?.[column];
+  if (value === null) {
+    return undefined;
+  }
+  if (typeof value !== "string") {
+    throw new Error(`sqlite column "${column}" is not a string`);
+  }
+  return value;
+}
+
 function decodeGraph(json: string): CompiledGraph {
   const value = JSON.parse(json) as unknown;
   if (
@@ -426,6 +472,10 @@ function decodeEvent(json: string, seq: number): PersistedRunEvent {
   const persisted = { ...value, seq };
   deepFreeze(persisted);
   return persisted as unknown as PersistedRunEvent;
+}
+
+function decodeOutcome(json: string): RunOutcome {
+  return snapshotRunOutcome(JSON.parse(json) as unknown);
 }
 
 function deepFreeze(value: unknown): void {

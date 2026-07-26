@@ -2,7 +2,7 @@ import type { RunEvent } from "./events.js";
 import type { RunStore } from "./ports.js";
 import { reduceNodeState } from "./transitions.js";
 import { TERMINAL_NODE_STATES } from "./types.js";
-import type { NodeState } from "./types.js";
+import type { NodeFailure, NodeState } from "./types.js";
 
 /**
  * Administrative recovery operations (plan §16). These mutate a run's
@@ -15,13 +15,18 @@ import type { NodeState } from "./types.js";
 async function replayStates(
   store: RunStore,
   runId: string,
-): Promise<{ states: Map<string, NodeState>; order: readonly string[] }> {
+): Promise<{
+  states: Map<string, NodeState>;
+  order: readonly string[];
+  failures: readonly NodeFailure[];
+}> {
   const stored = await store.getRun(runId);
   if (stored === undefined) {
     throw new Error(`unknown run: "${runId}"`);
   }
 
   const states = new Map<string, NodeState>();
+  const failureByNode = new Map<string, NodeFailure>();
   for (const nodeId of stored.graph.order) {
     states.set(nodeId, "pending");
   }
@@ -37,12 +42,21 @@ async function replayStates(
         throw new Error(`stored event targets unknown node "${event.nodeId}"`);
       }
       states.set(event.nodeId, reduceNodeState(previous, event));
+      if (event.kind === "node_failed") {
+        failureByNode.set(event.nodeId, event.failure);
+      } else if (event.kind === "node_reset") {
+        failureByNode.delete(event.nodeId);
+      }
     }
   } finally {
     await iterator.return?.();
   }
 
-  return { states, order: stored.graph.order };
+  const failures = stored.graph.order.flatMap((nodeId) => {
+    const failure = failureByNode.get(nodeId);
+    return failure === undefined ? [] : [failure];
+  });
+  return { states, order: stored.graph.order, failures };
 }
 
 /**
@@ -62,7 +76,7 @@ export async function abortRun(store: RunStore, runId: string): Promise<void> {
     return;
   }
 
-  const { states, order } = await replayStates(store, runId);
+  const { states, order, failures } = await replayStates(store, runId);
   const events: RunEvent[] = [];
   for (const nodeId of order) {
     const state = states.get(nodeId);
@@ -80,7 +94,11 @@ export async function abortRun(store: RunStore, runId: string): Promise<void> {
   if (events.length > 0) {
     await store.appendEvents(runId, events);
   }
-  await store.finishRun(runId);
+  await store.finishRun(runId, {
+    status: "cancelled",
+    reason: null,
+    failures,
+  });
 }
 
 export interface ResetRunOptions {

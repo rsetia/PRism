@@ -48,7 +48,7 @@ function fakeRunner(stubs: readonly Stub[]): {
 
 function ctx(
   config: JsonValue,
-  inputs: readonly unknown[] = [],
+  inputs: readonly JsonValue[] = [],
 ): ExecutionContext {
   return {
     runId: "r",

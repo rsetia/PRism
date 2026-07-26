@@ -10,7 +10,11 @@ import {
   createSqliteStore,
   parseGraph,
 } from "../src/index.js";
-import type { CompiledGraph, PersistedRunEvent } from "../src/index.js";
+import type {
+  CompiledGraph,
+  ExecutorDefinition,
+  PersistedRunEvent,
+} from "../src/index.js";
 import { runStoreContract } from "./support/run-store-contract.js";
 
 // The durable store must pass the exact same contract as the memory
@@ -58,7 +62,11 @@ describe("sqlite durability", () => {
     const store = createSqliteStore({ path });
     await store.createRun({ runId: "older", graph: fixtureGraph() });
     await store.createRun({ runId: "newer", graph: fixtureGraph() });
-    await store.finishRun("older");
+    await store.finishRun("older", {
+      status: "cancelled",
+      reason: null,
+      failures: [],
+    });
     await store.close?.();
 
     const reopened = createSqliteStore({ path });
@@ -78,7 +86,7 @@ describe("sqlite durability", () => {
       { kind: "node_started", nodeId: "only" },
       { kind: "node_succeeded", nodeId: "only", output: 1 },
     ]);
-    await store.finishRun("r");
+    await store.finishRun("r", { status: "succeeded", output: 1 });
     await store.close?.();
 
     const reopened = createSqliteStore({ path });
@@ -86,6 +94,7 @@ describe("sqlite durability", () => {
     expect(run?.runId).toBe("r");
     expect(run?.finished).toBe(true);
     expect(run?.graph.finalNode).toBe("only");
+    expect(run?.outcome).toEqual({ status: "succeeded", output: 1 });
 
     const events = await collect(reopened.readEvents("r"));
     expect(events.map((e) => e.kind)).toEqual([
@@ -94,6 +103,49 @@ describe("sqlite durability", () => {
       "node_succeeded",
     ]);
     await reopened.close?.();
+  });
+
+  test("invalid executor output becomes a durable failure", async () => {
+    const invalid: ExecutorDefinition = {
+      name: "invalid",
+      execute() {
+        return { status: "succeeded", output: BigInt(1) } as never;
+      },
+    };
+    const parsed = parseGraph({
+      version: 1,
+      nodes: { only: { executor: "invalid" } },
+      finalNode: "only",
+    });
+    if (!parsed.ok) throw new Error("fixture parse failed");
+    const compiled = compileGraph(parsed.graph);
+    if (!compiled.ok) throw new Error("fixture compile failed");
+
+    const store = createSqliteStore({ path: ":memory:" });
+    const engine = createEngine({
+      store,
+      registry: createExecutorRegistry([invalid]),
+    });
+    const outcome = await engine.run(compiled.graph, { runId: "invalid" })
+      .result;
+    expect(outcome).toEqual({
+      status: "failed",
+      failures: [
+        {
+          nodeId: "only",
+          cause: {
+            code: "INVALID_EXECUTOR_OUTPUT",
+            message: "executor output must be JSON-safe",
+          },
+          failureClass: "validation_failed",
+        },
+      ],
+    });
+    expect(await store.getRun("invalid")).toMatchObject({
+      finished: true,
+      outcome,
+    });
+    await store.close?.();
   });
 
   test("an unfinished run reopens with its partial history and can be appended", async () => {

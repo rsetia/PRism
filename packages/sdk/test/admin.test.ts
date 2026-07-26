@@ -90,9 +90,44 @@ describe("abortRun", () => {
     expect(inspection.finished).toBe(true);
     expect(stateOf(inspection.nodes, "a")).toBe("cancelled");
     expect(stateOf(inspection.nodes, "b")).toBe("cancelled");
+    expect((await store.getRun("stuck"))?.outcome).toEqual({
+      status: "cancelled",
+      reason: null,
+      failures: [],
+    });
 
     release?.();
     await handle.result.catch(() => undefined);
+  });
+
+  test("preserves failures that happened before an administrative abort", async () => {
+    const store = createMemoryStore();
+    const graph = buildGraph({
+      version: 1,
+      nodes: {
+        doomed: { executor: "fail" },
+        pending: { executor: "constant", config: { value: null } },
+      },
+      finalNode: "pending",
+    });
+    const failure = {
+      nodeId: "doomed",
+      cause: { reason: "already failed" },
+      failureClass: "semantic_failed" as const,
+    };
+    await store.createRun({ runId: "partial", graph });
+    await store.appendEvents("partial", [
+      { kind: "node_ready", nodeId: "doomed" },
+      { kind: "node_started", nodeId: "doomed" },
+      { kind: "node_failed", nodeId: "doomed", failure },
+    ]);
+
+    await abortRun(store, "partial");
+    expect((await store.getRun("partial"))?.outcome).toEqual({
+      status: "cancelled",
+      reason: null,
+      failures: [failure],
+    });
   });
 
   test("rejects an unknown run and no-ops a finished run", async () => {

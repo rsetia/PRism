@@ -13,6 +13,7 @@ import type {
   ExecutorDefinition,
   JsonValue,
   RunHandle,
+  RunStore,
 } from "../src/index.js";
 
 function buildGraph(definition: unknown): CompiledGraph {
@@ -55,8 +56,8 @@ function settle(): Promise<void> {
  */
 interface ControlledStart {
   readonly nodeId: string;
-  readonly inputs: readonly unknown[];
-  readonly succeed: (output: unknown) => void;
+  readonly inputs: readonly JsonValue[];
+  readonly succeed: (output: JsonValue) => void;
   readonly fail: (cause: JsonValue) => void;
 }
 
@@ -274,6 +275,33 @@ describe("createEngine", () => {
       failures: [
         { nodeId: "t", cause: { name: "RangeError", message: "exploded" } },
       ],
+    });
+  });
+
+  test("a persistence failure rejects without falsely finishing the run", async () => {
+    const base = createMemoryStore();
+    const store: RunStore = {
+      ...base,
+      appendEvents() {
+        return Promise.reject(new Error("persistence unavailable"));
+      },
+    };
+    const engine = createEngine({
+      store,
+      registry: createExecutorRegistry(builtinExecutors),
+    });
+    const graph = buildGraph({
+      version: 1,
+      nodes: { work: { executor: "constant", config: { value: "ok" } } },
+      finalNode: "work",
+    });
+
+    await expect(
+      engine.run(graph, { runId: "not-finished" }).result,
+    ).rejects.toThrow("persistence unavailable");
+    expect(await base.getRun("not-finished")).toMatchObject({
+      finished: false,
+      revision: 0,
     });
   });
 

@@ -1,20 +1,11 @@
 import type { CompiledGraph } from "../graph/types.js";
+import {
+  snapshotRunEvent,
+  snapshotRunOutcome,
+} from "../internal/persistence.js";
 import type { PersistedRunEvent, RunEvent } from "../runtime/events.js";
 import type { RunStore, RunSummary, StoredRun } from "../runtime/ports.js";
-import type { NodeFailure } from "../runtime/types.js";
-
-/** Rebuild a failure for persistence, keeping an optional class. */
-function persistFailure(failure: NodeFailure): NodeFailure {
-  return Object.freeze(
-    failure.failureClass === undefined
-      ? { nodeId: failure.nodeId, cause: failure.cause }
-      : {
-          nodeId: failure.nodeId,
-          cause: failure.cause,
-          failureClass: failure.failureClass,
-        },
-  );
-}
+import type { RunOutcome } from "../runtime/types.js";
 
 interface MemoryRun {
   readonly runId: string;
@@ -22,64 +13,7 @@ interface MemoryRun {
   readonly events: PersistedRunEvent[];
   readonly waiters: Set<() => void>;
   finished: boolean;
-}
-
-function persistEvent(event: RunEvent, seq: number): PersistedRunEvent {
-  switch (event.kind) {
-    case "node_ready":
-      return Object.freeze({ kind: event.kind, nodeId: event.nodeId, seq });
-
-    case "node_started":
-      return Object.freeze({ kind: event.kind, nodeId: event.nodeId, seq });
-
-    case "node_cancelling":
-      return Object.freeze({ kind: event.kind, nodeId: event.nodeId, seq });
-
-    case "node_cancelled":
-      return Object.freeze({ kind: event.kind, nodeId: event.nodeId, seq });
-
-    case "node_reset":
-      return Object.freeze({ kind: event.kind, nodeId: event.nodeId, seq });
-
-    case "node_succeeded":
-      return Object.freeze({
-        kind: event.kind,
-        nodeId: event.nodeId,
-        output: event.output,
-        seq,
-      });
-
-    case "node_failed":
-      return Object.freeze({
-        kind: event.kind,
-        nodeId: event.nodeId,
-        failure: persistFailure(event.failure),
-        seq,
-      });
-
-    case "node_retry_wait":
-      return Object.freeze({
-        kind: event.kind,
-        nodeId: event.nodeId,
-        attempt: event.attempt,
-        delayMs: event.delayMs,
-        failure: persistFailure(event.failure),
-        seq,
-      });
-
-    case "node_blocked":
-      return Object.freeze({
-        kind: event.kind,
-        nodeId: event.nodeId,
-        blockedBy: Object.freeze([...event.blockedBy]),
-        seq,
-      });
-
-    default: {
-      const unhandledEvent: never = event;
-      throw new Error(`unhandled run event: ${JSON.stringify(unhandledEvent)}`);
-    }
-  }
+  outcome: RunOutcome | undefined;
 }
 
 function wakeReaders(run: MemoryRun): void {
@@ -121,6 +55,7 @@ export function createMemoryStore(): RunStore {
       runId: input.runId,
       graph: input.graph,
       finished: false,
+      outcome: undefined,
       events: [],
       waiters: new Set(),
     });
@@ -151,9 +86,18 @@ export function createMemoryStore(): RunStore {
     }
 
     const firstSequence = run.events.length;
-    const persisted = events.map((event, index) =>
-      persistEvent(event, firstSequence + index),
-    );
+    let persisted: readonly PersistedRunEvent[];
+    try {
+      persisted = events.map((event, index) =>
+        snapshotRunEvent(event, firstSequence + index),
+      );
+    } catch (error: unknown) {
+      return Promise.reject(
+        error instanceof Error
+          ? error
+          : new Error("event persistence failed", { cause: error }),
+      );
+    }
     run.events.push(...persisted);
     if (persisted.length > 0) {
       wakeReaders(run);
@@ -203,17 +147,30 @@ export function createMemoryStore(): RunStore {
       return Promise.resolve(undefined);
     }
 
-    return Promise.resolve(
-      Object.freeze({
-        runId: run.runId,
-        graph: run.graph,
-        finished: run.finished,
-        revision: run.events.length,
-      }),
-    );
+    const base = {
+      runId: run.runId,
+      graph: run.graph,
+      revision: run.events.length,
+    };
+    if (run.finished) {
+      if (run.outcome === undefined) {
+        return Promise.reject(
+          new Error(`finished run is missing its outcome: "${runId}"`),
+        );
+      }
+      return Promise.resolve(
+        Object.freeze({ ...base, finished: true, outcome: run.outcome }),
+      );
+    }
+    if (run.outcome !== undefined) {
+      return Promise.reject(
+        new Error(`unfinished run has a terminal outcome: "${runId}"`),
+      );
+    }
+    return Promise.resolve(Object.freeze({ ...base, finished: false }));
   }
 
-  function finishRun(runId: string): Promise<void> {
+  function finishRun(runId: string, outcome: RunOutcome): Promise<void> {
     const run = runs.get(runId);
     if (run === undefined) {
       return Promise.reject(new Error(`unknown run: "${runId}"`));
@@ -222,6 +179,15 @@ export function createMemoryStore(): RunStore {
       return Promise.resolve();
     }
 
+    try {
+      run.outcome = snapshotRunOutcome(outcome);
+    } catch (error: unknown) {
+      return Promise.reject(
+        error instanceof Error
+          ? error
+          : new Error("outcome persistence failed", { cause: error }),
+      );
+    }
     run.finished = true;
     wakeReaders(run);
     return Promise.resolve();
@@ -233,6 +199,7 @@ export function createMemoryStore(): RunStore {
       return Promise.reject(new Error(`unknown run: "${runId}"`));
     }
     run.finished = false;
+    run.outcome = undefined;
     return Promise.resolve();
   }
 

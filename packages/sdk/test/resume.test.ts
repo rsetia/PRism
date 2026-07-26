@@ -147,11 +147,39 @@ describe("engine resume", () => {
       { kind: "node_succeeded", nodeId: "b", output: "B" },
     ]);
     // Both nodes already succeeded and the run was finished.
-    await store.finishRun("r");
+    await store.finishRun("r", { status: "succeeded", output: "B" });
 
     const outcome = await engineOn(store, [countingB]).resume("r").result;
     expect(outcome).toEqual({ status: "succeeded", output: "B" });
     expect(bCalls).toBe(0); // finished run — nothing re-executes
+  });
+
+  test("replays the exact persisted outcome for a preflight failure", async () => {
+    const store = createMemoryStore();
+    const graph = buildGraph({
+      version: 1,
+      nodes: { ghost: { executor: "missing" } },
+      finalNode: "ghost",
+    });
+    const first = await engineOn(store).run(graph, { runId: "preflight" })
+      .result;
+    expect(first).toEqual({
+      status: "failed",
+      failures: [
+        {
+          nodeId: "ghost",
+          cause: { code: "UNKNOWN_EXECUTOR", executor: "missing" },
+        },
+      ],
+    });
+    expect(await eventKinds(engineOn(store).resume("preflight"))).toEqual([]);
+
+    const stored = await store.getRun("preflight");
+    expect(stored?.finished).toBe(true);
+    expect(stored?.outcome).toEqual(first);
+    await expect(engineOn(store).resume("preflight").result).resolves.toEqual(
+      first,
+    );
   });
 
   test("reclassifies a crashed running node as transient_infra", async () => {

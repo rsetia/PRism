@@ -73,7 +73,7 @@ export interface NodeFailure {
  * nodes are visible in the final node states, not duplicated here.
  */
 export type RunOutcome =
-  | { readonly status: "succeeded"; readonly output: unknown }
+  | { readonly status: "succeeded"; readonly output: JsonValue }
   | { readonly status: "failed"; readonly failures: readonly NodeFailure[] }
   | {
       readonly status: "cancelled";

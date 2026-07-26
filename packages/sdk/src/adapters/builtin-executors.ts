@@ -28,7 +28,10 @@ const constant = freezeExecutor({
       return failed("INVALID_CONSTANT_CONFIG");
     }
 
-    return { status: "succeeded", output: context.config["value"] };
+    return {
+      status: "succeeded",
+      output: context.config["value"] as JsonValue,
+    };
   },
 });
 
@@ -44,7 +47,10 @@ const passthrough = freezeExecutor({
       return failed("INVALID_PASSTHROUGH_INPUTS");
     }
 
-    return { status: "succeeded", output: context.inputs[0] };
+    const input = context.inputs[0];
+    return input === undefined
+      ? failed("INVALID_PASSTHROUGH_INPUTS")
+      : { status: "succeeded", output: input };
   },
 });
 

@@ -1,4 +1,8 @@
 import type { CompiledGraph, CompiledNode, JsonValue } from "../graph/types.js";
+import {
+  snapshotJsonValue,
+  snapshotNodeFailure,
+} from "../internal/persistence.js";
 import type { PersistedRunEvent, RunEvent } from "./events.js";
 import { normalizeThrownCause } from "./failures.js";
 import type {
@@ -237,7 +241,7 @@ async function invokeExecutor(
   runId: string,
   node: CompiledNode,
   executor: ExecutorDefinition,
-  outputs: ReadonlyMap<string, unknown>,
+  outputs: ReadonlyMap<string, JsonValue>,
   signal: AbortSignal,
   attempt: number,
 ): Promise<SchedulerEvent> {
@@ -248,7 +252,7 @@ async function invokeExecutor(
           `node "${node.id}" is missing output from dependency "${dependencyId}"`,
         );
       }
-      return outputs.get(dependencyId);
+      return outputs.get(dependencyId) as JsonValue;
     }),
   );
   const context: ExecutionContext = Object.freeze(
@@ -266,10 +270,11 @@ async function invokeExecutor(
   );
 
   try {
+    const outcome: unknown = await executor.execute(context);
     return {
       kind: "node_completion",
       nodeId: node.id,
-      outcome: await executor.execute(context),
+      outcome: normalizeExecutorOutcome(node.id, outcome),
     };
   } catch (thrown: unknown) {
     return {
@@ -283,10 +288,84 @@ async function invokeExecutor(
   }
 }
 
+function normalizeExecutorOutcome(
+  nodeId: string,
+  outcome: unknown,
+): NodeExecutionOutcome {
+  if (
+    typeof outcome !== "object" ||
+    outcome === null ||
+    Array.isArray(outcome)
+  ) {
+    return invalidExecutorOutcome(
+      "INVALID_EXECUTOR_OUTCOME",
+      "executor must return an outcome object",
+    );
+  }
+  const value = outcome as Record<string, unknown>;
+  if (value["status"] === "succeeded") {
+    if (!Object.hasOwn(value, "output")) {
+      return invalidExecutorOutcome(
+        "INVALID_EXECUTOR_OUTPUT",
+        "succeeded executor outcome must contain output",
+      );
+    }
+    try {
+      return {
+        status: "succeeded",
+        output: snapshotJsonValue(value["output"], "executor output"),
+      };
+    } catch (error: unknown) {
+      return invalidExecutorOutcome(
+        "INVALID_EXECUTOR_OUTPUT",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+  if (value["status"] === "failed") {
+    try {
+      const failure = snapshotNodeFailure({
+        nodeId,
+        cause: value["cause"],
+        ...(value["failureClass"] === undefined
+          ? {}
+          : { failureClass: value["failureClass"] }),
+      });
+      return failure.failureClass === undefined
+        ? { status: "failed", cause: failure.cause }
+        : {
+            status: "failed",
+            cause: failure.cause,
+            failureClass: failure.failureClass,
+          };
+    } catch (error: unknown) {
+      return invalidExecutorOutcome(
+        "INVALID_EXECUTOR_FAILURE",
+        error instanceof Error ? error.message : String(error),
+      );
+    }
+  }
+  return invalidExecutorOutcome(
+    "INVALID_EXECUTOR_OUTCOME",
+    'executor outcome status must be "succeeded" or "failed"',
+  );
+}
+
+function invalidExecutorOutcome(
+  code: string,
+  message: string,
+): NodeExecutionOutcome {
+  return {
+    status: "failed",
+    cause: { code, message },
+    failureClass: "validation_failed",
+  };
+}
+
 interface RunExecutionState {
   readonly states: Map<string, NodeState>;
   readonly attempts: Map<string, number>;
-  readonly outputs: Map<string, unknown>;
+  readonly outputs: Map<string, JsonValue>;
   readonly originatingFailures: Map<string, NodeFailure>;
   readonly retryDelays: Map<string, number>;
   readonly hasCancelledNodes: boolean;
@@ -394,42 +473,6 @@ async function readEventSnapshot(
     await iterator.return?.();
   }
   return Object.freeze(events);
-}
-
-function outcomeFromExecutionState(
-  graph: CompiledGraph,
-  execution: RunExecutionState,
-): RunOutcome {
-  for (const [nodeId, state] of execution.states) {
-    if (
-      state !== "succeeded" &&
-      state !== "failed" &&
-      state !== "blocked" &&
-      state !== "cancelled"
-    ) {
-      throw new Error(
-        `finished run has node "${nodeId}" in non-terminal state "${state}"`,
-      );
-    }
-  }
-
-  const failures = graph.order.flatMap((nodeId) => {
-    const failure = execution.originatingFailures.get(nodeId);
-    return failure === undefined ? [] : [failure];
-  });
-  if (execution.hasCancelledNodes) {
-    return { status: "cancelled", reason: null, failures };
-  }
-  if (failures.length > 0) {
-    return { status: "failed", failures };
-  }
-  if (!execution.outputs.has(graph.finalNode)) {
-    throw new Error(`final node "${graph.finalNode}" has no stored output`);
-  }
-  return {
-    status: "succeeded",
-    output: execution.outputs.get(graph.finalNode),
-  };
 }
 
 async function executeRun(
@@ -891,7 +934,10 @@ async function executeRun(
   if (!outputs.has(graph.finalNode)) {
     throw new Error(`final node "${graph.finalNode}" has no output`);
   }
-  return { status: "succeeded", output: outputs.get(graph.finalNode) };
+  return {
+    status: "succeeded",
+    output: outputs.get(graph.finalNode) as JsonValue,
+  };
 }
 
 /**
@@ -1011,7 +1057,20 @@ export function createEngine(options: EngineOptions): Engine {
       events: createEventIterable(store, runId, ready),
       result,
       cancel: (reason?: JsonValue): Promise<void> => {
-        cancellation.request(reason ?? null);
+        let persistedReason: JsonValue;
+        try {
+          persistedReason = snapshotJsonValue(
+            reason ?? null,
+            "cancellation reason",
+          );
+        } catch (error: unknown) {
+          return Promise.reject(
+            error instanceof Error
+              ? error
+              : new Error("cancellation reason must be JSON-safe"),
+          );
+        }
+        cancellation.request(persistedReason);
         return cancellationFinished;
       },
     });
@@ -1026,21 +1085,19 @@ export function createEngine(options: EngineOptions): Engine {
       );
       const result = (async (): Promise<RunOutcome> => {
         await creation;
-        try {
-          return await executeRun(
-            graph,
-            runId,
-            store,
-            registry,
-            maxConcurrency,
-            cancelGracePeriodMs,
-            cancellation,
-            retryPolicy,
-            clock,
-          );
-        } finally {
-          await store.finishRun(runId);
-        }
+        const outcome = await executeRun(
+          graph,
+          runId,
+          store,
+          registry,
+          maxConcurrency,
+          cancelGracePeriodMs,
+          cancellation,
+          retryPolicy,
+          clock,
+        );
+        await store.finishRun(runId, outcome);
+        return outcome;
       })();
       return createHandle(runId, creation, result, cancellation);
     },
@@ -1060,7 +1117,7 @@ export function createEngine(options: EngineOptions): Engine {
         const events = await readEventSnapshot(store, runId, stored.revision);
         const execution = replayExecutionState(stored.graph, events);
         if (stored.finished) {
-          return outcomeFromExecutionState(stored.graph, execution);
+          return stored.outcome;
         }
 
         const outcome = await executeRun(
@@ -1076,7 +1133,7 @@ export function createEngine(options: EngineOptions): Engine {
           execution,
           stored.revision,
         );
-        await store.finishRun(runId);
+        await store.finishRun(runId, outcome);
         return outcome;
       })();
       return createHandle(runId, ready, result, cancellation);

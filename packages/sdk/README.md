@@ -39,7 +39,9 @@ const outcome = await engine.run(compiled.graph).result;
 - Core entry (`@rsetia/prism`) is Node-built-in-free.
 - **`@rsetia/prism/node`** adds subprocess/codex executors, git worktrees,
   a SQLite store, artifacts, and logs.
-- Failures are data; events are the source of truth; resume is event replay.
+- Failures are data; node lifecycle events and terminal outcomes are durable;
+  resume replays unfinished work and returns the recorded result for finished
+  work.
 
 Executors run real commands with no sandbox — see the repository's
 [SECURITY.md](https://github.com/rsetia/PRism/blob/main/SECURITY.md) before

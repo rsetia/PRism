@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { compileGraph, parseGraph } from "../../src/index.js";
 import type {
   CompiledGraph,
+  JsonValue,
   PersistedRunEvent,
   RunEvent,
   RunStore,
@@ -37,6 +38,7 @@ export function runStoreContract(
       const run = await s.getRun("r");
       expect(run?.runId).toBe("r");
       expect(run?.finished).toBe(false);
+      expect(run).not.toHaveProperty("outcome");
       expect(run?.revision).toBe(0);
       // Assert graph fields rather than deep-equality: a durable store
       // reconstructs the graph from storage, so identity won't match.
@@ -84,7 +86,7 @@ export function runStoreContract(
       const s = open();
       await s.createRun({ runId: "r", graph: fixtureGraph() });
       await s.appendEvents("r", [ready("a"), started("a")]);
-      await s.finishRun("r");
+      await s.finishRun("r", cancelledOutcome());
       const seen: PersistedRunEvent[] = [];
       await collect(s.readEvents("r"), seen);
       expect(seen.map((e) => e.seq)).toEqual([0, 1]);
@@ -94,7 +96,7 @@ export function runStoreContract(
       const s = open();
       await s.createRun({ runId: "r", graph: fixtureGraph() });
       await s.appendEvents("r", [ready("a"), started("a"), ready("b")]);
-      await s.finishRun("r");
+      await s.finishRun("r", cancelledOutcome());
       const seen: PersistedRunEvent[] = [];
       await collect(s.readEvents("r", 1), seen);
       expect(seen.map((e) => e.seq)).toEqual([1, 2]);
@@ -107,7 +109,7 @@ export function runStoreContract(
       const done = collect(s.readEvents("r"), seen);
       await s.appendEvents("r", [ready("a")]);
       await s.appendEvents("r", [started("a")]);
-      await s.finishRun("r");
+      await s.finishRun("r", cancelledOutcome());
       await done;
       expect(seen.map((e) => e.seq)).toEqual([0, 1]);
     });
@@ -121,7 +123,7 @@ export function runStoreContract(
       const late: PersistedRunEvent[] = [];
       const doneLate = collect(s.readEvents("r"), late);
       await s.appendEvents("r", [started("a")]);
-      await s.finishRun("r");
+      await s.finishRun("r", cancelledOutcome());
       await Promise.all([doneEarly, doneLate]);
       expect(early.map((e) => e.seq)).toEqual([0, 1]);
       expect(late.map((e) => e.seq)).toEqual([0, 1]);
@@ -135,7 +137,7 @@ export function runStoreContract(
     test("appendEvents rejects after finishRun", async () => {
       const s = open();
       await s.createRun({ runId: "r", graph: fixtureGraph() });
-      await s.finishRun("r");
+      await s.finishRun("r", cancelledOutcome());
       await expect(s.appendEvents("r", [ready("a")])).rejects.toThrow();
     });
 
@@ -147,18 +149,26 @@ export function runStoreContract(
     test("finishRun is idempotent", async () => {
       const s = open();
       await s.createRun({ runId: "r", graph: fixtureGraph() });
-      await s.finishRun("r");
-      await expect(s.finishRun("r")).resolves.toBeUndefined();
+      const first = cancelledOutcome({ requestedBy: "operator" });
+      await s.finishRun("r", first);
+      await expect(
+        s.finishRun("r", { status: "succeeded", output: "ignored" }),
+      ).resolves.toBeUndefined();
+      expect(await s.getRun("r")).toMatchObject({
+        finished: true,
+        outcome: first,
+      });
     });
 
-    test("reopenRun clears the finished flag and re-enables appends", async () => {
+    test("reopenRun clears the outcome and re-enables appends", async () => {
       const s = open();
       await s.createRun({ runId: "r", graph: fixtureGraph() });
-      await s.finishRun("r");
+      await s.finishRun("r", cancelledOutcome());
       await s.reopenRun("r");
 
       const run = await s.getRun("r");
       expect(run?.finished).toBe(false);
+      expect(run).not.toHaveProperty("outcome");
       // A reopened run accepts new events again.
       await expect(s.appendEvents("r", [ready("a")])).resolves.toBeDefined();
     });
@@ -179,7 +189,7 @@ export function runStoreContract(
       const s = open();
       await s.createRun({ runId: "a", graph: fixtureGraph() });
       await s.createRun({ runId: "b", graph: fixtureGraph() });
-      await s.finishRun("b");
+      await s.finishRun("b", cancelledOutcome());
 
       const runs = await s.listRuns();
       expect(runs.map((run) => run.runId)).toEqual(["b", "a"]);
@@ -193,7 +203,7 @@ export function runStoreContract(
       const s = open();
       await s.createRun({ runId: "a", graph: fixtureGraph() });
       const beforeFinish = await s.listRuns();
-      await s.finishRun("a");
+      await s.finishRun("a", cancelledOutcome());
       await s.createRun({ runId: "b", graph: fixtureGraph() });
 
       expect(beforeFinish).toEqual([{ runId: "a", finished: false }]);
@@ -217,7 +227,16 @@ export function runStoreContract(
           },
         },
       ]);
-      await s.finishRun("r");
+      await s.finishRun("r", {
+        status: "failed",
+        failures: [
+          {
+            nodeId: "only",
+            cause: { code: "X" },
+            failureClass: "semantic_failed",
+          },
+        ],
+      });
       const seen: PersistedRunEvent[] = [];
       await collect(s.readEvents("r"), seen);
       const event = seen[0];
@@ -226,6 +245,57 @@ export function runStoreContract(
         expect(event.failure.failureClass).toBe("semantic_failed");
         expect(event.failure.cause).toEqual({ code: "X" });
       }
+    });
+
+    test("persistence snapshots mutable events and terminal outcomes", async () => {
+      const s = open();
+      await s.createRun({ runId: "r", graph: fixtureGraph() });
+      const output = { nested: { value: "before" } };
+      const appended = await s.appendEvents("r", [
+        { kind: "node_succeeded", nodeId: "only", output },
+      ]);
+      output.nested.value = "mutated";
+
+      const reason = { requestedBy: { name: "before" } };
+      await s.finishRun("r", cancelledOutcome(reason));
+      reason.requestedBy.name = "mutated";
+
+      const seen: PersistedRunEvent[] = [];
+      await collect(s.readEvents("r"), seen);
+      expect(seen[0]).toMatchObject({
+        output: { nested: { value: "before" } },
+      });
+      expect(seen[0]).toEqual(appended[0]);
+      expect(Object.isFrozen(seen[0])).toBe(true);
+      if (seen[0]?.kind === "node_succeeded") {
+        expect(Object.isFrozen(seen[0].output)).toBe(true);
+      }
+
+      const stored = await s.getRun("r");
+      expect(stored?.outcome).toEqual(
+        cancelledOutcome({ requestedBy: { name: "before" } }),
+      );
+      expect(Object.isFrozen(stored?.outcome)).toBe(true);
+      if (stored?.finished === true && stored.outcome.status === "cancelled") {
+        expect(Object.isFrozen(stored.outcome.reason)).toBe(true);
+      }
+    });
+
+    test("rejects non-JSON event output and terminal outcome data", async () => {
+      const s = open();
+      await s.createRun({ runId: "r", graph: fixtureGraph() });
+      const invalid = BigInt(1) as unknown as JsonValue;
+      await expect(
+        s.appendEvents("r", [
+          { kind: "node_succeeded", nodeId: "only", output: invalid },
+        ]),
+      ).rejects.toThrow("JSON-safe");
+      expect((await s.getRun("r"))?.revision).toBe(0);
+
+      await expect(
+        s.finishRun("r", { status: "succeeded", output: invalid }),
+      ).rejects.toThrow("JSON-safe");
+      expect((await s.getRun("r"))?.finished).toBe(false);
     });
   });
 }
@@ -247,6 +317,13 @@ const started = (nodeId: string): RunEvent => ({
   kind: "node_started",
   nodeId,
 });
+
+const cancelledOutcome = (reason: JsonValue = null) =>
+  ({
+    status: "cancelled",
+    reason,
+    failures: [],
+  }) as const;
 
 async function collect(
   iterable: AsyncIterable<PersistedRunEvent>,

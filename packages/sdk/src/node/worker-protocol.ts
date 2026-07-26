@@ -39,12 +39,13 @@ export interface WorkerSpec {
  * failure — a worker classifies its own failure so the engine's retry
  * policy can act on it (unclassified defaults to transient_infra).
  */
-export interface WorkerResult {
-  readonly status: "succeeded" | "failed";
-  readonly output?: JsonValue;
-  readonly error?: string;
-  readonly failureClass?: FailureClass;
-}
+export type WorkerResult =
+  | { readonly status: "succeeded"; readonly output: JsonValue }
+  | {
+      readonly status: "failed";
+      readonly error: string;
+      readonly failureClass?: FailureClass;
+    };
 
 /** A worker's liveness beacon, rewritten on a regular interval. */
 export interface Heartbeat {

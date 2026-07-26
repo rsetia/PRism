@@ -93,6 +93,26 @@ describe("inspectRun", () => {
     expect(inspection.failures.map((f) => f.nodeId)).toEqual(["doomed"]);
   });
 
+  test("reports a persisted preflight failure with an empty event log", async () => {
+    const store = createMemoryStore();
+    const graph = buildGraph({
+      version: 1,
+      nodes: { ghost: { executor: "missing" } },
+      finalNode: "ghost",
+    });
+    await engineOn(store).run(graph, { runId: "preflight" }).result;
+
+    const inspection = await inspectRun(store, "preflight");
+    expect(inspection.finished).toBe(true);
+    expect(inspection.nodes).toEqual([{ nodeId: "ghost", state: "pending" }]);
+    expect(inspection.failures).toEqual([
+      {
+        nodeId: "ghost",
+        cause: { code: "UNKNOWN_EXECUTOR", executor: "missing" },
+      },
+    ]);
+  });
+
   test("snapshots an in-progress run without blocking", async () => {
     const store = createMemoryStore();
     let release: (() => void) | undefined;

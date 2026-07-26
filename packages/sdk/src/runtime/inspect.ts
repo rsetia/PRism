@@ -131,10 +131,15 @@ async function inspectRunSnapshot(
       failureByNode.delete(event.nodeId);
     }
   }
-  const failures = stored.graph.order.flatMap((nodeId) => {
+  const eventFailures = stored.graph.order.flatMap((nodeId) => {
     const failure = failureByNode.get(nodeId);
     return failure === undefined ? [] : [failure];
   });
+  const failures =
+    stored.outcome?.status === "failed" ||
+    stored.outcome?.status === "cancelled"
+      ? stored.outcome.failures
+      : eventFailures;
 
   const nodes = stored.graph.order.map((nodeId) => {
     const state = states.get(nodeId);

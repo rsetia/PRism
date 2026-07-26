@@ -46,7 +46,7 @@ describe("watchRun", () => {
       { kind: "node_started", nodeId: "work" },
       { kind: "node_succeeded", nodeId: "work", output: "done" },
     ]);
-    await store.finishRun("r");
+    await store.finishRun("r", { status: "succeeded", output: "done" });
     clock.advance(25);
 
     const second = await nextSnapshot;
@@ -69,7 +69,10 @@ describe("watchRun", () => {
       { kind: "node_started", nodeId: "work" },
       { kind: "node_succeeded", nodeId: "work", output: "done" },
     ]);
-    await store.finishRun("done");
+    await store.finishRun("done", {
+      status: "succeeded",
+      output: "done",
+    });
 
     const snapshots = [];
     for await (const snapshot of watchRun(store, "done", { clock })) {

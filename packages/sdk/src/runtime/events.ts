@@ -1,3 +1,4 @@
+import type { JsonValue } from "../graph/types.js";
 import type { NodeFailure } from "./types.js";
 
 /**
@@ -15,7 +16,7 @@ export type RunEvent =
   | {
       readonly kind: "node_succeeded";
       readonly nodeId: string;
-      readonly output: unknown;
+      readonly output: JsonValue;
     }
   | {
       readonly kind: "node_failed";

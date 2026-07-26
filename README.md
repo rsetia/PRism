@@ -163,9 +163,11 @@ Model notes:
 - **Failures are data.** A failing node resolves the run as `failed` (root
   causes only; downstream nodes show as `blocked`). `result` rejects only for
   engine bugs or invalid API use, never for an expected failure.
-- **Events are the source of truth.** Every state change is an event with a
-  monotonic sequence number; `handle.events` is a cursor over the persisted
-  log, so late subscribers see full history and resume is event replay.
+- **Lifecycle events are durable facts.** Every node-state change is an event
+  with a monotonic sequence number; `handle.events` is a cursor over the
+  persisted log, so late subscribers see full history. The terminal run
+  outcome is persisted alongside that log, including failures that happen
+  before a node starts.
 - **Retry is failure-classified.** Executors classify their own failures
   (`transient_infra`, `timeout`, `semantic_failed`, …); the retry policy
   decides per class, with backoff on an injected clock.
@@ -173,7 +175,9 @@ Model notes:
   `engine.resume(runId)` continues one after a crash.
 - **Custom executors** are `{ name, execute(context) }` returning
   `{ status: "succeeded", output }` or `{ status: "failed", cause,
-failureClass? }`; anything thrown is caught and normalized.
+failureClass? }`. Outputs and failure causes must be JSON-safe so they can be
+  persisted; invalid extension results become classified failures. Anything
+  thrown is caught and normalized.
 
 ### Built-in executors
 
@@ -224,8 +228,9 @@ names, and the operator CLI above.
 
 Deliberately **not** included:
 
-- **Typed dataflow** — node outputs are `unknown`; there is no compile-time
-  wiring between nodes yet.
+- **Typed dataflow** — node outputs are JSON values, but there is no
+  compile-time wiring between the shape produced by one node and the shape
+  expected by another yet.
 - **`kill-stale`** — reaping orphaned worker OS processes needs worker-PID
   persistence tied to a specific execution backend, out of scope for the
   backend-agnostic core. `abort` covers the state-recovery half.

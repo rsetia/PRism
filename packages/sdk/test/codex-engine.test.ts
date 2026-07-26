@@ -145,6 +145,9 @@ describe("createCodexEngine", () => {
       contract,
     });
     expect(result.status).toBe("failed");
+    if (result.status !== "failed") {
+      throw new Error("expected infrastructure failure");
+    }
     expect(result.failureClass).toBe("transient_infra");
     expect(result.error).toContain("status 7");
     expect(result.error).toContain("fake codex details");
@@ -160,6 +163,9 @@ describe("createCodexEngine", () => {
       contract,
     });
     expect(result.status).toBe("failed");
+    if (result.status !== "failed") {
+      throw new Error("expected infrastructure failure");
+    }
     expect(result.failureClass).toBe("transient_infra");
     expect(result.error).toContain("invalid result.json");
   });
@@ -175,6 +181,9 @@ describe("createCodexEngine", () => {
     setTimeout(() => controller.abort(), 25);
     const result = await execution;
     expect(result.status).toBe("failed");
+    if (result.status !== "failed") {
+      throw new Error("expected infrastructure failure");
+    }
     expect(result.failureClass).toBe("transient_infra");
     expect(result.error).toContain("cancelled");
   });

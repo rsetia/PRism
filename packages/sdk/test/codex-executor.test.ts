@@ -94,7 +94,7 @@ function run(
 }
 
 function context(
-  inputs: readonly unknown[] = [],
+  inputs: readonly JsonValue[] = [],
   overrides: Partial<ExecutionContext> = {},
 ): ExecutionContext {
   return {

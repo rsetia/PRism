@@ -35,7 +35,7 @@ const strict: ExecutorDefinition = {
     }
   },
   execute(context) {
-    return { status: "succeeded", output: context.config };
+    return { status: "succeeded", output: context.config ?? null };
   },
 };
 
