@@ -9,6 +9,12 @@ import {
 } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import type {
+  ArtifactLocator,
+  ArtifactRef,
+  ArtifactStore,
+  PutArtifactInput,
+} from "../runtime/ports.js";
 import { decodePathComponent, encodePathComponent } from "./path-component.js";
 
 /**
@@ -19,37 +25,6 @@ import { decodePathComponent, encodePathComponent } from "./path-component.js";
  * worker on a remote pod can `put` and the orchestrator can `get` without
  * sharing a filesystem.
  */
-
-export interface ArtifactRef {
-  /** Opaque locator resolvable by the store that produced it. */
-  readonly uri: string;
-  readonly filename: string;
-  readonly contentType?: string;
-  /** Size in bytes. */
-  readonly size: number;
-}
-
-export interface PutArtifactInput {
-  readonly runId: string;
-  readonly nodeId: string;
-  /** 1-based attempt the artifact belongs to. */
-  readonly attempt: number;
-  readonly filename: string;
-  readonly data: Uint8Array;
-  readonly contentType?: string;
-}
-
-export interface ArtifactLocator {
-  readonly runId: string;
-  readonly nodeId: string;
-}
-
-export interface ArtifactStore {
-  put(input: PutArtifactInput): Promise<ArtifactRef>;
-  get(uri: string): Promise<Uint8Array>;
-  /** All artifacts for a node, across attempts. */
-  list(locator: ArtifactLocator): Promise<readonly ArtifactRef[]>;
-}
 
 export interface LocalArtifactStoreOptions {
   /** Root directory the artifact tree lives under. */

@@ -36,9 +36,9 @@ export type {
   ArtifactLocator,
   ArtifactRef,
   ArtifactStore,
-  LocalArtifactStoreOptions,
   PutArtifactInput,
-} from "./artifact-store.js";
+} from "../runtime/ports.js";
+export type { LocalArtifactStoreOptions } from "./artifact-store.js";
 export { createLocalArtifactStore } from "./artifact-store.js";
 export type {
   FileLogBackendOptions,

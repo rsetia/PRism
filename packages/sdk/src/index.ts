@@ -51,11 +51,15 @@ export type { PersistedRunEvent, RunEvent } from "./runtime/events.js";
 export type {
   Clock,
   CreateRunInput,
+  ArtifactLocator,
+  ArtifactRef,
+  ArtifactStore,
   RunSummary,
   ExecutionContext,
   ExecutorDefinition,
   ExecutorRegistry,
   NodeExecutionOutcome,
+  PutArtifactInput,
   RunStore,
   StoredRun,
 } from "./runtime/ports.js";

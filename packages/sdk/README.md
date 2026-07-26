@@ -40,7 +40,8 @@ const outcome = await engine.run(compiled.graph).result;
 - **`@rsetia/prism/node`** adds subprocess/codex executors, git worktrees,
   a SQLite store, artifacts, and logs.
 - **`@rsetia/prism/testing`** exports the Vitest `runStoreContract` suite for
-  validating third-party `RunStore` adapters.
+  validating third-party `RunStore` adapters and
+  `runArtifactStoreContract` for artifact backends.
 - Failures are data; node lifecycle events and terminal outcomes are durable;
   resume replays unfinished work and returns the recorded result for finished
   work.
@@ -55,6 +56,18 @@ runStoreContract("PostgresRunStore", async () => createPostgresStore());
 The factory receives a clean test lifecycle: it returns a fresh empty store,
 and the suite calls its optional `close()` method after each test. Install
 `vitest` as a development dependency to use the testing entry point.
+
+Artifact adapters implement `ArtifactStore` from the core entry. Use a fresh
+test namespace for each contract case:
+
+```ts
+import { runArtifactStoreContract } from "@rsetia/prism/testing";
+import { createS3ArtifactStore } from "./s3-artifact-store.js";
+
+runArtifactStoreContract("S3ArtifactStore", async () =>
+  createS3ArtifactStore({ prefix: crypto.randomUUID() }),
+);
+```
 
 Executors run real commands with no sandbox — see the repository's
 [SECURITY.md](https://github.com/rsetia/PRism/blob/main/SECURITY.md) before

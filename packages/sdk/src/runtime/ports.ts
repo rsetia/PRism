@@ -162,3 +162,51 @@ export interface RunStore {
   reopenRun(runId: string): Promise<void>;
   close?(): Promise<void>;
 }
+
+/** Opaque metadata for bytes persisted by an ArtifactStore. */
+export interface ArtifactRef {
+  /** Opaque locator resolvable by the store that produced it. */
+  readonly uri: string;
+  readonly filename: string;
+  readonly contentType?: string;
+  /** Size in bytes. */
+  readonly size: number;
+}
+
+export interface PutArtifactInput {
+  readonly runId: string;
+  readonly nodeId: string;
+  /** 1-based attempt the artifact belongs to. */
+  readonly attempt: number;
+  readonly filename: string;
+  readonly data: Uint8Array;
+  readonly contentType?: string;
+}
+
+export interface ArtifactLocator {
+  readonly runId: string;
+  readonly nodeId: string;
+}
+
+/**
+ * Binary artifact persistence port.
+ *
+ * Contract:
+ * - runId, nodeId, attempt, and filename form the logical identity. String
+ *   identifiers are opaque and distinct values must never alias.
+ * - attempt is a positive integer.
+ * - put snapshots the supplied bytes and returns their filename, byte size,
+ *   optional content type, and a non-empty opaque URI.
+ * - get resolves URIs produced by this store to a fresh byte snapshot and
+ *   rejects unknown URIs.
+ * - list returns a point-in-time collection of every artifact for a node
+ *   across attempts. Its order is unspecified; an unknown node returns [].
+ * - close optionally releases underlying clients or connections. The store
+ *   must not be used afterward.
+ */
+export interface ArtifactStore {
+  put(input: PutArtifactInput): Promise<ArtifactRef>;
+  get(uri: string): Promise<Uint8Array>;
+  list(locator: ArtifactLocator): Promise<readonly ArtifactRef[]>;
+  close?(): Promise<void>;
+}

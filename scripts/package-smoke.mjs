@@ -85,8 +85,11 @@ console.log("core boundary ok");
 
 const TS_CONSUMER = `
 import { compileGraph, createMemoryStore, parseGraph } from "@rsetia/prism";
-import type { CompiledGraph } from "@rsetia/prism";
-import type { RunStoreFactory } from "@rsetia/prism/testing";
+import type { ArtifactStore, CompiledGraph } from "@rsetia/prism";
+import type {
+  ArtifactStoreFactory,
+  RunStoreFactory,
+} from "@rsetia/prism/testing";
 
 const parsed = parseGraph({
   version: 1,
@@ -106,6 +109,9 @@ if (graph.order.length !== 1) {
 }
 const storeFactory: RunStoreFactory = async () => createMemoryStore();
 void storeFactory;
+declare const artifactStore: ArtifactStore;
+const artifactStoreFactory: ArtifactStoreFactory = async () => artifactStore;
+void artifactStoreFactory;
 `;
 
 const TS_CONFIG = JSON.stringify({

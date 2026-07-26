@@ -199,6 +199,30 @@ The factory must return a fresh, empty store for each test. It may be
 asynchronous, and the suite calls the optional `close()` method afterward.
 Install `vitest` as a development dependency to use this entry point.
 
+### Custom artifact stores
+
+Remote artifact adapters implement the core `ArtifactStore` interface and can
+use the backend-neutral suite exported from the same testing entry point:
+
+```ts
+import type { ArtifactStore } from "@rsetia/prism";
+import { runArtifactStoreContract } from "@rsetia/prism/testing";
+import { createS3ArtifactStore } from "./s3-artifact-store.js";
+
+runArtifactStoreContract("S3ArtifactStore", async () => {
+  const store: ArtifactStore = createS3ArtifactStore({
+    bucket: "prism-test",
+    prefix: crypto.randomUUID(),
+  });
+  return store;
+});
+```
+
+The contract checks byte and metadata round-trips, immutable snapshots,
+attempt and namespace isolation, listing, logical-name safety, and unknown
+artifacts. Backend-specific security and lifecycle tests still belong with the
+adapter.
+
 ### Built-in executors
 
 | Name          | Behavior                                                   |
