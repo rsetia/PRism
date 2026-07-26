@@ -7,7 +7,6 @@ import {
   compileGraph,
   createEngine,
   createExecutorRegistry,
-  createSqliteStore,
   parseGraph,
 } from "../src/index.js";
 import type {
@@ -15,6 +14,7 @@ import type {
   ExecutorDefinition,
   PersistedRunEvent,
 } from "../src/index.js";
+import { createSqliteStore } from "../src/node/index.js";
 import { runStoreContract } from "./support/run-store-contract.js";
 
 // The durable store must pass the exact same contract as the memory

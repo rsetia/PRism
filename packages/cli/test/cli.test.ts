@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { compileGraph, createSqliteStore, parseGraph } from "@rsetia/prism";
+import { compileGraph, parseGraph } from "@rsetia/prism";
 import type { CompiledGraph } from "@rsetia/prism";
+import { createSqliteStore } from "@rsetia/prism/node";
 import { afterAll, describe, expect, test } from "vitest";
 
 /**

@@ -27,7 +27,7 @@ function openDatabase(path: string): Database {
 }
 
 /**
- * Durable RunStore backed by SQLite (plan §12). Same interface, same
+ * Node-only durable RunStore backed by SQLite (plan §12). Same interface, same
  * contract as the memory store — only the storage is durable. The driver
  * decision is recorded in adr/0001.
  *

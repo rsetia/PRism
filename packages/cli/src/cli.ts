@@ -17,7 +17,6 @@ import {
   createEngine,
   createExecutorRegistry,
   createMemoryStore,
-  createSqliteStore,
   createSystemClock,
   inspectRun,
   parseGraph,
@@ -34,6 +33,7 @@ import type {
   RunOutcome,
   RunStore,
 } from "@rsetia/prism";
+import { createSqliteStore } from "@rsetia/prism/node";
 
 /** stdout: data only. stderr: humans only. */
 export interface CliIo {

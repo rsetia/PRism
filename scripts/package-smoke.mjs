@@ -33,9 +33,15 @@ import {
   createMemoryStore,
   parseGraph,
 } from "@rsetia/prism";
-import { createLocalExecutionBackend } from "@rsetia/prism/node";
+import {
+  createLocalExecutionBackend,
+  createSqliteStore,
+} from "@rsetia/prism/node";
 
-if (typeof createLocalExecutionBackend !== "function") {
+if (
+  typeof createLocalExecutionBackend !== "function" ||
+  typeof createSqliteStore !== "function"
+) {
   throw new Error("the ./node entry point did not resolve");
 }
 
@@ -59,6 +65,22 @@ if (outcome.status !== "succeeded" || outcome.output !== "hello") {
   throw new Error("unexpected outcome: " + JSON.stringify(outcome));
 }
 console.log("js consumer ok (SDK " + SDK_VERSION + ")");
+`;
+
+const CORE_BOUNDARY_CONSUMER = `
+import { registerHooks } from "node:module";
+
+registerHooks({
+  resolve(specifier, context, nextResolve) {
+    if (specifier.startsWith("node:")) {
+      throw new Error("core entry imported Node built-in " + specifier);
+    }
+    return nextResolve(specifier, context);
+  },
+});
+
+await import("@rsetia/prism");
+console.log("core boundary ok");
 `;
 
 const TS_CONSUMER = `
@@ -142,6 +164,20 @@ try {
     ],
     { cwd: consumerDir },
   );
+
+  log("verifying the core entry imports no Node built-ins");
+  await writeFile(
+    path.join(consumerDir, "core-boundary.mjs"),
+    CORE_BOUNDARY_CONSUMER,
+  );
+  const { stdout: boundaryOut } = await run(
+    process.execPath,
+    ["core-boundary.mjs"],
+    { cwd: consumerDir },
+  );
+  if (!boundaryOut.includes("core boundary ok")) {
+    throw new Error(`core boundary check failed: ${boundaryOut}`);
+  }
 
   log("running the plain-JS consumer");
   await writeFile(path.join(consumerDir, "check.mjs"), JS_CONSUMER);

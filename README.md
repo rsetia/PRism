@@ -171,8 +171,9 @@ Model notes:
 - **Retry is failure-classified.** Executors classify their own failures
   (`transient_infra`, `timeout`, `semantic_failed`, …); the retry policy
   decides per class, with backoff on an injected clock.
-- **Durable & resumable.** `createSqliteStore({ path })` persists runs;
-  `engine.resume(runId)` continues one after a crash.
+- **Durable & resumable.** `createSqliteStore({ path })` from
+  `@rsetia/prism/node` persists runs; `engine.resume(runId)` continues one
+  after a crash.
 - **Custom executors** are `{ name, execute(context) }` returning
   `{ status: "succeeded", output }` or `{ status: "failed", cause,
 failureClass? }`. Outputs and failure causes must be JSON-safe so they can be

@@ -3,6 +3,8 @@
  * touches Node built-ins (child_process, fs), so it is kept out of the
  * core `.` entry — a core-only consumer never loads it (plan §7/§14).
  */
+export type { SqliteStoreOptions } from "./sqlite-store.js";
+export { createSqliteStore } from "./sqlite-store.js";
 export type { Heartbeat, WorkerResult, WorkerSpec } from "./worker-protocol.js";
 export {
   NODE_DIR_ENV_VAR,

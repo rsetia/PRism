@@ -69,8 +69,6 @@ export type {
 export { createExecutorRegistry } from "./runtime/registry.js";
 export { normalizeThrownCause } from "./runtime/failures.js";
 export { createMemoryStore } from "./adapters/memory-store.js";
-export { createSqliteStore } from "./adapters/sqlite-store.js";
-export type { SqliteStoreOptions } from "./adapters/sqlite-store.js";
 export { builtinExecutors } from "./adapters/builtin-executors.js";
 
 export const SDK_VERSION = "0.1.0-alpha.0";
