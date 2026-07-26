@@ -1,0 +1,73 @@
+name: Feature or extension proposal
+description: Propose a new capability or extension point
+title: "[Proposal]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Please lead with the developer problem. Material API, schema, persistence, and architectural changes should be discussed here before implementation.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What developer or operator need is not met today?
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed solution
+      description: Describe the behavior and public contract, not only an implementation.
+    validations:
+      required: true
+
+  - type: dropdown
+    id: extension_area
+    attributes:
+      label: Extension area
+      options:
+        - Executor
+        - Run store
+        - Execution backend
+        - Artifact or log backend
+        - Graph schema or compiler
+        - CLI
+        - Beads integration
+        - Documentation or tooling
+        - Unsure or other
+    validations:
+      required: true
+
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Include workarounds and reasons they are insufficient.
+    validations:
+      required: true
+
+  - type: textarea
+    id: compatibility
+    attributes:
+      label: Compatibility and persistence impact
+      description: Note API, event, graph, database, worker-protocol, security, and migration implications.
+
+  - type: textarea
+    id: examples
+    attributes:
+      label: Example usage
+      description: Show the intended TypeScript API, graph, or CLI experience when useful.
+      render: typescript
+
+  - type: checkboxes
+    id: confirmation
+    attributes:
+      label: Checklist
+      options:
+        - label: I searched existing issues for related proposals.
+          required: true
+        - label: I read the current status and limitations in the README.
+          required: true
+        - label: I am willing to help implement or review this proposal.

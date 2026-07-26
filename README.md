@@ -252,6 +252,14 @@ state-table, store-contract, spawned-CLI integration, real-subprocess and
 real-git integration, tarball contents), `publint` + `@arethetypeswrong/cli`,
 and a packed-tarball consumer smoke test. CI runs the same command.
 
+## Contributing
+
+Contributions are welcome. Start with [CONTRIBUTING.md](CONTRIBUTING.md) for
+the development workflow and extension contracts. Participation follows the
+[Code of Conduct](CODE_OF_CONDUCT.md); project decisions and support
+expectations are documented in [GOVERNANCE.md](GOVERNANCE.md) and
+[SUPPORT.md](SUPPORT.md).
+
 ## License
 
 [MIT](LICENSE)
