@@ -18,6 +18,7 @@
     "test": "vitest run --passWithNoTests",
     "pack:check": "publint packages/sdk && publint packages/cli && attw --pack packages/sdk --profile esm-only",
     "smoke": "node scripts/package-smoke.mjs",
+    "audit": "npm audit --audit-level=high",
     "verify": "npm run build && npm run typecheck && npm run lint && npm run format:check && npm run test && npm run pack:check && npm run smoke"
   },
   "devDependencies": {

@@ -32,6 +32,9 @@ npm run verify
 lints, checks formatting, runs all tests, validates packed package metadata,
 and exercises the SDK and CLI from cleanly installed tarballs.
 
+`npm run audit` checks the complete dependency tree for high- and
+critical-severity vulnerabilities. CI runs both gates.
+
 Use `npm run dev` for TypeScript watch mode and
 `npm exec vitest -- --watch` for an interactive test loop.
 
@@ -41,7 +44,7 @@ Use `npm run dev` for TypeScript watch mode and
 2. Implement the smallest complete change.
 3. Update public documentation when an API, command, security boundary, or
    operational behavior changes.
-4. Run `npm run verify`.
+4. Run `npm run audit` and `npm run verify`.
 5. Open a pull request using the repository template.
 
 Tests live beside their package under `packages/*/test`. Prefer externally
