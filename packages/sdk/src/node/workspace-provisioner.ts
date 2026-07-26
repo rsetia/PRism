@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { encodePathComponent } from "./path-component.js";
 
 /**
  * The WorkspaceProvisioner port (plan §14, from PRism-py). It owns the
@@ -27,7 +28,13 @@ export interface ProvisionInput {
 
 export interface WorkspaceProvisioner {
   provision(input: ProvisionInput): Promise<WorkspaceHandle>;
+  /**
+   * Tears down the workspace. Idempotent; after this resolves, handle.dir no
+   * longer exists.
+   */
   release(handle: WorkspaceHandle): Promise<void>;
+  /** Optionally releases an underlying client or connection pool. */
+  close?(): Promise<void>;
 }
 
 export interface GitWorktreeProvisionerOptions {
@@ -52,7 +59,7 @@ export function createGitWorktreeProvisioner(
   const repoDir = resolve(options.repoDir);
   const baseDir = resolve(options.baseDir);
   const baseRef = options.baseRef ?? "HEAD";
-  const branchPrefix = options.branchPrefix ?? "prism/";
+  const branchPrefix = sanitizeBranchName(options.branchPrefix ?? "prism/");
 
   return Object.freeze({
     async provision(input: ProvisionInput): Promise<WorkspaceHandle> {
@@ -60,9 +67,12 @@ export function createGitWorktreeProvisioner(
         throw new Error("workspace attempt must be an integer greater than 0");
       }
 
-      const branch = sanitizeBranchName(
-        `${branchPrefix}${safeRefComponent(input.runId)}/${safeRefComponent(input.nodeId)}/a${String(input.attempt)}`,
-      );
+      const branch = `${branchPrefix}/${encodePathComponent(
+        input.runId,
+        "workspace runId",
+      )}/${encodePathComponent(input.nodeId, "workspace nodeId")}/a${String(
+        input.attempt,
+      )}`;
       await mkdir(baseDir, { recursive: true });
       const dir = await mkdtemp(
         join(

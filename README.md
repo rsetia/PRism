@@ -246,6 +246,29 @@ attempt isolation, independent followers, cancellation, close behavior,
 missing logs, and UTF-8 text spanning read-buffer boundaries. Follow chunk
 boundaries remain intentionally unspecified.
 
+### Custom workspace provisioners
+
+Workspace adapters implement `WorkspaceProvisioner` from the Node entry.
+Every handle exposes an absolute, writable local directory, so container or
+remote implementations must mount or synchronize their workspace locally:
+
+```ts
+import type { WorkspaceProvisioner } from "@rsetia/prism/node";
+import { runWorkspaceProvisionerContract } from "@rsetia/prism/testing";
+import { createContainerWorkspaceProvisioner } from "./container-workspaces.js";
+
+runWorkspaceProvisionerContract("ContainerWorkspaceProvisioner", async () => {
+  const provisioner: WorkspaceProvisioner =
+    createContainerWorkspaceProvisioner();
+  return provisioner;
+});
+```
+
+The contract checks writable absolute directories, attempt and identifier
+isolation, case and Unicode identity, input validation, teardown, and
+idempotent release. Backend-specific checkout, mount, and failure-cleanup
+tests remain the adapter's responsibility.
+
 ### Built-in executors
 
 | Name          | Behavior                                                   |

@@ -90,10 +90,12 @@ import type {
   CompiledGraph,
   LogBackend,
 } from "@rsetia/prism";
+import type { WorkspaceProvisioner } from "@rsetia/prism/node";
 import type {
   ArtifactStoreFactory,
   LogBackendFactory,
   RunStoreFactory,
+  WorkspaceProvisionerFactory,
 } from "@rsetia/prism/testing";
 
 const parsed = parseGraph({
@@ -120,6 +122,10 @@ void artifactStoreFactory;
 declare const logBackend: LogBackend;
 const logBackendFactory: LogBackendFactory = async () => logBackend;
 void logBackendFactory;
+declare const workspaceProvisioner: WorkspaceProvisioner;
+const workspaceProvisionerFactory: WorkspaceProvisionerFactory = async () =>
+  workspaceProvisioner;
+void workspaceProvisionerFactory;
 `;
 
 const TS_CONFIG = JSON.stringify({

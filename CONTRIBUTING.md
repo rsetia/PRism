@@ -66,7 +66,9 @@ Prism is designed to grow through explicit interfaces:
 - **Execution, artifacts, logs, and workspaces:** implement the corresponding
   port and keep platform behavior out of the core runtime. Artifact adapters
   must pass `runArtifactStoreContract`, and log adapters must pass
-  `runLogBackendContract`, from `@rsetia/prism/testing`.
+  `runLogBackendContract`. Workspace adapters must pass
+  `runWorkspaceProvisionerContract`. All suites are exported from
+  `@rsetia/prism/testing`.
 - **Core APIs:** `@rsetia/prism` must remain free of Node built-in imports.
   Filesystem, subprocess, SQLite, and Git integrations belong under
   `@rsetia/prism/node`.

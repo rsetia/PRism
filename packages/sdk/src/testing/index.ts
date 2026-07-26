@@ -4,3 +4,5 @@ export { runLogBackendContract } from "./log-backend-contract.js";
 export type { LogBackendFactory } from "./log-backend-contract.js";
 export { runStoreContract } from "./run-store-contract.js";
 export type { RunStoreFactory } from "./run-store-contract.js";
+export { runWorkspaceProvisionerContract } from "./workspace-provisioner-contract.js";
+export type { WorkspaceProvisionerFactory } from "./workspace-provisioner-contract.js";

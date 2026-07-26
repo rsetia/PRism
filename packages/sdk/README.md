@@ -42,7 +42,7 @@ const outcome = await engine.run(compiled.graph).result;
 - **`@rsetia/prism/testing`** exports the Vitest `runStoreContract` suite for
   validating third-party `RunStore` adapters and
   `runArtifactStoreContract` / `runLogBackendContract` for artifact and log
-  backends.
+  backends, plus `runWorkspaceProvisionerContract` for isolated workspaces.
 - Failures are data; node lifecycle events and terminal outcomes are durable;
   resume replays unfinished work and returns the recorded result for finished
   work.
@@ -79,6 +79,19 @@ import { createCloudLogBackend } from "./cloud-log-backend.js";
 
 runLogBackendContract("CloudLogBackend", async () =>
   createCloudLogBackend({ namespace: crypto.randomUUID() }),
+);
+```
+
+Workspace adapters implement `WorkspaceProvisioner` from
+`@rsetia/prism/node`. Handles must expose an absolute writable local directory,
+including when the actual workspace is containerized or remotely synchronized:
+
+```ts
+import { runWorkspaceProvisionerContract } from "@rsetia/prism/testing";
+import { createContainerWorkspaceProvisioner } from "./container-workspaces.js";
+
+runWorkspaceProvisionerContract("ContainerWorkspaceProvisioner", async () =>
+  createContainerWorkspaceProvisioner(),
 );
 ```
 

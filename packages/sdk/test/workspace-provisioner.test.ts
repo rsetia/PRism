@@ -1,11 +1,20 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
 import { afterAll, beforeAll, describe, expect, test } from "vitest";
-import { createGitWorktreeProvisioner } from "../src/node/index.js";
-import type { WorkspaceProvisioner } from "../src/node/index.js";
+import {
+  createGitWorktreeProvisioner,
+  type WorkspaceProvisioner,
+} from "../src/node/index.js";
+import { runWorkspaceProvisionerContract } from "../src/testing/index.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -19,7 +28,6 @@ async function git(cwd: string, ...args: string[]): Promise<string> {
 }
 
 beforeAll(async () => {
-  mkdtempSync(join(root, "seed-")); // ensure root exists on all platforms
   await execFileAsync("git", ["init", "-b", "main", repoDir]);
   await git(repoDir, "config", "user.email", "test@example.com");
   await git(repoDir, "config", "user.name", "Test");
@@ -36,15 +44,18 @@ function provisioner(): WorkspaceProvisioner {
   return createGitWorktreeProvisioner({ repoDir, baseDir: worktreesDir });
 }
 
-describe("createGitWorktreeProvisioner", () => {
-  test("provisions an isolated worktree on a new branch", async () => {
+runWorkspaceProvisionerContract("createGitWorktreeProvisioner", () =>
+  Promise.resolve(provisioner()),
+);
+
+describe("createGitWorktreeProvisioner Git behavior", () => {
+  test("checks out the repository on the reported new branch", async () => {
     const p = provisioner();
     const workspace = await p.provision({
-      runId: "r",
-      nodeId: "n",
+      runId: "git",
+      nodeId: "branch",
       attempt: 1,
     });
-    expect(existsSync(workspace.dir)).toBe(true);
     expect(existsSync(join(workspace.dir, "README.md"))).toBe(true);
 
     const branchAtWorktree = await git(
@@ -55,40 +66,20 @@ describe("createGitWorktreeProvisioner", () => {
     );
     expect(branchAtWorktree).toBe(workspace.branch);
     expect(workspace.branch).not.toBe("main");
-
     await p.release(workspace);
   });
 
-  test("release removes the worktree", async () => {
-    const p = provisioner();
-    const workspace = await p.provision({
-      runId: "r",
-      nodeId: "m",
-      attempt: 1,
+  test("removes the temporary directory when Git provisioning fails", async () => {
+    const failedBaseDir = join(root, "failed-worktrees");
+    const p = createGitWorktreeProvisioner({
+      repoDir,
+      baseDir: failedBaseDir,
+      baseRef: "refs/heads/does-not-exist",
     });
-    expect(existsSync(workspace.dir)).toBe(true);
-    await p.release(workspace);
-    expect(existsSync(workspace.dir)).toBe(false);
-  });
 
-  test("distinct attempts get distinct worktrees and branches", async () => {
-    const p = provisioner();
-    const first = await p.provision({ runId: "r", nodeId: "x", attempt: 1 });
-    const second = await p.provision({ runId: "r", nodeId: "x", attempt: 2 });
-    expect(first.dir).not.toBe(second.dir);
-    expect(first.branch).not.toBe(second.branch);
-    await p.release(first);
-    await p.release(second);
-  });
-
-  test("release is idempotent", async () => {
-    const p = provisioner();
-    const workspace = await p.provision({
-      runId: "r",
-      nodeId: "y",
-      attempt: 1,
-    });
-    await p.release(workspace);
-    await expect(p.release(workspace)).resolves.toBeUndefined();
+    await expect(
+      p.provision({ runId: "failed", nodeId: "base-ref", attempt: 1 }),
+    ).rejects.toThrow();
+    expect(readdirSync(failedBaseDir)).toEqual([]);
   });
 });
