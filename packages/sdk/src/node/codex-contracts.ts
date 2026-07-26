@@ -251,6 +251,7 @@ export function buildImplementContract(
 
 Work item:
 - Use spec.input as the task body and upstream context, together with config.workItem (${workItemDetails}).
+- Generated Beads graphs put the full snapshotted bead record first: spec.input is that record for an independent bead, or [beadRecord, ...upstreamResults] when it has dependencies.
 - Do not require a GitHub issue number unless config.workItem.provider is "github".
 - When the provider is "beads", create or update the PR body from the snapshotted Beads context in spec.input. Include the bead id, title, description, acceptance criteria when present, dependencies, validation plan, and its beads:// URL.
 

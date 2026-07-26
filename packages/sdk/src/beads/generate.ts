@@ -1,5 +1,5 @@
-import type { GraphDefinition } from "../graph/types.js";
-import { isPlainObject } from "../internal/json.js";
+import type { GraphDefinition, JsonValue } from "../graph/types.js";
+import { isJsonValue, isPlainObject } from "../internal/json.js";
 
 /**
  * The Beads DAG generator (plan §15): turn `bd` issue data into a graph
@@ -121,6 +121,7 @@ export function buildBeadsGraph(
     readonly bead: Bead;
     readonly slug: string;
     readonly dependencies: readonly string[];
+    readonly contextNodeId: string;
     readonly implementNodeId: string;
     readonly mergeNodeId: string;
     readonly updateNodeId: string;
@@ -148,6 +149,7 @@ export function buildBeadsGraph(
       bead: id === bead.id ? bead : { ...bead, id },
       slug: beadSlug,
       dependencies,
+      contextNodeId: `context-${beadSlug}`,
       implementNodeId: `implement-${beadSlug}`,
       mergeNodeId: `merge-${beadSlug}`,
       updateNodeId: `update-${beadSlug}`,
@@ -169,6 +171,12 @@ export function buildBeadsGraph(
   const terminalNodeIds: string[] = [];
 
   for (const plan of orderedPlans) {
+    nodes[plan.contextNodeId] = {
+      executor: "constant",
+      kind: "task",
+      dependsOn: [],
+      config: { value: beadContext(plan.bead, plan.dependencies) },
+    };
     const workItem = {
       provider: "beads",
       id: plan.bead.id,
@@ -190,7 +198,9 @@ export function buildBeadsGraph(
     nodes[plan.implementNodeId] = {
       executor: "implement",
       kind: "task",
-      dependsOn: dependencyNodes,
+      // The full Beads record is always the first input. Any dependency
+      // results follow it in stable bead-dependency order.
+      dependsOn: [plan.contextNodeId, ...dependencyNodes],
       config: {
         workItem,
         targetBranch,
@@ -241,11 +251,33 @@ export function buildBeadsGraph(
 
   const finalNode = "beads-final";
   nodes[finalNode] = {
-    executor: "join_newline",
+    // A constant node is a barrier here: the scheduler still waits for
+    // every terminal, while the output remains structured JSON regardless
+    // of the shapes returned by implement/merge/update executors.
+    executor: "constant",
     kind: "merge",
     dependsOn: terminalNodeIds,
+    config: {
+      value: {
+        completedBeads: orderedPlans.map((plan) => plan.bead.id),
+      },
+    },
   };
   return { version: 1, nodes, finalNode };
+}
+
+function beadContext(bead: Bead, dependencies: readonly string[]): JsonValue {
+  const value: unknown = bead;
+  if (!isJsonValue(value) || !isPlainObject(value)) {
+    throw new Error(`Bead "${bead.id}" must contain only JSON-safe data`);
+  }
+  return {
+    ...value,
+    provider: "beads",
+    id: bead.id,
+    url: `beads://${bead.id}`,
+    dependencies: [...dependencies],
+  };
 }
 
 const DEPENDENCY_ID_PROPERTIES = [

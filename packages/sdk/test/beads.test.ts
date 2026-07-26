@@ -1,11 +1,20 @@
 import { describe, expect, test } from "vitest";
 import {
+  builtinExecutors,
   buildBeadsGraph,
   compileGraph,
+  createEngine,
+  createExecutorRegistry,
+  createMemoryStore,
   parseBeadsJsonl,
   parseGraph,
 } from "../src/index.js";
-import type { Bead, GraphDefinition } from "../src/index.js";
+import type {
+  Bead,
+  ExecutorDefinition,
+  GraphDefinition,
+  JsonValue,
+} from "../src/index.js";
 
 const bead = (id: string, dependencies: string[] = []): Bead => ({
   id,
@@ -28,6 +37,18 @@ function implementNodeId(
 
 function executorNames(graph: GraphDefinition): string[] {
   return Object.values(graph.nodes).map((node) => node.executor);
+}
+
+function succeeds(name: string): ExecutorDefinition {
+  return {
+    name,
+    execute(context) {
+      return {
+        status: "succeeded",
+        output: { executor: name, nodeId: context.nodeId },
+      };
+    },
+  };
 }
 
 describe("parseBeadsJsonl", () => {
@@ -88,17 +109,48 @@ describe("buildBeadsGraph", () => {
     expect(order.indexOf(implA ?? "")).toBeLessThan(order.indexOf(implB ?? ""));
   });
 
-  test("implement config carries the work item and review gate", () => {
-    const graph = buildBeadsGraph([bead("MC-1")], { review: "greptile" });
+  test("implement receives the full bead snapshot and review config", () => {
+    const graph = buildBeadsGraph(
+      [
+        {
+          id: "MC-1",
+          title: "Useful title",
+          description: "Implement the useful behavior",
+          acceptance_criteria: "The behavior is covered by tests",
+          priority: 1,
+          dependencies: [],
+        },
+      ],
+      { review: "greptile" },
+    );
     const nodeId = implementNodeId(graph, "MC-1");
     expect(nodeId).toBeDefined();
-    const config = graph.nodes[nodeId ?? ""]?.config as {
+    const implement = graph.nodes[nodeId ?? ""];
+    const config = implement?.config as {
       workItem?: { id?: string; provider?: string };
       review?: { by?: string };
     };
     expect(config.workItem?.id).toBe("MC-1");
     expect(config.workItem?.provider).toBe("beads");
     expect(config.review?.by).toBe("greptile");
+
+    const contextNodeId = implement?.dependsOn[0];
+    expect(contextNodeId).toBe("context-mc-1");
+    expect(graph.nodes[contextNodeId ?? ""]).toMatchObject({
+      executor: "constant",
+      config: {
+        value: {
+          provider: "beads",
+          id: "MC-1",
+          url: "beads://MC-1",
+          title: "Useful title",
+          description: "Implement the useful behavior",
+          acceptance_criteria: "The behavior is covered by tests",
+          priority: 1,
+          dependencies: [],
+        },
+      },
+    });
   });
 
   test("includeBeadsUpdate: false omits beads_update nodes", () => {
@@ -128,9 +180,68 @@ describe("buildBeadsGraph", () => {
     });
     expect(graph.finalNode).toBe("beads-final");
     expect(graph.nodes["beads-final"]).toMatchObject({
-      executor: "join_newline",
+      executor: "constant",
       kind: "merge",
+      config: { value: { completedBeads: ["A", "B"] } },
     });
+  });
+
+  test("the default generated graph runs with its documented executors", async () => {
+    const implementInputs = new Map<string, readonly JsonValue[]>();
+    const implement: ExecutorDefinition = {
+      name: "implement",
+      execute(context) {
+        implementInputs.set(context.nodeId, [...context.inputs]);
+        return {
+          status: "succeeded",
+          output: {
+            summary: `implemented ${context.nodeId}`,
+            metadata: { branch: `branch-${context.nodeId}` },
+          },
+        };
+      },
+    };
+    const definition = buildBeadsGraph([
+      {
+        ...bead("B", ["A"]),
+        description: "Depends on A",
+      },
+      {
+        ...bead("A"),
+        description: "Foundation",
+      },
+    ]);
+    const compiled = compileGraph(definition);
+    if (!compiled.ok) throw new Error("generated graph did not compile");
+    const engine = createEngine({
+      store: createMemoryStore(),
+      registry: createExecutorRegistry([
+        ...builtinExecutors,
+        implement,
+        succeeds("merge_resolve"),
+        succeeds("beads_update"),
+      ]),
+    });
+
+    await expect(engine.run(compiled.graph).result).resolves.toEqual({
+      status: "succeeded",
+      output: { completedBeads: ["A", "B"] },
+    });
+    expect(implementInputs.get("implement-a")).toEqual([
+      expect.objectContaining({
+        id: "A",
+        description: "Foundation",
+        url: "beads://A",
+      }),
+    ]);
+    expect(implementInputs.get("implement-b")).toEqual([
+      expect.objectContaining({
+        id: "B",
+        description: "Depends on A",
+        dependencies: ["A"],
+      }),
+      { executor: "merge_resolve", nodeId: "merge-a" },
+    ]);
   });
 
   test("rejects an empty bead set", () => {
@@ -151,5 +262,17 @@ describe("buildBeadsGraph", () => {
     expect(() => buildBeadsGraph([bead("A B"), bead("a-b")])).toThrow(
       /collide/i,
     );
+  });
+
+  test("rejects non-JSON bead context", () => {
+    expect(() =>
+      buildBeadsGraph([
+        {
+          id: "A",
+          dependencies: [],
+          metadata: BigInt(1),
+        },
+      ]),
+    ).toThrow("JSON-safe");
   });
 });

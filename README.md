@@ -209,7 +209,9 @@ separate entry point, so a core-only consumer never loads Node built-ins:
 `buildBeadsGraph(parseBeadsJsonl(bdJsonl))` turns a
 [Beads](https://github.com/steveyegge/beads) backlog (`bd list --json`) into a
 runnable graph: one `implement` node per bead, wired by bead dependencies,
-with `merge_resolve` and `beads_update` follow-ups.
+with `merge_resolve` and `beads_update` follow-ups. Each implementation gets
+the full snapshotted bead record—including its description and acceptance
+criteria—as its first input.
 
 ## Security
 
