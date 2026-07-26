@@ -58,6 +58,87 @@ describe("createLocalArtifactStore", () => {
     expect(refs.map((r) => r.filename).sort()).toEqual(["a.txt", "b.txt"]);
   });
 
+  test("distinct identifiers and filenames never alias on disk", async () => {
+    const s = store();
+    const first = await s.put(
+      put({
+        runId: "run/a",
+        nodeId: "node:one",
+        filename: "report/a.txt",
+        data: new TextEncoder().encode("first"),
+      }),
+    );
+    const second = await s.put(
+      put({
+        runId: "run?a",
+        nodeId: "node?one",
+        filename: "report?a.txt",
+        data: new TextEncoder().encode("second"),
+      }),
+    );
+    expect(first.uri).not.toBe(second.uri);
+    expect(decode(await s.get(first.uri))).toBe("first");
+    expect(decode(await s.get(second.uri))).toBe("second");
+    expect(await s.list({ runId: "run/a", nodeId: "node:one" })).toMatchObject([
+      { filename: "report/a.txt" },
+    ]);
+    expect(await s.list({ runId: "run?a", nodeId: "node?one" })).toMatchObject([
+      { filename: "report?a.txt" },
+    ]);
+  });
+
+  test("preserves distinct artifact filenames within one attempt", async () => {
+    const s = store();
+    const slash = await s.put(
+      put({
+        filename: "nested/result.txt",
+        data: new TextEncoder().encode("slash"),
+      }),
+    );
+    const question = await s.put(
+      put({
+        filename: "nested?result.txt",
+        data: new TextEncoder().encode("question"),
+      }),
+    );
+    expect(slash.uri).not.toBe(question.uri);
+    expect(decode(await s.get(slash.uri))).toBe("slash");
+    expect(decode(await s.get(question.uri))).toBe("question");
+    expect(
+      (await s.list({ runId: "r", nodeId: "n" })).map((ref) => ref.filename),
+    ).toEqual(["nested/result.txt", "nested?result.txt"]);
+  });
+
+  test("round-trips Unicode and traversal-like logical names safely", async () => {
+    const s = store();
+    const ref = await s.put(
+      put({
+        runId: "../製品",
+        nodeId: "../../é",
+        filename: "../../../résultat.json",
+      }),
+    );
+    expect(ref.filename).toBe("../../../résultat.json");
+    expect(decode(await s.get(ref.uri))).toBe("hello");
+    expect(await s.list({ runId: "../製品", nodeId: "../../é" })).toMatchObject(
+      [{ filename: "../../../résultat.json" }],
+    );
+  });
+
+  test("rejects identifiers too long for a portable path component", async () => {
+    const s = store();
+    await expect(s.put(put({ runId: "x".repeat(200) }))).rejects.toThrow(
+      "too long",
+    );
+  });
+
+  test("rejects strings that cannot round-trip through UTF-8", async () => {
+    const s = store();
+    await expect(s.put(put({ filename: "\ud800" }))).rejects.toThrow(
+      "well-formed Unicode",
+    );
+  });
+
   test("list for an unknown node is empty, not an error", async () => {
     const s = store();
     expect(await s.list({ runId: "r", nodeId: "ghost" })).toEqual([]);

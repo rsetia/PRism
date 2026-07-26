@@ -1,6 +1,7 @@
 import { mkdir, open } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import { encodePathComponent } from "./path-component.js";
 
 /**
  * The LogBackend port (plan §14, from PRism-py). It owns writing a
@@ -275,17 +276,10 @@ function logPath(baseDir: string, target: LogTarget): string {
   validateAttempt(target.attempt);
   return resolve(
     baseDir,
-    safePathPart(target.runId),
-    safePathPart(target.nodeId),
+    encodePathComponent(target.runId, "log runId"),
+    encodePathComponent(target.nodeId, "log nodeId"),
     `a${String(target.attempt)}.log`,
   );
-}
-
-function safePathPart(value: string): string {
-  const sanitized = value.replaceAll(/[^a-zA-Z0-9._-]/g, "_").slice(0, 128);
-  return sanitized.length === 0 || sanitized === "." || sanitized === ".."
-    ? "_"
-    : sanitized;
 }
 
 function validateAttempt(attempt: number): void {

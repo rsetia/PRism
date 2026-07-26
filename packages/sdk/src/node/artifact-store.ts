@@ -9,6 +9,7 @@ import {
 } from "node:fs/promises";
 import { resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { decodePathComponent, encodePathComponent } from "./path-component.js";
 
 /**
  * The ArtifactStore port (plan §14, from PRism-py). It owns worker output
@@ -69,11 +70,11 @@ export function createLocalArtifactStore(
   return Object.freeze({
     async put(input: PutArtifactInput): Promise<ArtifactRef> {
       validateAttempt(input.attempt);
-      const filename = safePathPart(input.filename);
+      const filename = encodePathComponent(input.filename, "artifact filename");
       const directory = resolve(
         baseDir,
-        safePathPart(input.runId),
-        safePathPart(input.nodeId),
+        encodePathComponent(input.runId, "artifact runId"),
+        encodePathComponent(input.nodeId, "artifact nodeId"),
         `a${String(input.attempt)}`,
       );
       await mkdir(directory, { recursive: true });
@@ -104,7 +105,7 @@ export function createLocalArtifactStore(
 
       return artifactRef(
         path,
-        filename,
+        input.filename,
         input.data.byteLength,
         input.contentType,
       );
@@ -147,8 +148,8 @@ export function createLocalArtifactStore(
     async list(locator: ArtifactLocator): Promise<readonly ArtifactRef[]> {
       const nodeDir = resolve(
         baseDir,
-        safePathPart(locator.runId),
-        safePathPart(locator.nodeId),
+        encodePathComponent(locator.runId, "artifact runId"),
+        encodePathComponent(locator.nodeId, "artifact nodeId"),
       );
       assertContained(baseDir, nodeDir);
 
@@ -182,7 +183,7 @@ export function createLocalArtifactStore(
           refs.push(
             artifactRef(
               path,
-              entry.name,
+              decodePathComponent(entry.name, "artifact filename"),
               metadata.size,
               contentTypes.get(path),
             ),
@@ -214,13 +215,6 @@ function assertContained(baseDir: string, candidate: string): void {
   if (path === base || !path.startsWith(prefix)) {
     throw new Error(`Artifact URI is outside the store: ${candidate}`);
   }
-}
-
-function safePathPart(value: string): string {
-  const sanitized = value.replaceAll(/[^a-zA-Z0-9._-]/g, "_").slice(0, 128);
-  return sanitized.length === 0 || sanitized === "." || sanitized === ".."
-    ? "_"
-    : sanitized;
 }
 
 function validateAttempt(attempt: number): void {

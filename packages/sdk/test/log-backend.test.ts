@@ -40,6 +40,49 @@ describe("createFileLogBackend", () => {
     expect(await collect(b.read(target))).toBe("line one\nline two\n");
   });
 
+  test("distinct targets that previously sanitized alike stay isolated", async () => {
+    const b = backend();
+    const slash: LogTarget = {
+      runId: "run/a",
+      nodeId: "../worker:one",
+      attempt: 1,
+    };
+    const question: LogTarget = {
+      runId: "run?a",
+      nodeId: "..?worker?one",
+      attempt: 1,
+    };
+    const slashWriter = await b.openWriter(slash);
+    const questionWriter = await b.openWriter(question);
+    await slashWriter.write("slash");
+    await questionWriter.write("question");
+    await Promise.all([slashWriter.close(), questionWriter.close()]);
+
+    expect(await collect(b.read(slash))).toBe("slash");
+    expect(await collect(b.read(question))).toBe("question");
+  });
+
+  test("keeps case and Unicode target identities distinct", async () => {
+    const b = backend();
+    const upper: LogTarget = { runId: "Run", nodeId: "é", attempt: 1 };
+    const lower: LogTarget = { runId: "run", nodeId: "?", attempt: 1 };
+    const upperWriter = await b.openWriter(upper);
+    const lowerWriter = await b.openWriter(lower);
+    await upperWriter.write("upper");
+    await lowerWriter.write("lower");
+    await Promise.all([upperWriter.close(), lowerWriter.close()]);
+
+    expect(await collect(b.read(upper))).toBe("upper");
+    expect(await collect(b.read(lower))).toBe("lower");
+  });
+
+  test("rejects identifiers too long for a portable path component", async () => {
+    const b = backend();
+    await expect(
+      b.openWriter({ ...target, nodeId: "x".repeat(200) }),
+    ).rejects.toThrow("too long");
+  });
+
   test("a non-follow read of a missing log is empty", async () => {
     const b = backend();
     expect(await collect(b.read(target))).toBe("");
