@@ -1,6 +1,12 @@
 import { mkdir, open } from "node:fs/promises";
 import type { FileHandle } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
+import type {
+  LogBackend,
+  LogTarget,
+  LogWriter,
+  ReadLogOptions,
+} from "../runtime/ports.js";
 import { encodePathComponent } from "./path-component.js";
 
 /**
@@ -10,34 +16,6 @@ import { encodePathComponent } from "./path-component.js";
  * command stay identical whether logs come from a local file (`tail -f`)
  * or a remote pod (`kubectl logs -f`).
  */
-
-export interface LogTarget {
-  readonly runId: string;
-  readonly nodeId: string;
-  /** 1-based attempt whose log this is. */
-  readonly attempt: number;
-}
-
-export interface LogWriter {
-  write(chunk: string): Promise<void>;
-  /** Mark the log complete; a following reader ends once drained. */
-  close(): Promise<void>;
-}
-
-export interface ReadLogOptions {
-  /**
-   * Keep yielding as more is written, ending only when the writer closes.
-   * Default false: yield what exists now, then end.
-   */
-  readonly follow?: boolean;
-  /** Abort a follow early. */
-  readonly signal?: AbortSignal;
-}
-
-export interface LogBackend {
-  openWriter(target: LogTarget): Promise<LogWriter>;
-  read(target: LogTarget, options?: ReadLogOptions): AsyncIterable<string>;
-}
 
 export interface FileLogBackendOptions {
   /** Root directory the log files live under. */

@@ -41,12 +41,12 @@ export type {
 export type { LocalArtifactStoreOptions } from "./artifact-store.js";
 export { createLocalArtifactStore } from "./artifact-store.js";
 export type {
-  FileLogBackendOptions,
   LogBackend,
   LogTarget,
   LogWriter,
   ReadLogOptions,
-} from "./log-backend.js";
+} from "../runtime/ports.js";
+export type { FileLogBackendOptions } from "./log-backend.js";
 export { createFileLogBackend } from "./log-backend.js";
 export type {
   CodexEngine,

@@ -223,6 +223,29 @@ attempt and namespace isolation, listing, logical-name safety, and unknown
 artifacts. Backend-specific security and lifecycle tests still belong with the
 adapter.
 
+### Custom log backends
+
+Streaming log adapters implement the core `LogBackend` interface. The public
+contract covers both snapshot reads and live followers:
+
+```ts
+import type { LogBackend } from "@rsetia/prism";
+import { runLogBackendContract } from "@rsetia/prism/testing";
+import { createCloudLogBackend } from "./cloud-log-backend.js";
+
+runLogBackendContract("CloudLogBackend", async () => {
+  const backend: LogBackend = createCloudLogBackend({
+    namespace: crypto.randomUUID(),
+  });
+  return backend;
+});
+```
+
+The suite checks ordered and concurrent writes, exclusive writers, target and
+attempt isolation, independent followers, cancellation, close behavior,
+missing logs, and UTF-8 text spanning read-buffer boundaries. Follow chunk
+boundaries remain intentionally unspecified.
+
 ### Built-in executors
 
 | Name          | Behavior                                                   |

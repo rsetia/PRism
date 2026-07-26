@@ -210,3 +210,54 @@ export interface ArtifactStore {
   list(locator: ArtifactLocator): Promise<readonly ArtifactRef[]>;
   close?(): Promise<void>;
 }
+
+export interface LogTarget {
+  readonly runId: string;
+  readonly nodeId: string;
+  /** 1-based attempt whose log this is. */
+  readonly attempt: number;
+}
+
+export interface LogWriter {
+  /**
+   * Appends one text chunk. Concurrent calls are serialized in invocation
+   * order.
+   */
+  write(chunk: string): Promise<void>;
+  /** Marks the log complete. Idempotent. */
+  close(): Promise<void>;
+}
+
+export interface ReadLogOptions {
+  /**
+   * Keep yielding as more is written, ending only when the active writer
+   * closes. Default false: yield the current snapshot, then end.
+   */
+  readonly follow?: boolean;
+  /** Abort a follow early. Aborting ends iteration without an error. */
+  readonly signal?: AbortSignal;
+}
+
+/**
+ * Text log persistence and streaming port.
+ *
+ * Contract:
+ * - runId, nodeId, and attempt form the logical identity. String identifiers
+ *   are opaque and distinct values must never alias.
+ * - attempt is a positive integer.
+ * - only one writer may be open for a target at a time. Writes are append-only
+ *   and ordered; close is idempotent, and later writes reject.
+ * - a default read returns the current text snapshot and does not wait for an
+ *   open writer.
+ * - a follow read returns existing text, continues with appended text, and
+ *   ends when the writer closes or its signal aborts. Chunk boundaries are
+ *   unspecified; concatenated text is exact.
+ * - multiple readers own independent cursors.
+ * - close optionally releases underlying clients or connections. The backend
+ *   must not be used afterward.
+ */
+export interface LogBackend {
+  openWriter(target: LogTarget): Promise<LogWriter>;
+  read(target: LogTarget, options?: ReadLogOptions): AsyncIterable<string>;
+  close?(): Promise<void>;
+}

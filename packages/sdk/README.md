@@ -41,7 +41,8 @@ const outcome = await engine.run(compiled.graph).result;
   a SQLite store, artifacts, and logs.
 - **`@rsetia/prism/testing`** exports the Vitest `runStoreContract` suite for
   validating third-party `RunStore` adapters and
-  `runArtifactStoreContract` for artifact backends.
+  `runArtifactStoreContract` / `runLogBackendContract` for artifact and log
+  backends.
 - Failures are data; node lifecycle events and terminal outcomes are durable;
   resume replays unfinished work and returns the recorded result for finished
   work.
@@ -66,6 +67,18 @@ import { createS3ArtifactStore } from "./s3-artifact-store.js";
 
 runArtifactStoreContract("S3ArtifactStore", async () =>
   createS3ArtifactStore({ prefix: crypto.randomUUID() }),
+);
+```
+
+Log adapters implement `LogBackend` from the core entry. The contract covers
+snapshot reads, ordered writes, and live follow streams:
+
+```ts
+import { runLogBackendContract } from "@rsetia/prism/testing";
+import { createCloudLogBackend } from "./cloud-log-backend.js";
+
+runLogBackendContract("CloudLogBackend", async () =>
+  createCloudLogBackend({ namespace: crypto.randomUUID() }),
 );
 ```
 
