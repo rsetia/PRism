@@ -39,9 +39,22 @@ const outcome = await engine.run(compiled.graph).result;
 - Core entry (`@rsetia/prism`) is Node-built-in-free.
 - **`@rsetia/prism/node`** adds subprocess/codex executors, git worktrees,
   a SQLite store, artifacts, and logs.
+- **`@rsetia/prism/testing`** exports the Vitest `runStoreContract` suite for
+  validating third-party `RunStore` adapters.
 - Failures are data; node lifecycle events and terminal outcomes are durable;
   resume replays unfinished work and returns the recorded result for finished
   work.
+
+```ts
+import { runStoreContract } from "@rsetia/prism/testing";
+import { createPostgresStore } from "./postgres-store.js";
+
+runStoreContract("PostgresRunStore", async () => createPostgresStore());
+```
+
+The factory receives a clean test lifecycle: it returns a fresh empty store,
+and the suite calls its optional `close()` method after each test. Install
+`vitest` as a development dependency to use the testing entry point.
 
 Executors run real commands with no sandbox — see the repository's
 [SECURITY.md](https://github.com/rsetia/PRism/blob/main/SECURITY.md) before

@@ -15,7 +15,7 @@ import type {
   PersistedRunEvent,
 } from "../src/index.js";
 import { createSqliteStore } from "../src/node/index.js";
-import { runStoreContract } from "./support/run-store-contract.js";
+import { runStoreContract } from "../src/testing/index.js";
 
 // The durable store must pass the exact same contract as the memory
 // store, over an ephemeral database per test.

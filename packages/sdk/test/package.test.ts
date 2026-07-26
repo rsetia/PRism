@@ -34,7 +34,8 @@ async function packedFiles(packageDir: string): Promise<readonly string[]> {
 
 const ALLOWED =
   /^(package\.json|README\.md|LICENSE)$|^dist\/.+\.(js|d\.ts|js\.map|d\.ts\.map)$/;
-const FORBIDDEN = /test|fixture|coverage|tsconfig|tsbuildinfo|\.env|^src\//;
+const FORBIDDEN =
+  /(^|\/)(test|tests|fixture|fixtures|coverage)(\/|$)|\.(test|spec)\.|tsconfig|tsbuildinfo|\.env|^src\//;
 
 function assertContents(
   files: readonly string[],
@@ -58,6 +59,8 @@ describe("packed tarball contents", () => {
       "dist/index.d.ts",
       "dist/node/index.js",
       "dist/node/index.d.ts",
+      "dist/testing/index.js",
+      "dist/testing/index.d.ts",
     ]);
   }, 60_000);
 

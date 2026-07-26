@@ -61,8 +61,8 @@ Prism is designed to grow through explicit interfaces:
   data. Register executors explicitly with `createExecutorRegistry`; do not
   introduce global registries.
 - **Stores:** implement `RunStore` and preserve its atomic append, gapless
-  sequence, terminal-outcome, snapshot, and resume semantics. Run the shared
-  store contract against every implementation.
+  sequence, terminal-outcome, snapshot, and resume semantics. Run
+  `runStoreContract` from `@rsetia/prism/testing` against every implementation.
 - **Execution, artifacts, logs, and workspaces:** implement the corresponding
   Node-only port and keep platform behavior out of the core runtime.
 - **Core APIs:** `@rsetia/prism` must remain free of Node built-in imports.

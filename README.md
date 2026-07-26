@@ -180,6 +180,25 @@ failureClass? }`. Outputs and failure causes must be JSON-safe so they can be
   persisted; invalid extension results become classified failures. Anything
   thrown is caught and normalized.
 
+### Custom stores
+
+Storage adapters implement the `RunStore` interface. Prism ships the same
+Vitest conformance suite used by its memory and SQLite implementations so an
+adapter can prove compatible behavior:
+
+```ts
+import { runStoreContract } from "@rsetia/prism/testing";
+import { createPostgresStore } from "./postgres-store.js";
+
+runStoreContract("PostgresRunStore", async () => {
+  return createPostgresStore({ connectionString: process.env.DATABASE_URL });
+});
+```
+
+The factory must return a fresh, empty store for each test. It may be
+asynchronous, and the suite calls the optional `close()` method afterward.
+Install `vitest` as a development dependency to use this entry point.
+
 ### Built-in executors
 
 | Name          | Behavior                                                   |

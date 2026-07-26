@@ -1,33 +1,46 @@
-import { afterEach, describe, expect, test } from "vitest";
-import { compileGraph, parseGraph } from "../../src/index.js";
-import type {
-  CompiledGraph,
-  JsonValue,
-  PersistedRunEvent,
-  RunEvent,
-  RunStore,
-} from "../../src/index.js";
+import { afterEach, beforeEach, describe, expect, test } from "vitest";
+import { compileGraph } from "../graph/compile.js";
+import { parseGraph } from "../graph/parse.js";
+import type { CompiledGraph, JsonValue } from "../graph/types.js";
+import type { PersistedRunEvent, RunEvent } from "../runtime/events.js";
+import type { RunStore } from "../runtime/ports.js";
 
 /**
- * The shared RunStore contract (plan §12). Every store adapter — memory
- * today, SQLite next — must pass this identical suite, so semantics
- * cannot drift between implementations. `makeStore` returns a fresh,
- * empty store per test; the suite closes it afterward.
+ * Creates a fresh, empty store for one contract test. Asynchronous factories
+ * are supported so adapters can establish connections or reset remote state.
+ */
+export type RunStoreFactory = () => RunStore | Promise<RunStore>;
+
+/**
+ * Registers Prism's RunStore conformance suite with Vitest.
+ *
+ * Call this at module scope in a test file. Every store adapter should pass
+ * this identical suite so persistence semantics cannot drift between
+ * implementations. `makeStore` is called before each test, and the returned
+ * store is closed afterward when it exposes `close`.
  */
 export function runStoreContract(
   label: string,
-  makeStore: () => RunStore,
+  makeStore: RunStoreFactory,
 ): void {
   describe(`RunStore contract: ${label}`, () => {
-    let store: RunStore;
+    let store: RunStore | undefined;
+
+    beforeEach(async () => {
+      store = await makeStore();
+    });
 
     function open(): RunStore {
-      store = makeStore();
+      if (store === undefined) {
+        throw new Error("RunStore factory did not complete");
+      }
       return store;
     }
 
     afterEach(async () => {
-      await store.close?.();
+      const opened = store;
+      store = undefined;
+      await opened?.close?.();
     });
 
     test("createRun then getRun exposes the run and its graph", async () => {
@@ -80,6 +93,24 @@ export function runStoreContract(
 
       const appended = await s.appendEvents("r", [started("a")], 1);
       expect(appended[0]?.seq).toBe(1);
+    });
+
+    test("only one concurrent append can claim an expected revision", async () => {
+      const s = open();
+      await s.createRun({ runId: "r", graph: fixtureGraph() });
+
+      const attempts = await Promise.allSettled([
+        s.appendEvents("r", [ready("a")], 0),
+        s.appendEvents("r", [ready("b")], 0),
+      ]);
+
+      expect(
+        attempts.filter((attempt) => attempt.status === "fulfilled"),
+      ).toHaveLength(1);
+      expect(
+        attempts.filter((attempt) => attempt.status === "rejected"),
+      ).toHaveLength(1);
+      expect((await s.getRun("r"))?.revision).toBe(1);
     });
 
     test("a late subscriber sees the full history, then completes", async () => {
@@ -281,16 +312,18 @@ export function runStoreContract(
       }
     });
 
-    test("rejects non-JSON event output and terminal outcome data", async () => {
+    test("rejects invalid JSON data without partially committing a batch", async () => {
       const s = open();
       await s.createRun({ runId: "r", graph: fixtureGraph() });
       const invalid = BigInt(1) as unknown as JsonValue;
       await expect(
         s.appendEvents("r", [
+          ready("only"),
           { kind: "node_succeeded", nodeId: "only", output: invalid },
         ]),
       ).rejects.toThrow("JSON-safe");
       expect((await s.getRun("r"))?.revision).toBe(0);
+      expect((await s.appendEvents("r", [ready("only")]))[0]?.seq).toBe(0);
 
       await expect(
         s.finishRun("r", { status: "succeeded", output: invalid }),
