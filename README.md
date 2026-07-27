@@ -246,6 +246,36 @@ attempt isolation, independent followers, cancellation, close behavior,
 missing logs, and UTF-8 text spanning read-buffer boundaries. Follow chunk
 boundaries remain intentionally unspecified.
 
+### Custom execution backends
+
+Process, container, and cluster adapters implement `ExecutionBackend` from the
+Node entry. A worker handle has a backend-defined opaque `id`; `nodeDir` is an
+optional detail exposed by the local file-protocol backend, not a portability
+requirement:
+
+```ts
+import type { ExecutionBackend } from "@rsetia/prism/node";
+import { runExecutionBackendContract } from "@rsetia/prism/testing";
+import { createKubernetesExecutionBackend } from "./kubernetes-execution.js";
+
+runExecutionBackendContract("KubernetesExecutionBackend", async () => {
+  const backend: ExecutionBackend = createKubernetesExecutionBackend({
+    namespace: crypto.randomUUID(),
+  });
+  return backend;
+});
+```
+
+The default scenarios expect a test worker that supports `echo`, `fail`, and
+`stall` modes in its `WorkerSpec.config`. Adapters may instead pass custom
+`ExecutionBackendContractScenarios` in the third argument's `scenarios`
+option, along with a larger `timeoutMs` for slower platforms. The contract
+checks result collection, classified failures, status and liveness
+transitions, idempotent termination, worker isolation, unknown handles,
+cleanup, and the optional `close()` lifecycle. Platform-specific scheduling,
+authentication, logs, and orphan-reaping tests remain the adapter's
+responsibility.
+
 ### Custom workspace provisioners
 
 Workspace adapters implement `WorkspaceProvisioner` from the Node entry.

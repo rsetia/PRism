@@ -34,13 +34,16 @@ export type WorkerStatus = "running" | "exited";
 export type Liveness = "alive" | "idle" | "dead";
 
 /**
- * An opaque reference to a launched worker. `nodeDir` is the protocol
- * directory; the backend keeps the actual process handle internally.
+ * An opaque reference to a launched worker. Consumers pass it back unchanged;
+ * the backend keeps platform handles internally.
  */
 export interface WorkerHandle {
+  /** Backend-defined opaque identity, unique among its launched workers. */
+  readonly id: string;
   readonly runId: string;
   readonly nodeId: string;
-  readonly nodeDir: string;
+  /** Local file-protocol directory, when the backend exposes one. */
+  readonly nodeDir?: string;
 }
 
 export interface LivenessOptions {
@@ -61,14 +64,21 @@ export interface LaunchOptions {
 }
 
 export interface ExecutionBackend {
+  /** Starts one worker for the supplied execution specification. */
   launch(spec: WorkerSpec, options?: LaunchOptions): Promise<WorkerHandle>;
+  /** Reports whether a known worker is still running. */
   poll(handle: WorkerHandle): Promise<WorkerStatus>;
+  /** Classifies a known worker using backend-native status or heartbeats. */
   checkLiveness(
     handle: WorkerHandle,
     options: LivenessOptions,
   ): Promise<Liveness>;
+  /** Idempotently stops a running worker. */
   terminate(handle: WorkerHandle): Promise<void>;
+  /** Returns a completed worker's result, rejecting if none is available. */
   collect(handle: WorkerHandle): Promise<WorkerResult>;
+  /** Optionally releases an underlying client or connection pool. */
+  close?(): Promise<void>;
 }
 
 export interface LocalExecutionBackendOptions {
@@ -98,6 +108,7 @@ export function createLocalExecutionBackend(
 
   interface LocalWorker {
     readonly handle: WorkerHandle;
+    readonly nodeDir: string;
     readonly child: ChildProcess;
     readonly launchedAt: number;
     readonly exited: Promise<void>;
@@ -107,9 +118,10 @@ export function createLocalExecutionBackend(
   const workers = new Map<string, LocalWorker>();
 
   function workerFor(handle: WorkerHandle): LocalWorker {
-    const worker = workers.get(handle.nodeDir);
+    const worker = workers.get(handle.id);
     if (
       worker === undefined ||
+      worker.handle.id !== handle.id ||
       worker.handle.runId !== handle.runId ||
       worker.handle.nodeId !== handle.nodeId
     ) {
@@ -224,6 +236,7 @@ export function createLocalExecutionBackend(
         stdio: "ignore",
       });
       const handle: WorkerHandle = Object.freeze({
+        id: nodeDir,
         runId: spec.runId,
         nodeId: spec.nodeId,
         nodeDir,
@@ -235,6 +248,7 @@ export function createLocalExecutionBackend(
       });
       const worker: LocalWorker = {
         handle,
+        nodeDir,
         child,
         launchedAt: Date.now(),
         exited,
@@ -252,24 +266,26 @@ export function createLocalExecutionBackend(
         child.once("spawn", resolveSpawned);
         child.once("error", rejectSpawned);
       });
-      workers.set(nodeDir, worker);
+      workers.set(handle.id, worker);
       return handle;
     },
 
     poll(handle): Promise<WorkerStatus> {
-      const worker = workerFor(handle);
-      return Promise.resolve(hasExited(worker.child) ? "exited" : "running");
+      return Promise.resolve().then(() => {
+        const worker = workerFor(handle);
+        return hasExited(worker.child) ? "exited" : "running";
+      });
     },
 
     async checkLiveness(handle, livenessOptions): Promise<Liveness> {
       const worker = workerFor(handle);
-      const resultPath = join(handle.nodeDir, WORKER_RESULT_FILE);
+      const resultPath = join(worker.nodeDir, WORKER_RESULT_FILE);
       if (hasExited(worker.child) && !(await pathExists(resultPath))) {
         return "dead";
       }
 
       const lastHeartbeat =
-        (await heartbeatTimestamp(handle.nodeDir)) ?? worker.launchedAt;
+        (await heartbeatTimestamp(worker.nodeDir)) ?? worker.launchedAt;
       return livenessOptions.now - lastHeartbeat > livenessOptions.idleTimeoutMs
         ? "idle"
         : "alive";
@@ -294,8 +310,8 @@ export function createLocalExecutionBackend(
     },
 
     async collect(handle): Promise<WorkerResult> {
-      workerFor(handle);
-      const resultPath = join(handle.nodeDir, WORKER_RESULT_FILE);
+      const worker = workerFor(handle);
+      const resultPath = join(worker.nodeDir, WORKER_RESULT_FILE);
       let source: string;
       try {
         source = await readFile(resultPath, "utf8");

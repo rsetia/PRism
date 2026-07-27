@@ -90,9 +90,13 @@ import type {
   CompiledGraph,
   LogBackend,
 } from "@rsetia/prism";
-import type { WorkspaceProvisioner } from "@rsetia/prism/node";
+import type {
+  ExecutionBackend,
+  WorkspaceProvisioner,
+} from "@rsetia/prism/node";
 import type {
   ArtifactStoreFactory,
+  ExecutionBackendFactory,
   LogBackendFactory,
   RunStoreFactory,
   WorkspaceProvisionerFactory,
@@ -122,6 +126,10 @@ void artifactStoreFactory;
 declare const logBackend: LogBackend;
 const logBackendFactory: LogBackendFactory = async () => logBackend;
 void logBackendFactory;
+declare const executionBackend: ExecutionBackend;
+const executionBackendFactory: ExecutionBackendFactory = async () =>
+  executionBackend;
+void executionBackendFactory;
 declare const workspaceProvisioner: WorkspaceProvisioner;
 const workspaceProvisionerFactory: WorkspaceProvisionerFactory = async () =>
   workspaceProvisioner;

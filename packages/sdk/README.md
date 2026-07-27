@@ -42,7 +42,8 @@ const outcome = await engine.run(compiled.graph).result;
 - **`@rsetia/prism/testing`** exports the Vitest `runStoreContract` suite for
   validating third-party `RunStore` adapters and
   `runArtifactStoreContract` / `runLogBackendContract` for artifact and log
-  backends, plus `runWorkspaceProvisionerContract` for isolated workspaces.
+  backends, plus `runExecutionBackendContract` and
+  `runWorkspaceProvisionerContract` for workers and isolated workspaces.
 - Failures are data; node lifecycle events and terminal outcomes are durable;
   resume replays unfinished work and returns the recorded result for finished
   work.
@@ -81,6 +82,24 @@ runLogBackendContract("CloudLogBackend", async () =>
   createCloudLogBackend({ namespace: crypto.randomUUID() }),
 );
 ```
+
+Execution adapters implement `ExecutionBackend` from `@rsetia/prism/node`.
+Handles use a backend-defined opaque `id`; the local backend's `nodeDir` is
+optional:
+
+```ts
+import { runExecutionBackendContract } from "@rsetia/prism/testing";
+import { createKubernetesExecutionBackend } from "./kubernetes-execution.js";
+
+runExecutionBackendContract("KubernetesExecutionBackend", async () =>
+  createKubernetesExecutionBackend({ namespace: crypto.randomUUID() }),
+);
+```
+
+The default scenarios require a test worker supporting `echo`, `fail`, and
+`stall` config modes. Pass custom `ExecutionBackendContractScenarios` through
+the third argument's `scenarios` option when a worker image uses a different
+protocol.
 
 Workspace adapters implement `WorkspaceProvisioner` from
 `@rsetia/prism/node`. Handles must expose an absolute writable local directory,

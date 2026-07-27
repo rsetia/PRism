@@ -64,11 +64,11 @@ Prism is designed to grow through explicit interfaces:
   sequence, terminal-outcome, snapshot, and resume semantics. Run
   `runStoreContract` from `@rsetia/prism/testing` against every implementation.
 - **Execution, artifacts, logs, and workspaces:** implement the corresponding
-  port and keep platform behavior out of the core runtime. Artifact adapters
-  must pass `runArtifactStoreContract`, and log adapters must pass
-  `runLogBackendContract`. Workspace adapters must pass
-  `runWorkspaceProvisionerContract`. All suites are exported from
-  `@rsetia/prism/testing`.
+  port and keep platform behavior out of the core runtime. Execution adapters
+  must pass `runExecutionBackendContract`, artifact adapters must pass
+  `runArtifactStoreContract`, log adapters must pass `runLogBackendContract`,
+  and workspace adapters must pass `runWorkspaceProvisionerContract`. All
+  suites are exported from `@rsetia/prism/testing`.
 - **Core APIs:** `@rsetia/prism` must remain free of Node built-in imports.
   Filesystem, subprocess, SQLite, and Git integrations belong under
   `@rsetia/prism/node`.

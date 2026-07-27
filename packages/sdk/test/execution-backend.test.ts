@@ -1,10 +1,11 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, test } from "vitest";
 import { createLocalExecutionBackend } from "../src/node/index.js";
 import type { ExecutionBackend, WorkerSpec } from "../src/node/index.js";
+import { runExecutionBackendContract } from "../src/testing/index.js";
 
 const WORKER = fileURLToPath(
   new URL("./fixtures/worker-echo.mjs", import.meta.url),
@@ -43,83 +44,59 @@ function settle(ms: number): Promise<void> {
 }
 
 async function waitForExit(
-  b: ExecutionBackend,
+  instance: ExecutionBackend,
   handle: Awaited<ReturnType<ExecutionBackend["launch"]>>,
 ): Promise<void> {
-  for (let i = 0; i < 200; i += 1) {
-    if ((await b.poll(handle)) === "exited") return;
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if ((await instance.poll(handle)) === "exited") return;
     await settle(10);
   }
   throw new Error("worker did not exit in time");
 }
 
-describe("createLocalExecutionBackend", () => {
-  test("launches a worker and collects its echoed output", async () => {
-    const b = backend();
-    const handle = await b.launch(spec({ input: { greeting: "hi" } }));
-    expect(handle.runId).toBe("r");
-    expect(handle.nodeId).toBe("n");
-    await waitForExit(b, handle);
-    const result = await b.collect(handle);
-    expect(result).toEqual({
-      status: "succeeded",
-      output: { greeting: "hi" },
+runExecutionBackendContract("createLocalExecutionBackend", () => backend());
+
+describe("createLocalExecutionBackend file protocol", () => {
+  test("exposes its local protocol directory and serializes the worker spec", async () => {
+    const instance = backend();
+    const workerSpec = spec({
+      runId: "run/with spaces",
+      nodeId: "node:one",
+      config: { mode: "stall" },
     });
-  });
+    const handle = await instance.launch(workerSpec);
 
-  test("collects a worker-reported failure with its class", async () => {
-    const b = backend();
-    const handle = await b.launch(
-      spec({
-        config: {
-          mode: "fail",
-          error: "boom",
-          failureClass: "semantic_failed",
-        },
-      }),
-    );
-    await waitForExit(b, handle);
-    const result = await b.collect(handle);
-    expect(result.status).toBe("failed");
-    if (result.status !== "failed") {
-      throw new Error("expected worker failure");
+    expect(handle.nodeDir).toBeDefined();
+    if (handle.nodeDir === undefined) {
+      throw new Error("local backend did not expose its protocol directory");
     }
-    expect(result.error).toBe("boom");
-    expect(result.failureClass).toBe("semantic_failed");
+    expect(isAbsolute(handle.nodeDir)).toBe(true);
+    expect(
+      JSON.parse(readFileSync(join(handle.nodeDir, "spec.json"), "utf8")),
+    ).toEqual(workerSpec);
+
+    await instance.terminate(handle);
   });
 
-  test("poll reports running before exit", async () => {
-    const b = backend();
-    const handle = await b.launch(spec({ config: { mode: "stall" } }));
-    await settle(20);
-    expect(await b.poll(handle)).toBe("running");
-    await b.terminate(handle);
-  });
+  test("creates protocol files inside a supplied workspace", async () => {
+    const instance = backend();
+    const workspace = mkdtempSync(join(tempDir, "workspace-"));
+    const handle = await instance.launch(spec({ input: "workspace" }), {
+      cwd: workspace,
+    });
 
-  test("a stalled worker reads as idle past the timeout", async () => {
-    const b = backend();
-    const handle = await b.launch(spec({ config: { mode: "stall" } }));
-    await settle(30);
-    const now = Date.now() + 10_000; // pretend 10s elapsed since the beat
-    expect(await b.checkLiveness(handle, { idleTimeoutMs: 1_000, now })).toBe(
-      "idle",
-    );
-    await b.terminate(handle);
-  });
+    expect(handle.nodeDir).toBeDefined();
+    if (handle.nodeDir === undefined) {
+      throw new Error("local backend did not expose its protocol directory");
+    }
+    expect(
+      resolve(handle.nodeDir).startsWith(`${resolve(workspace)}${sep}`),
+    ).toBe(true);
 
-  test("terminate stops a stalled worker", async () => {
-    const b = backend();
-    const handle = await b.launch(spec({ config: { mode: "stall" } }));
-    await settle(20);
-    await b.terminate(handle);
-    expect(await b.poll(handle)).toBe("exited");
-  });
-
-  test("collecting a worker that left no result rejects", async () => {
-    const b = backend();
-    const handle = await b.launch(spec({ config: { mode: "stall" } }));
-    await settle(20);
-    await b.terminate(handle);
-    await expect(b.collect(handle)).rejects.toThrow();
+    await waitForExit(instance, handle);
+    await expect(instance.collect(handle)).resolves.toEqual({
+      status: "succeeded",
+      output: "workspace",
+    });
   });
 });
