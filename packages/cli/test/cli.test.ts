@@ -312,7 +312,12 @@ if (command === "export") {
             executor: string;
             config?: {
               value?: { description?: string };
-              review?: { by?: string; triggerComment?: string };
+              review?: {
+                by?: string;
+                minConfidenceScore?: number;
+                allowConfidenceFourWithoutActionableFindings?: boolean;
+                triggerComment?: string;
+              };
               validationCommands?: string[];
             };
           }
@@ -322,9 +327,17 @@ if (command === "export") {
         "Hydrated implementation details",
       );
       expect(graph.nodes["implement-bd-a"]?.config).toMatchObject({
-        review: { by: "greptile", triggerComment: "@greptile review" },
+        review: {
+          by: "greptile",
+          minConfidenceScore: 5,
+          triggerComment: "@greptile review",
+        },
         validationCommands: ["npm test"],
       });
+      expect(
+        graph.nodes["implement-bd-a"]?.config?.review
+          ?.allowConfidenceFourWithoutActionableFindings,
+      ).toBeUndefined();
       expect(graph.nodes["merge-bd-a"]?.executor).toBe("merge_resolve");
       expect(graph.nodes["implement-bd-closed"]).toBeUndefined();
     } finally {

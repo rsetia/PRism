@@ -37,8 +37,11 @@ before 1.0.
   with high-contrast state highlighting and progress; redirected output keeps
   its stable line-oriented format.
 - Generated Beads DAGs default to Greptile review with the exact trigger
-  comment `@greptile review`; Claude and no-review workflows remain explicit
-  overrides.
+  comment `@greptile review` and a strict latest-current-head 5/5 confidence
+  gate; Claude and no-review workflows remain explicit overrides.
+- Claude review gates infer merge readiness from the latest substantive
+  current-head Claude response, so an unambiguous “looks good” comment can
+  satisfy the gate without a formal GitHub approval object.
 
 ### Fixed
 

@@ -26,6 +26,11 @@ export interface WorkItem {
 export interface ReviewConfig {
   readonly by: ReviewGate;
   readonly minConfidenceScore?: number;
+  /**
+   * Legacy compatibility flag. For comment-only reviewer integrations, an
+   * unambiguous positive verdict on the current head satisfies approval; a
+   * formal GitHub review object is not required.
+   */
   readonly requireApproved?: boolean;
   readonly requireNoActionableFindings?: boolean;
   readonly requireGreenChecks?: boolean;
@@ -209,8 +214,8 @@ export function parseMergeResolveConfig(
  *       minConfidenceScore and
  *       allowConfidenceFourWithoutActionableFindings
  *     claude   — post triggerComment (default "@claude review"), treat
- *       CHANGES_REQUESTED and unresolved inline comments as actionable,
- *       approved when the latest Claude review on the head is APPROVED
+ *       CHANGES_REQUESTED and unresolved inline comments as actionable, and
+ *       infer readiness from the latest substantive current-head response
  *     none     — gate on CI checks only
  * - after each push, poll only current-head feedback + checks, fix, repeat
  *   until merge-ready or maxIterations is reached
@@ -485,9 +490,6 @@ function parseMergeMethod(value: unknown): "squash" | "merge" | "rebase" {
 
 function implementGateInstructions(review: ReviewConfig): string {
   const criteria = [
-    review.requireApproved === undefined
-      ? undefined
-      : `requireApproved=${String(review.requireApproved)}`,
     review.requireNoActionableFindings === undefined
       ? undefined
       : `requireNoActionableFindings=${String(review.requireNoActionableFindings)}`,
@@ -509,14 +511,20 @@ function implementGateInstructions(review: ReviewConfig): string {
           ? "When the configured minimum is 5 and Greptile reports 4/5, you may accept it only when no current-head actionable findings remain and all required checks are green; record safe_confidence_4_exception_applied=true in metadata."
           : "Do not accept a Greptile confidence score below the configured minimum.";
       return `- Use Greptile as the review gate. Read current-head summary comments containing "Confidence Score: N/5", inline review comments, and Greptile-generated test or issue comments.
-- Require a confidence score of at least ${String(minimum)} and apply current-head actionable-finding and check requirements.${criteriaInstruction}
+- Use the latest substantive Greptile response that applies to the current head. Require a confidence score of at least ${String(minimum)}/5 from that response and apply current-head actionable-finding and check requirements; never reuse a score from an older head.${criteriaInstruction}
 - Post ${quote(trigger)} after a new head needs review, then wait for Greptile feedback on that head.
 - ${confidenceFour}`;
     }
     case "claude": {
       const trigger = review.triggerComment ?? "@claude review";
-      return `- Use the Claude GitHub review app as the review gate. Post ${quote(trigger)} after a new head needs review, then wait for a review on that head.
-- Treat CHANGES_REQUESTED and unresolved current-head inline comments as actionable. Treat the gate as approved only when the latest Claude review on the current head is APPROVED.${criteriaInstruction}`;
+      const legacyApproval =
+        review.requireApproved === true
+          ? "The legacy requireApproved=true setting means require this positive semantic verdict; it does not require a formal GitHub review object."
+          : "A formal GitHub APPROVED review object is sufficient evidence, but is not required.";
+      return `- Use the Claude GitHub review app as the review gate. Post ${quote(trigger)} after a new head needs review, then wait for a substantive Claude response that applies to that head.
+- Read the entire latest substantive Claude-authored current-head response, whether it is an issue comment, review summary, or formal review. Ignore trigger acknowledgements, reactions, job-start messages, author summaries, and responses that predate the latest push.
+- Infer the verdict from that response. The gate is ready only when Claude unambiguously concludes that the changes look good, are ready or good to merge, have no blockers, or have no remaining actionable findings, or gives an equivalent positive conclusion. ${legacyApproval}
+- Treat formal CHANGES_REQUESTED reviews, unresolved current-head inline comments, requested fixes, blocking concerns, or any statement that the change is not ready as actionable. A mixed response containing findings is not ready even if it is generally positive; "review completed" alone is not approval.${criteriaInstruction}`;
     }
     case "none":
       return `- Do not request or wait for bot review. Gate only on validation and CI/check results for the current head.${criteriaInstruction}`;
@@ -526,9 +534,9 @@ function implementGateInstructions(review: ReviewConfig): string {
 function implementExtraRules(review: ReviewConfig): readonly string[] {
   const gateRule =
     review.by === "greptile"
-      ? "For Greptile, consider current-head summary concerns, inline review comments, and reviewer-generated test or issue feedback actionable unless clearly stale or explicitly non-actionable."
+      ? "For Greptile, use only the latest current-head confidence score and consider current-head summary concerns, inline review comments, and reviewer-generated test or issue feedback actionable unless clearly stale or explicitly non-actionable."
       : review.by === "claude"
-        ? "For Claude, post the configured trigger comment and treat CHANGES_REQUESTED plus unresolved current-head inline comments as actionable."
+        ? "For Claude, post the configured trigger comment and infer readiness from the latest substantive current-head Claude response; a formal GitHub approval object is not required."
         : "With review.by set to none, do not manufacture a reviewer approval requirement; use validation and current-head checks.";
 
   return Object.freeze([

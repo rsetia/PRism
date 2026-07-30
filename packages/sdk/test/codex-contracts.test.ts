@@ -167,15 +167,41 @@ describe("buildImplementContract", () => {
     expect(contract.extraRules?.join("\n")).toContain("current-head");
   });
 
+  test("defaults the greptile gate to a current-head 5/5", () => {
+    const contract = buildImplementContract(base);
+    expect(contract.instructions).toContain("at least 5/5");
+    expect(contract.instructions).toContain(
+      "never reuse a score from an older head",
+    );
+    expect(contract.instructions).toContain(
+      "Do not accept a Greptile confidence score below",
+    );
+  });
+
   test("reflects the claude review gate in the instructions", () => {
     const contract = buildImplementContract({
       ...base,
-      review: { by: "claude", triggerComment: "@claude inspect" },
+      review: {
+        by: "claude",
+        triggerComment: "@claude inspect",
+        requireApproved: true,
+      },
     });
     expect(contract.instructions).toContain("Claude");
     expect(contract.instructions).toContain("@claude inspect");
     expect(contract.instructions).toContain("CHANGES_REQUESTED");
-    expect(contract.instructions).toContain("APPROVED");
+    expect(contract.instructions).toContain(
+      "latest substantive Claude-authored current-head response",
+    );
+    expect(contract.instructions).toContain("look good");
+    expect(contract.instructions).toContain("ready or good to merge");
+    expect(contract.instructions).toContain("no remaining actionable findings");
+    expect(contract.instructions).toContain(
+      "does not require a formal GitHub review object",
+    );
+    expect(contract.instructions).toContain(
+      "mixed response containing findings is not ready",
+    );
   });
 
   test("uses only CI as the none review gate", () => {

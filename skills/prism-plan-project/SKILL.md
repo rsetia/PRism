@@ -176,8 +176,8 @@ Default to:
 - `implement` nodes backed by Codex.
 - Greptile pull-request review.
 - The exact Greptile trigger comment `@greptile review`.
-- The configured confidence threshold, no unresolved actionable findings, and
-  green required checks.
+- A latest current-head Greptile confidence score of 5/5, no unresolved
+  actionable findings, and green required checks.
 - `merge_resolve` after the implementation review gate.
 - `beads_update` after a successful merge.
 
@@ -190,6 +190,16 @@ confidence and quality gates pass or the iteration limit is reached.
 Use Claude or no reviewer only when the user or project explicitly requests
 it. Never claim a reviewer is available without checking the repository's
 GitHub integration or documented convention.
+
+For Claude, use the exact trigger comment `@claude review`. Infer readiness
+from Claude's latest substantive response that applies to the current head. It
+must unambiguously say the changes look good, are ready to merge, have no
+blockers, or have no remaining actionable findings (or an equivalent positive
+conclusion). A formal GitHub `APPROVED` review object is sufficient but not
+required because comment-only Claude integrations cannot submit one. Treat a
+mixed response containing requested fixes as not ready, ignore stale responses
+from older heads, and never treat a reaction or “review completed” notice as
+approval.
 
 ## 6. Choose validation
 

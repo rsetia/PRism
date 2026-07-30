@@ -124,10 +124,8 @@ export async function generateBeadsDag(
       ...(reviewer === "greptile"
         ? {
             minConfidenceScore: options.minConfidenceScore ?? 5,
-            allowConfidenceFourWithoutActionableFindings: true,
           }
         : {}),
-      ...(reviewer === "claude" ? { requireApproved: true } : {}),
       requireNoActionableFindings: options.requireNoActionableFindings ?? true,
       requireGreenChecks: options.requireGreenChecks ?? true,
       ...(reviewTriggerComment === undefined
