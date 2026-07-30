@@ -19,9 +19,10 @@ $ prism logs
 
 Prism derives the project from the current Git root. Runs persist with a
 generated ID and use four-way concurrency by default. `watch` selects the
-newest unfinished run and `logs` follows all worker output from the newest run
-until it finishes. Explicit path, run ID, and concurrency flags remain
-available as overrides.
+newest unfinished run and renders its live dependency DAG with highlighted
+node states. `logs` follows all worker output from the newest run until it
+finishes. Explicit path, run ID, and concurrency flags remain available as
+overrides. Redirected and `--json` watch output remain script-friendly.
 
 Generate a Codex implementation DAG from Beads, with Claude or Greptile as
 the pull-request review gate:

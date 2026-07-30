@@ -55,10 +55,11 @@ prism logs
 ```
 
 That is the complete default workflow. No repository, store, run ID, or
-concurrency flags are required. `watch` selects the newest unfinished run;
-`logs` follows every worker from the newest run, attaches as new nodes start,
-and exits when the run finishes. Prism runs up to four ready nodes concurrently
-and generates a durable run ID automatically.
+concurrency flags are required. In a terminal, `watch` redraws the dependency
+DAG and highlights running, ready, completed, and failed nodes. `logs` follows
+every worker from the newest run, attaches as new nodes start, and exits when
+the run finishes. Prism runs up to four ready nodes concurrently and generates
+a durable run ID automatically.
 
 ## Where Prism stores data
 
@@ -96,7 +97,8 @@ prism rerun-node <run-id> <node-id>
 
 Graphs may be JSON or YAML. `--store`, `--repo`, `--beads-repo`,
 `--worktree-dir`, and `--run-id` are optional overrides. Add `--json` to
-commands that support structured output.
+commands that support structured output. `watch` keeps stable line-oriented
+output when stdout is redirected or piped.
 
 ### Exit codes
 

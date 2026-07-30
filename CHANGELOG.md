@@ -33,6 +33,9 @@ before 1.0.
 - `prism watch` and `prism logs` default to the current project's latest run;
   Codex worker output is captured durably, and `logs` follows every worker
   until the run finishes.
+- Interactive `prism watch` redraws the dependency DAG as execution advances,
+  with high-contrast state highlighting and progress; redirected output keeps
+  its stable line-oriented format.
 
 ### Fixed
 

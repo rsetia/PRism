@@ -39,11 +39,16 @@ import {
   missingPrismHomeMessage,
   resolvePrismProjectPaths,
 } from "./prism-home.js";
+import { renderWatchDashboard } from "./watch-renderer.js";
 
-/** stdout: data only. stderr: humans only. */
+/** Non-TTY stdout is data; interactive watch may redraw a human dashboard. */
 export interface CliIo {
   readonly stdout: (line: string) => void;
   readonly stderr: (line: string) => void;
+  readonly write?: (text: string) => void;
+  readonly interactive?: boolean;
+  readonly columns?: number;
+  readonly color?: boolean;
 }
 
 export const EXIT_SUCCESS = 0;
@@ -73,7 +78,7 @@ Commands:
                                       Follow worker output (default latest run)
   status [--store <db>] [--json]      List persisted runs
   watch [<run-id>] [--store <db>] [--json] [--interval <ms>] [--repo <path>]
-                                      Poll until finished (default latest running run)
+                                      Render the live DAG (default latest running run)
   resume <run-id> [--store <db>] [--json] [--repo <path>]
          [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
                                       Continue an interrupted run to completion
@@ -1301,13 +1306,33 @@ async function watchCommand(
   try {
     store = await openPersistentStore(invocation.store, invocation.repo);
     resolvedRunId = await resolveRunId(store, invocation.runId, true);
+    const run = await store.getRun(resolvedRunId);
+    if (run === undefined) {
+      throw new Error(`unknown run: "${resolvedRunId}"`);
+    }
     let terminal: RunInspection | undefined;
+    let frame = 0;
     for await (const inspection of watchRun(store, resolvedRunId, {
       clock: createSystemClock(),
       intervalMs: invocation.intervalMs,
     })) {
-      printWatchSnapshot(inspection, invocation.json, io);
+      if (io.interactive === true && !invocation.json) {
+        const dashboard = renderWatchDashboard(run.graph, inspection, {
+          ...(io.columns === undefined ? {} : { columns: io.columns }),
+          ...(io.color === undefined ? {} : { color: io.color }),
+          frame,
+        });
+        const screen = `\u001B[2J\u001B[H${dashboard}\n`;
+        if (io.write === undefined) {
+          io.stdout(screen);
+        } else {
+          io.write(screen);
+        }
+      } else {
+        printWatchSnapshot(inspection, invocation.json, io);
+      }
       terminal = inspection;
+      frame += 1;
     }
     if (terminal === undefined) {
       throw new Error(`watch produced no snapshots for "${resolvedRunId}"`);

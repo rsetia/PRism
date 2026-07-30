@@ -12,6 +12,12 @@ const io = {
   stderr: (line: string): void => {
     process.stderr.write(`${line}\n`);
   },
+  write: (text: string): void => {
+    process.stdout.write(text);
+  },
+  interactive: process.stdout.isTTY === true,
+  columns: process.stdout.columns,
+  color: process.env["NO_COLOR"] === undefined,
 };
 
 try {
