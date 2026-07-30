@@ -7,30 +7,38 @@ agent graphs. Installs a `prism` binary.
 $ prism run graph.json
 "hello"
 
-$ prism run graph.json --store runs.db --run-id demo
-$ prism status  --store runs.db
-demo    finished
-$ prism inspect demo --store runs.db
+$ export PRISM_HOME="$HOME/2026"
+$ prism run graph.json
+run run-550e8400-e29b-41d4-a716-446655440000
+$ prism status
+run-550e8400-e29b-41d4-a716-446655440000    finished
+$ prism inspect run-550e8400-e29b-41d4-a716-446655440000
 first: succeeded
 second: succeeded
 finished: true
 ```
 
+`PRISM_HOME` is a single absolute root for project-scoped defaults:
+`beads/<project>/`, `store/<project>/runs.db`, and
+`worktrees/<project>/`. Prism derives `<project>` from the current Git root.
+Explicit `--repo`, `--beads-repo`, `--store`, and `--worktree-dir` flags
+override those defaults. Runs persist under `PRISM_HOME` with a generated ID
+and use four-way concurrency by default. Without `PRISM_HOME`, a plain run
+remains in-memory.
+
 Generate a Codex implementation DAG from Beads, with Claude or Greptile as
 the pull-request review gate:
 
 ```console
+$ cd /path/to/code
 $ prism beads-dag \
-    --repo /path/to/code \
-    --beads-repo /path/to/beads \
     --out work.prism.json \
     --reviewer claude \
     --validation-command "npm test"
 
-$ prism run work.prism.json \
-    --repo /path/to/code \
-    --store runs.db \
-    --max-concurrency 4
+$ prism run work.prism.json
+# Copy the generated run id printed to stderr:
+$ prism watch <run-id>
 ```
 
 `beads-dag` snapshots each selected Bead into the graph, honors hard dependency

@@ -31,22 +31,22 @@ Inspect before proposing work:
 Use this precedence:
 
 1. An explicit Beads path supplied by the user or repository instructions.
-2. `$PRISM_BEADS_ROOT/<project-slug>` when `PRISM_BEADS_ROOT` is set.
+2. `$PRISM_HOME/beads/<project-slug>` when `PRISM_HOME` is set.
 3. An existing Beads workspace in the code repository.
-4. Explain how to set `PRISM_BEADS_ROOT`, then ask where to store Beads when
+4. Explain how to set `PRISM_HOME`, then ask where to store Beads when
    none of the above resolves a location.
 
-Read `PRISM_BEADS_ROOT` from the agent process environment; do not require the
+Read `PRISM_HOME` from the agent process environment; do not require the
 user to repeat a value already exported in their shell.
 
-When `PRISM_BEADS_ROOT` is unset, inform the user before creating Beads:
+When `PRISM_HOME` is unset, inform the user before creating Beads:
 
 ```text
-PRISM_BEADS_ROOT is not set. Prism uses it as the parent directory for one
-Beads workspace per project. Set it to an absolute path in your shell, for
-example:
+PRISM_HOME is not set. Prism uses it as one absolute root for project-scoped
+Beads workspaces, durable run stores, and agent worktrees. Set it in your
+shell, for example:
 
-export PRISM_BEADS_ROOT="/absolute/path/to/beads"
+export PRISM_HOME="/absolute/path/to/prism-home"
 
 Add that export to your shell profile and restart the agent, or provide an
 explicit Beads path for this project.
@@ -60,20 +60,27 @@ Derive `project-slug` from the git repository root directory name. Normalize it
 to a non-empty lowercase slug containing only letters, digits, dots,
 underscores, and hyphens. Do not derive it from the current subdirectory.
 
-Treat `PRISM_BEADS_ROOT` as a directory containing one Beads workspace per
-project, not as a Beads database itself. Require it to resolve to an absolute,
-non-root path. Never recursively modify or remove the root.
+Treat `PRISM_HOME` as an umbrella directory, not as a Beads database or code
+repository. Require it to resolve to an absolute, non-root path. Never
+recursively modify or remove the root. Prism's convention is:
+
+```text
+$PRISM_HOME/
+├── beads/<project-slug>/
+├── store/<project-slug>/runs.db
+└── worktrees/<project-slug>/
+```
 
 For example:
 
 ```bash
-export PRISM_BEADS_ROOT="$HOME/2026/beads"
+export PRISM_HOME="$HOME/2026"
 ```
 
 For a repository named `conversation-coach`, resolve:
 
 ```text
-$PRISM_BEADS_ROOT/conversation-coach
+$PRISM_HOME/beads/conversation-coach
 ```
 
 When the resolved project workspace already contains Beads, reuse it. When it
@@ -91,8 +98,8 @@ an existing database. If the target exists with unrelated content or its
 project identity is ambiguous, stop and ask.
 
 Do not repurpose Beads' native `BEADS_DIR` variable for this convention;
-`PRISM_BEADS_ROOT` selects the parent for Prism planning work, while
-`--beads-repo` receives the exact resolved project workspace.
+`PRISM_HOME` supplies Prism's operator-owned directory tree, while
+`--beads-repo` remains an explicit override for the exact Beads workspace.
 
 ## 2. Establish the outcome
 
@@ -198,20 +205,20 @@ handoff.
 Generate the graph from the selected Beads:
 
 ```bash
-prism beads-dag \
-  --repo <code-repo> \
-  --beads-repo <beads-repo> \
+(cd <code-repo> && prism beads-dag \
   --out <project>.prism.json \
   --id <bead-id> \
   --reviewer claude \
   --review-trigger-comment "@claude review" \
   --validation-command "<implementation validation>" \
-  --merge-validation-command "<merge validation>"
+  --merge-validation-command "<merge validation>")
 ```
 
 Repeat `--id`, `--label`, and validation flags as needed. Prefer explicit IDs
 for a scoped project DAG so unrelated open Beads and the coordinating epic are
-not accidentally implemented.
+not accidentally implemented. When `PRISM_HOME` is configured, the current
+Git repository and `$PRISM_HOME/beads/<project-slug>` are implicit. Pass
+`--repo` or `--beads-repo` only to override those locations.
 
 Use `--no-beads-update`, `--no-merge-nodes`, or
 `--no-serialize-merges` only when the requested workflow requires that
@@ -255,11 +262,13 @@ Report:
 - The exact run command, normally:
 
 ```bash
-prism run <project>.prism.json \
-  --repo <code-repo> \
-  --store <runs.db> \
-  --max-concurrency <n>
+(cd <code-repo> && prism run <project>.prism.json)
+
+(cd <code-repo> && prism watch <generated-run-id>)
 ```
 
-Choose concurrency from the number and cost of ready implementation branches;
-do not imply that a high concurrency flag overrides dependency edges.
+Prism prints the generated run id to stderr. Its CLI defaults to four-way
+concurrency; specify a different value only when the graph or resource limits
+justify it, and do not imply that concurrency overrides dependency edges. With
+`PRISM_HOME` configured, the run store and worktree base are inferred for the
+current project. Use explicit path flags only when overriding that convention.

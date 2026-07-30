@@ -68,38 +68,56 @@ prism graph <file> [--json]          # print the compiled plan
 prism run <file> [--json] [--store <db>] [--run-id <id>]
 ```
 
-Plain `run` is in-memory. With `--store <db>` the run persists to a SQLite
-file, and the observe/recover commands below can target it by run id.
-
-**Observe** (all require `--store`)
+Set one absolute home for Prism's operator-owned project data:
 
 ```sh
-prism status --store <db> [--json]              # list persisted runs
-prism inspect <run-id> --store <db> [--json]    # per-node states
-prism events  <run-id> --store <db> [--json]    # the event log
-prism watch   <run-id> --store <db> [--interval <ms>]   # poll until done
+export PRISM_HOME="$HOME/2026"
 ```
 
-**Recover** (all require `--store`)
+Prism derives the project from the current Git root and uses:
+
+```text
+$PRISM_HOME/
+├── beads/<project>/
+├── store/<project>/runs.db
+└── worktrees/<project>/
+```
+
+With `PRISM_HOME` configured, `run` persists automatically and prints its
+generated run id to stderr. Execution defaults to four-way concurrency.
+`--run-id`, `--max-concurrency`, `--store`, `--repo`, `--beads-repo`, and
+`--worktree-dir` remain available as explicit overrides. Without `PRISM_HOME`,
+a plain run remains in-memory unless `--store` or `--run-id` is supplied.
+
+**Observe**
 
 ```sh
-prism resume     <run-id> --store <db>            # continue an interrupted run
-prism abort      <run-id> --store <db>            # force a stuck run to cancelled+finished
-prism signal     <run-id> <node-id> --store <db>  # reset a node to re-run on resume
-prism rerun-node <run-id> <node-id> --store <db>  # reset a node + its downstream
+prism status [--store <db>] [--json]              # list persisted runs
+prism inspect <run-id> [--store <db>] [--json]    # per-node states
+prism events  <run-id> [--store <db>] [--json]    # the event log
+prism watch   <run-id> [--store <db>] [--interval <ms>]   # poll until done
+```
+
+**Recover**
+
+```sh
+prism resume     <run-id> [--store <db>]            # continue an interrupted run
+prism abort      <run-id> [--store <db>]            # force a stuck run to cancelled+finished
+prism signal     <run-id> <node-id> [--store <db>]  # reset a node to re-run on resume
+prism rerun-node <run-id> <node-id> [--store <db>]  # reset a node + its downstream
 ```
 
 A typical persisted session:
 
 ```console
-$ prism run examples/hello.json --store runs.db --run-id demo
-run demo                                  # (stderr)
+$ prism run examples/hello.json
+run run-550e8400-e29b-41d4-a716-446655440000   # generated; stderr
 "hello"
 
-$ prism status --store runs.db
-demo    finished
+$ prism status
+run-550e8400-e29b-41d4-a716-446655440000    finished
 
-$ prism inspect demo --store runs.db
+$ prism inspect run-550e8400-e29b-41d4-a716-446655440000
 first: succeeded
 second: succeeded
 finished: true
