@@ -34,8 +34,8 @@ this discussion into Beads and an executable Prism DAG. Use Codex to implement
 and Greptile to review with the exact comment "@greptile review".
 ```
 
-The skill creates the Beads and DAG, validates them, and gives you the graph
-path. It does not start the run.
+The skill creates the Beads, initializes a remote integration branch, builds
+and validates the DAG, and gives you the graph path. It does not start the run.
 
 ## Run
 

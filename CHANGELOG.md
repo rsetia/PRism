@@ -42,6 +42,9 @@ before 1.0.
 - Claude review gates infer merge readiness from the latest substantive
   current-head Claude response, so an unambiguous “looks good” comment can
   satisfy the gate without a formal GitHub approval object.
+- The project-planning skill now creates and records an explicit remote
+  integration branch, passes it through `--target-branch`, and hands off the
+  final integration-to-base pull request.
 
 ### Fixed
 

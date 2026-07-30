@@ -1,6 +1,6 @@
 ---
 name: prism-plan-project
-description: Turn a project discussion and repository into a grounded product/engineering plan, a Beads backlog, and an executable Prism DAG. Use when an agent is asked to propose project improvements, convert a roadmap or conversation into Beads, determine which work can run in parallel, design the correct dependency graph, or generate a Prism workflow with Codex implementation and Greptile, Claude, or no pull-request review.
+description: Turn a project discussion and repository into a grounded product/engineering plan, a Beads backlog, an initialized remote integration branch, and an executable Prism DAG. Use when an agent is asked to propose project improvements, convert a roadmap or conversation into Beads, determine which work can run in parallel, design the correct dependency graph, or generate a Prism workflow with Codex implementation and Greptile, Claude, or no pull-request review.
 ---
 
 # Prism Plan Project
@@ -201,6 +201,49 @@ mixed response containing requested fixes as not ready, ignore stale responses
 from older heads, and never treat a reaction or “review completed” notice as
 approval.
 
+### Select and initialize the merge target
+
+Choose an explicit remote branch that receives every implementation PR and
+`merge_resolve` result. Do not rely on Prism's implicit `main` default.
+
+Use this precedence:
+
+1. A target branch explicitly supplied by the user or repository instructions.
+2. A new project-specific integration branch such as
+   `prism/<project-slug>-<epic-slug>-integration`.
+
+Resolve the repository's remote default branch as the base branch. Before
+generating the DAG:
+
+1. Fetch the base branch from `origin`.
+2. Check whether the selected target exists on `origin`.
+3. When it is new, push the fetched `origin/<base-branch>` commit to
+   `refs/heads/<target-branch>` without adding a commit.
+4. When it already exists, never reset or force-push it. Verify that it is the
+   intended integration branch for this plan; otherwise select a new name or
+   ask the user whether to reuse it.
+
+For example:
+
+```bash
+git -C <code-repo> fetch origin \
+  <base-branch>:refs/remotes/origin/<base-branch>
+git -C <code-repo> ls-remote --heads origin \
+  refs/heads/<target-branch>
+git -C <code-repo> push origin \
+  refs/remotes/origin/<base-branch>:refs/heads/<target-branch>
+```
+
+Run the final `push` only when `ls-remote` completed successfully and returned
+no matching branch. Stop and report the blocker when the remote or credentials
+are unavailable.
+
+This is the prism-py “empty branch” pattern: the integration branch is not an
+orphan branch and is not literally required to be named `empty`; it initially
+points to the same commit as the base branch, with no additional changes.
+Creating it first prevents GitHub PR creation from failing on a missing base
+and keeps automatic DAG merges off the repository's main branch.
+
 ## 6. Choose validation
 
 Discover validation commands from repository instructions, package scripts,
@@ -220,6 +263,7 @@ Generate the graph from the selected Beads:
 (cd <code-repo> && prism beads-dag \
   --out <project>.prism.json \
   --id <bead-id> \
+  --target-branch "<target-branch>" \
   --validation-command "<implementation validation>" \
   --merge-validation-command "<merge validation>")
 ```
@@ -250,6 +294,8 @@ Also inspect the generated graph and verify:
 - Every hard dependency points in the intended direction.
 - Ready implementation branches remain parallel.
 - Merge/update nodes form the intended serialized lane.
+- The remote integration target exists and every `implement` and
+  `merge_resolve` node names it as `targetBranch`.
 - Every `implement` node uses the selected reviewer.
 - Default nodes contain `review.by: "greptile"` and
   `triggerComment: "@greptile review"`.
@@ -267,6 +313,7 @@ Report:
 - Bead IDs and the coordinating epic.
 - The graph artifact path.
 - Execution waves and important dependency decisions.
+- Base branch and remote integration target branch.
 - Implementor and reviewer policy.
 - Validation performed and any remaining constraints.
 - A final `Next steps` section with exact, copyable commands.
@@ -283,13 +330,18 @@ Run the DAG from the project repository:
 While it runs, open another terminal in the same repository:
   prism watch
   prism logs
+
+After the DAG succeeds, inspect or open the integration pull request:
+  gh pr create --base <base-branch> --head <target-branch> --fill
 ```
 
 Do not omit this section merely because the commands appeared earlier in the
 conversation. Make clear that `prism run` executes the work, `prism watch`
 monitors node state until completion, and `prism logs` shows durable worker
-output. Do not start any of them unless the user explicitly asks to execute
-the graph.
+output. Explain that the final integration pull request promotes the completed
+DAG from the target branch into the base branch; reuse an existing PR instead
+of creating a duplicate. Do not run the DAG or open the final pull request
+unless the user explicitly asks.
 
 Prism generates the run id. `watch` selects the newest unfinished run and
 `logs` selects the newest run, so the default handoff does not require the
