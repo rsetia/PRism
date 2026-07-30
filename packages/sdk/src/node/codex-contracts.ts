@@ -216,9 +216,10 @@ export function parseMergeResolveConfig(
  * - write result.json with metadata { branch (required, exact git branch),
  *   pr_number, head_sha, review_state, greptile_confidence }
  *
- * Permissions: allowsGitMutation true, allowsGitHubIo true, sandbox
- * "workspace-write". extraRules: prefer the `gh` CLI; the sheperd helper
- * if present; per-gate polling nuances. (See PRism-py codex_extra_rules.)
+ * Permissions: allowsGitMutation true, allowsGitHubIo true, and trusted host
+ * access so Git can update shared worktree metadata and `gh` can reach GitHub.
+ * extraRules: prefer the `gh` CLI; the sheperd helper if present; per-gate
+ * polling nuances. (See PRism-py codex_extra_rules.)
  */
 export function buildImplementContract(
   config: ImplementConfig,
@@ -273,7 +274,7 @@ Result:
 
   return freezeContract({
     instructions,
-    sandbox: "workspace-write",
+    dangerouslyBypassApprovalsAndSandbox: true,
     allowsGitMutation: true,
     allowsGitHubIo: true,
     extraRules: implementExtraRules(config.review),
@@ -291,7 +292,7 @@ Result:
  * semantically, run validationCommands, force-with-lease push, merge via
  * GitHub using mergeMethod (default squash). Never direct-push the target.
  * result.json metadata { branch, pr_number, head_sha, merge_commit }.
- * Permissions: allowsGitMutation, allowsGitHubIo, sandbox "workspace-write".
+ * Permissions: allowsGitMutation, allowsGitHubIo, and trusted host access.
  */
 export function buildMergeResolveContract(
   config: MergeResolveConfig,
@@ -322,7 +323,7 @@ Result:
 
   return freezeContract({
     instructions,
-    sandbox: "workspace-write",
+    dangerouslyBypassApprovalsAndSandbox: true,
     allowsGitMutation: true,
     allowsGitHubIo: true,
     extraRules: [

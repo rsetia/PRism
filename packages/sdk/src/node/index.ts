@@ -28,6 +28,7 @@ export type {
   ProvisionInput,
   WorkspaceHandle,
   WorkspaceProvisioner,
+  WorkspaceReleaseOptions,
 } from "./workspace-provisioner.js";
 export { createGitWorktreeProvisioner } from "./workspace-provisioner.js";
 export type { SubprocessExecutorOptions } from "./subprocess-executor.js";

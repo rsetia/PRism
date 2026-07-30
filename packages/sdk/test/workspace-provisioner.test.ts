@@ -66,7 +66,13 @@ describe("createGitWorktreeProvisioner Git behavior", () => {
     );
     expect(branchAtWorktree).toBe(workspace.branch);
     expect(workspace.branch).not.toBe("main");
-    await p.release(workspace);
+    const branch = workspace.branch;
+    if (branch === undefined) {
+      throw new Error("Git worktree provisioner did not report its branch");
+    }
+    await p.release(workspace, { preserveBranch: true });
+    expect(await git(repoDir, "branch", "--list", branch)).toBe(branch);
+    await git(repoDir, "branch", "-D", branch);
   });
 
   test("removes the temporary directory when Git provisioning fails", async () => {

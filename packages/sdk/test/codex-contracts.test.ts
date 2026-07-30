@@ -139,7 +139,8 @@ describe("buildImplementContract", () => {
     const contract = buildImplementContract(base);
     expect(contract.allowsGitMutation).toBe(true);
     expect(contract.allowsGitHubIo).toBe(true);
-    expect(contract.sandbox).toBe("workspace-write");
+    expect(contract.dangerouslyBypassApprovalsAndSandbox).toBe(true);
+    expect(contract.sandbox).toBeUndefined();
     expect(contract.instructions.length).toBeGreaterThan(0);
     expect(contract.instructions).toContain('"status":"succeeded"');
     expect(contract.instructions).toContain('"metadata"');
@@ -231,7 +232,8 @@ describe("buildMergeResolveContract", () => {
     });
     expect(contract.allowsGitMutation).toBe(true);
     expect(contract.allowsGitHubIo).toBe(true);
-    expect(contract.sandbox).toBe("workspace-write");
+    expect(contract.dangerouslyBypassApprovalsAndSandbox).toBe(true);
+    expect(contract.sandbox).toBeUndefined();
     expect(contract.instructions).toContain("implement-mc-1");
     expect(contract.instructions).toContain("--force-with-lease");
     expect(contract.instructions).toContain("Never direct-push");

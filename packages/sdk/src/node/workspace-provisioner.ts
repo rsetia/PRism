@@ -26,13 +26,21 @@ export interface ProvisionInput {
   readonly attempt: number;
 }
 
+export interface WorkspaceReleaseOptions {
+  /** Keep the provisioned branch so failed work remains recoverable. */
+  readonly preserveBranch?: boolean;
+}
+
 export interface WorkspaceProvisioner {
   provision(input: ProvisionInput): Promise<WorkspaceHandle>;
   /**
    * Tears down the workspace. Idempotent; after this resolves, handle.dir no
-   * longer exists.
+   * longer exists. A caller may preserve its branch for failure recovery.
    */
-  release(handle: WorkspaceHandle): Promise<void>;
+  release(
+    handle: WorkspaceHandle,
+    options?: WorkspaceReleaseOptions,
+  ): Promise<void>;
   /** Optionally releases an underlying client or connection pool. */
   close?(): Promise<void>;
 }
@@ -91,21 +99,26 @@ export function createGitWorktreeProvisioner(
       return Object.freeze({ dir, branch });
     },
 
-    async release(handle: WorkspaceHandle): Promise<void> {
+    async release(
+      handle: WorkspaceHandle,
+      releaseOptions: WorkspaceReleaseOptions = {},
+    ): Promise<void> {
       const dir = resolve(handle.dir);
       try {
         await runGit(repoDir, ["worktree", "remove", "--force", dir]);
       } catch (error: unknown) {
         // `release` is deliberately idempotent. A missing directory means
-        // there is no workspace left to protect; prune any stale git
-        // metadata and continue to the best-effort branch cleanup.
+        // there is no workspace left to protect; prune stale git metadata.
         if (await pathExists(dir)) {
           throw error;
         }
         await runGit(repoDir, ["worktree", "prune"]).catch(() => undefined);
       }
 
-      if (handle.branch !== undefined) {
+      if (
+        releaseOptions.preserveBranch !== true &&
+        handle.branch !== undefined
+      ) {
         await runGit(repoDir, ["branch", "-D", handle.branch]).catch(
           () => undefined,
         );

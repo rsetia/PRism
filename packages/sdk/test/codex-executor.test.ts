@@ -24,6 +24,7 @@ import type {
   WorkerResult,
   WorkspaceHandle,
   WorkspaceProvisioner,
+  WorkspaceReleaseOptions,
 } from "../src/node/index.js";
 
 const tempDir = mkdtempSync(join(tmpdir(), "prism-codex-exec-"));
@@ -50,18 +51,24 @@ function fakeEngine(result: WorkerResult): {
 function fakeProvisioner(): {
   provisioner: WorkspaceProvisioner;
   provisioned: string[];
-  released: string[];
+  released: {
+    readonly dir: string;
+    readonly options: WorkspaceReleaseOptions | undefined;
+  }[];
 } {
   const provisioned: string[] = [];
-  const released: string[] = [];
+  const released: {
+    readonly dir: string;
+    readonly options: WorkspaceReleaseOptions | undefined;
+  }[] = [];
   const provisioner: WorkspaceProvisioner = {
     provision(input) {
       const dir = mkdtempSync(join(tempDir, `ws-${input.nodeId}-`));
       provisioned.push(dir);
       return Promise.resolve({ dir, branch: `b/${input.nodeId}` });
     },
-    release(handle: WorkspaceHandle) {
-      released.push(handle.dir);
+    release(handle: WorkspaceHandle, options?: WorkspaceReleaseOptions) {
+      released.push({ dir: handle.dir, options });
       return Promise.resolve();
     },
   };
@@ -177,7 +184,12 @@ describe("createCodexExecutor", () => {
     });
     await run(graphWith("implement", implementConfig), executor).result;
     expect(provisioned).toHaveLength(1);
-    expect(released).toEqual(provisioned);
+    expect(released).toEqual([
+      {
+        dir: provisioned[0],
+        options: { preserveBranch: false },
+      },
+    ]);
     // The engine ran in the provisioned worktree.
     expect(inputs[0]?.worktreeDir).toBe(provisioned[0]);
   });
@@ -388,6 +400,8 @@ describe("createCodexExecutor", () => {
       failureClass: "transient_infra",
     });
     expect(released).toHaveLength(1);
+    expect(released[0]?.dir.length).toBeGreaterThan(0);
+    expect(released[0]?.options).toEqual({ preserveBranch: true });
   });
 
   test("maps provisioning and release errors to transient infrastructure", async () => {

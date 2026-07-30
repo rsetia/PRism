@@ -41,3 +41,6 @@ before 1.0.
 
 - Durable run outcomes now survive resume and process restarts.
 - Filesystem and Git identifiers use collision-resistant reversible encoding.
+- Codex implementation and merge workers again inherit trusted host GitHub
+  access, matching Prism's documented trust model and the original prism-py
+  behavior; failed attempts retain their local branches for recovery.

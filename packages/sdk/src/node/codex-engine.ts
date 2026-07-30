@@ -21,8 +21,9 @@ export type CodexSandbox =
  * The prompt and permissions for one Codex-backed executor.
  *
  * `dangerouslyBypassApprovalsAndSandbox` removes both Codex approval and
- * sandbox protections. It is intentionally opt-in: only use it when the
- * surrounding worker environment is an externally isolated trust boundary.
+ * sandbox protections. It is intentionally opt-in: only trusted executor
+ * contracts that require host credentials, network access, or shared Git
+ * metadata should enable it.
  */
 export interface CodexExecutorContract {
   readonly instructions: string;

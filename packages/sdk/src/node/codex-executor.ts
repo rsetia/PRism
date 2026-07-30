@@ -233,7 +233,9 @@ export function createCodexExecutor(
 
       if (workspace !== undefined && options.provisioner !== undefined) {
         try {
-          await options.provisioner.release(workspace);
+          await options.provisioner.release(workspace, {
+            preserveBranch: outcome.status === "failed",
+          });
         } catch (error: unknown) {
           return infrastructureFailure("WORKSPACE_RELEASE_FAILED", error);
         }

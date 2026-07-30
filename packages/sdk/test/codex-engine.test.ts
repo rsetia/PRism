@@ -115,6 +115,24 @@ describe("createCodexEngine", () => {
     expect(existsSync(join(location.nodeDir, "heartbeat.json"))).toBe(true);
   });
 
+  test("honors a trusted contract that requires unsandboxed host access", async () => {
+    const location = paths();
+    const result = await engine().execute({
+      ...location,
+      spec: spec(),
+      contract: {
+        ...contract,
+        dangerouslyBypassApprovalsAndSandbox: true,
+      },
+    });
+    expect(result.status).toBe("succeeded");
+    const args = JSON.parse(
+      readFileSync(join(location.nodeDir, "captured-args.json"), "utf8"),
+    ) as string[];
+    expect(args).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(args).not.toContain("--sandbox");
+  });
+
   test("captures combined Codex stdout and stderr", async () => {
     const output: string[] = [];
     const result = await engine().execute({
