@@ -23,8 +23,14 @@
   },
   "homepage": "https://github.com/rsetia/PRism#readme",
   "bugs": "https://github.com/rsetia/PRism/issues",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/",
+    "tag": "next"
+  },
   "bin": {
-    "prism": "./dist/main.js"
+    "prism": "dist/main.js"
   },
   "files": [
     "dist",

@@ -22,6 +22,7 @@ Describe compatibility and migration implications for every checked contract:
 
 - [ ] Added or updated regression coverage
 - [ ] Updated relevant documentation
+- [ ] Updated `CHANGELOG.md` for a user-visible change, or not applicable
 - [ ] `npm run verify` passes
 
 ## Contributor checklist

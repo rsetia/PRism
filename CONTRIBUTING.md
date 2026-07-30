@@ -44,8 +44,10 @@ Use `npm run dev` for TypeScript watch mode and
 2. Implement the smallest complete change.
 3. Update public documentation when an API, command, security boundary, or
    operational behavior changes.
-4. Run `npm run audit` and `npm run verify`.
-5. Open a pull request using the repository template.
+4. Add user-visible changes to the `Unreleased` section of
+   [CHANGELOG.md](CHANGELOG.md). Maintainers handle version bumps.
+5. Run `npm run audit` and `npm run verify`.
+6. Open a pull request using the repository template.
 
 Tests live beside their package under `packages/*/test`. Prefer externally
 observable assertions over private implementation details. New storage or

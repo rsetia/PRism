@@ -19,7 +19,10 @@
     "pack:check": "publint packages/sdk && publint packages/cli && attw --pack packages/sdk --profile esm-only",
     "smoke": "node scripts/package-smoke.mjs",
     "audit": "npm audit --audit-level=high",
-    "verify": "npm run build && npm run typecheck && npm run lint && npm run format:check && npm run test && npm run pack:check && npm run smoke"
+    "version:check": "node scripts/check-release.mjs",
+    "publish:check": "node scripts/check-release.mjs --publish",
+    "release:check": "node scripts/check-release.mjs --release",
+    "verify": "npm run version:check && npm run build && npm run typecheck && npm run lint && npm run format:check && npm run test && npm run pack:check && npm run publish:check && npm run smoke"
   },
   "devDependencies": {
     "@arethetypeswrong/cli": "^0.18.5",

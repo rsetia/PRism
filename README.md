@@ -365,11 +365,17 @@ npm install
 npm run verify
 ```
 
-`verify` is the definition of green: build, type-check (including tests),
-type-aware lint, format check, the full test suite (unit, exhaustive
-state-table, store-contract, spawned-CLI integration, real-subprocess and
-real-git integration, tarball contents), `publint` + `@arethetypeswrong/cli`,
-and a packed-tarball consumer smoke test. CI runs the same command.
+`verify` is the definition of green: aligned release metadata, build,
+type-check (including tests), type-aware lint, format check, the full test
+suite (unit, exhaustive state-table, store-contract, spawned-CLI integration,
+real-subprocess and real-git integration, tarball contents), `publint` +
+`@arethetypeswrong/cli`, npm publish dry runs, and a packed-tarball consumer
+smoke test. CI runs the same command.
+
+Release history is recorded in [CHANGELOG.md](CHANGELOG.md). Maintainers use
+the non-publishing checks and procedure in [RELEASING.md](RELEASING.md);
+contributors add user-visible changes under `Unreleased` without bumping
+package versions.
 
 ## Contributing
 

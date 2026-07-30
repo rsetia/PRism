@@ -27,6 +27,12 @@
   },
   "homepage": "https://github.com/rsetia/PRism#readme",
   "bugs": "https://github.com/rsetia/PRism/issues",
+  "publishConfig": {
+    "access": "public",
+    "provenance": true,
+    "registry": "https://registry.npmjs.org/",
+    "tag": "next"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
