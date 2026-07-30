@@ -43,8 +43,8 @@ When `PRISM_HOME` is unset, inform the user before creating Beads:
 
 ```text
 PRISM_HOME is not set. Prism uses it as one absolute root for project-scoped
-Beads workspaces, durable run stores, and agent worktrees. Set it in your
-shell, for example:
+Beads workspaces, durable run stores, agent worktrees, and worker logs. Set it
+in your shell, for example:
 
 export PRISM_HOME="/absolute/path/to/prism-home"
 
@@ -68,7 +68,8 @@ recursively modify or remove the root. Prism's convention is:
 $PRISM_HOME/
 ├── beads/<project-slug>/
 ├── store/<project-slug>/runs.db
-└── worktrees/<project-slug>/
+├── worktrees/<project-slug>/
+└── logs/<project-slug>/
 ```
 
 For example:
@@ -259,16 +260,32 @@ Report:
 - Execution waves and important dependency decisions.
 - Implementor and reviewer policy.
 - Validation performed and any remaining constraints.
-- The exact run command, normally:
+- A final `Next steps` section with exact, copyable commands.
 
-```bash
-(cd <code-repo> && prism run <project>.prism.json)
+End every successful DAG handoff with this user-facing structure, substituting
+the real repository and graph paths:
 
-(cd <code-repo> && prism watch <generated-run-id>)
+```text
+Next steps
+
+Run the DAG from the project repository:
+  prism run <absolute-graph-path>
+
+While it runs, open another terminal in the same repository:
+  prism watch
+  prism logs
 ```
 
-Prism prints the generated run id to stderr. Its CLI defaults to four-way
-concurrency; specify a different value only when the graph or resource limits
-justify it, and do not imply that concurrency overrides dependency edges. With
-`PRISM_HOME` configured, the run store and worktree base are inferred for the
-current project. Use explicit path flags only when overriding that convention.
+Do not omit this section merely because the commands appeared earlier in the
+conversation. Make clear that `prism run` executes the work, `prism watch`
+monitors node state until completion, and `prism logs` shows durable worker
+output. Do not start any of them unless the user explicitly asks to execute
+the graph.
+
+Prism generates the run id. `watch` selects the newest unfinished run and
+`logs` selects the newest run, so the default handoff does not require the
+user to copy an id. The CLI defaults to four-way concurrency; specify a
+different value only when the graph or resource limits justify it, and do not
+imply that concurrency overrides dependency edges. With `PRISM_HOME`
+configured, project paths are inferred. Use explicit path flags only when
+overriding that convention.

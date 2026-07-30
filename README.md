@@ -1,127 +1,102 @@
 # Prism
 
-An agent-graph SDK and CLI. Prism compiles a graph of tasks — nodes plus
-"depends on" edges — into an immutable plan and runs it: dependency-ordered,
-a few nodes at a time, with failure-classified retry, cooperative
-cancellation, durable resume, and a streamed event log. A node can be a pure
-function, a subprocess, or a coding agent working in its own git worktree.
+Turn a project discussion into parallel implementation work: Codex implements
+each Bead in an isolated Git worktree, Claude reviews the pull requests, and
+Prism respects the dependency DAG.
 
-The name is a nod to what it does: like a prism splitting one beam into many,
-it fans one work item out into parallel isolated worktrees — each producing a
-pull request.
+## Run a project in one minute
 
-> **Status: `0.1.0-alpha.0` — core-parity complete, unpublished.** The full
-> runtime, executor set, and operator CLI are built and tested (the full
-> `verify` gate is green), but nothing is on npm yet and public API shapes may
-> still change. See [Status & limitations](#status--limitations).
->
-> _This is a TypeScript rebuild of the Python "PRism"; that project is the
-> behavioral reference, not a porting source._
+### 1. Set up Prism once
 
-## Quickstart
+Prism is not published to npm yet. Build the CLI and put it on your path:
 
 ```sh
-git clone git@github.com:rsetia/PRism.git && cd PRism
+git clone git@github.com:rsetia/PRism.git
+cd PRism
 npm install
 npm run build
-alias prism="node $PWD/packages/cli/dist/main.js"
+npm link --workspace packages/cli
 ```
 
-(Or `npm pack` both packages and install the tarballs anywhere — the CLI's
-binary is `prism`.)
-
-The example graph, [`examples/hello.json`](examples/hello.json):
-
-```json
-{
-  "version": 1,
-  "nodes": {
-    "first": { "executor": "constant", "config": { "value": "hello" } },
-    "second": { "executor": "passthrough", "dependsOn": ["first"] }
-  },
-  "finalNode": "second"
-}
-```
-
-```console
-$ prism run examples/hello.json
-"hello"
-
-$ prism graph examples/hello.json
-first (constant)
-second (passthrough) <- first
-final: second
-```
-
-Graphs may be JSON or YAML; the CLI picks the parser by file extension.
-
-## CLI
-
-stdout carries machine-readable data only (add `--json` where noted); human
-diagnostics and the run id go to stderr, so everything pipes cleanly.
-
-**Author & run**
+Choose one absolute directory for Prism's Beads, run state, worktrees, and
+logs. Add this to your shell profile:
 
 ```sh
-prism validate <file>                # exit 0 if the graph is valid
-prism graph <file> [--json]          # print the compiled plan
-prism run <file> [--json] [--store <db>] [--run-id <id>]
+export PRISM_HOME="$HOME/.prism"
 ```
 
-Set one absolute home for Prism's operator-owned project data:
+### 2. Plan with your agent
+
+Have the normal product or engineering discussion first. Then send your agent:
+
+```text
+Use the prism-plan-project skill from <PRISM checkout>/skills/prism-plan-project/SKILL.md
+to turn this discussion into Beads and an executable Prism DAG. Use Codex to
+implement and Claude to review with the exact comment "@claude review".
+```
+
+The skill inspects the repository, proposes the work, creates the Beads,
+constructs the dependency DAG, validates it, and reports the graph path. It
+does not start the run without your approval.
+
+### 3. Run and monitor
+
+From the project repository:
 
 ```sh
-export PRISM_HOME="$HOME/2026"
+prism run <graph-file>
 ```
 
-Prism derives the project from the current Git root and uses:
+While it runs, use another terminal in the same repository:
+
+```sh
+prism watch
+prism logs
+```
+
+That is the complete default workflow. No repository, store, run ID, or
+concurrency flags are required. `watch` selects the newest unfinished run;
+`logs` follows every worker from the newest run, attaches as new nodes start,
+and exits when the run finishes. Prism runs up to four ready nodes concurrently
+and generates a durable run ID automatically.
+
+## Where Prism stores data
+
+The current Git root determines `<project>`:
 
 ```text
 $PRISM_HOME/
 ├── beads/<project>/
 ├── store/<project>/runs.db
-└── worktrees/<project>/
+├── worktrees/<project>/
+└── logs/<project>/
 ```
 
-With `PRISM_HOME` configured, `run` persists automatically and prints its
-generated run id to stderr. Execution defaults to four-way concurrency.
-`--run-id`, `--max-concurrency`, `--store`, `--repo`, `--beads-repo`, and
-`--worktree-dir` remain available as explicit overrides. Without `PRISM_HOME`,
-a plain run remains in-memory unless `--store` or `--run-id` is supplied.
+Explicit flags remain available when you need to override these defaults.
 
-**Observe**
+## CLI reference
 
 ```sh
-prism status [--store <db>] [--json]              # list persisted runs
-prism inspect <run-id> [--store <db>] [--json]    # per-node states
-prism events  <run-id> [--store <db>] [--json]    # the event log
-prism watch   <run-id> [--store <db>] [--interval <ms>]   # poll until done
+prism beads-dag --out <graph-file> [--reviewer claude|greptile|none]
+prism validate <graph-file>
+prism graph <graph-file>
+prism run <graph-file> [--max-concurrency <n>]
+
+prism watch [<run-id>]
+prism logs [<run-id>]
+prism status
+prism inspect <run-id>
+prism events <run-id>
+
+prism resume <run-id>
+prism abort <run-id>
+prism signal <run-id> <node-id>
+prism rerun-node <run-id> <node-id>
 ```
 
-**Recover**
-
-```sh
-prism resume     <run-id> [--store <db>]            # continue an interrupted run
-prism abort      <run-id> [--store <db>]            # force a stuck run to cancelled+finished
-prism signal     <run-id> <node-id> [--store <db>]  # reset a node to re-run on resume
-prism rerun-node <run-id> <node-id> [--store <db>]  # reset a node + its downstream
-```
-
-A typical persisted session:
-
-```console
-$ prism run examples/hello.json
-run run-550e8400-e29b-41d4-a716-446655440000   # generated; stderr
-"hello"
-
-$ prism status
-run-550e8400-e29b-41d4-a716-446655440000    finished
-
-$ prism inspect run-550e8400-e29b-41d4-a716-446655440000
-first: succeeded
-second: succeeded
-finished: true
-```
+Graphs may be JSON or YAML. `--store`, `--repo`, `--beads-repo`,
+`--worktree-dir`, and `--run-id` are optional overrides. Add `--json` to
+commands that support structured output.
 
 ### Exit codes
 
@@ -131,6 +106,10 @@ finished: true
 | 1    | The graph ran and failed — a normal outcome |
 | 2    | Invalid input or usage                      |
 | 3    | Unexpected internal error                   |
+
+> **Status: `0.1.0-alpha.0` — unpublished.** The runtime and CLI are built and
+> tested, but public APIs may still change. This is the TypeScript successor
+> to the original Python PRism.
 
 ## SDK
 
