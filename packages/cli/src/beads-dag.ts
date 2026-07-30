@@ -10,6 +10,7 @@ import {
   type ReviewGate,
 } from "@rsetia/prism";
 import { createExecFileRunner, type CommandRunner } from "@rsetia/prism/node";
+import { resolvePrismProjectPaths } from "./prism-home.js";
 
 const DEFAULT_STATUSES: ReadonlySet<string> = new Set([
   "open",
@@ -51,8 +52,11 @@ export async function generateBeadsDag(
   options: GenerateBeadsDagOptions,
   runner: CommandRunner = createExecFileRunner(),
 ): Promise<GraphDefinition> {
-  const repoDir = resolve(options.repoDir);
-  const beadsRepoDir = resolve(options.beadsRepoDir ?? repoDir);
+  const projectPaths = resolvePrismProjectPaths(options.repoDir);
+  const repoDir = projectPaths.repoDir;
+  const beadsRepoDir = resolve(
+    options.beadsRepoDir ?? projectPaths.beadsRepoDir ?? repoDir,
+  );
   const bdCommand = options.bdCommand ?? "bd";
   const exported = await runner.run(
     bdCommand,

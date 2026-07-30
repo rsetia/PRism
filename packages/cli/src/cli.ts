@@ -6,9 +6,9 @@
  * NOTHING else — it gets piped. Every human-facing diagnostic goes to
  * stderr. Exit codes are the interface for shell scripts.
  */
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
-import { extname } from "node:path";
+import { dirname, extname, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
   abortRun,
@@ -34,6 +34,10 @@ import type {
 import { createSqliteStore } from "@rsetia/prism/node";
 import { createAgentExecutorRegistry } from "./agent-executors.js";
 import { generateBeadsDag } from "./beads-dag.js";
+import {
+  missingPrismHomeMessage,
+  resolvePrismProjectPaths,
+} from "./prism-home.js";
 
 /** stdout: data only. stderr: humans only. */
 export interface CliIo {
@@ -48,33 +52,39 @@ export const EXIT_RUN_FAILED = 1;
 export const EXIT_USAGE = 2;
 /** Unexpected internal error — our bug. Assigned by main.ts. */
 export const EXIT_INTERNAL = 3;
+export const DEFAULT_MAX_CONCURRENCY = 4;
 
 export const USAGE = `Usage: prism <command> [options]
 
 Commands:
   validate <file>                     Check a graph file; exit 0 if valid
   graph <file> [--json]               Print the compiled plan
-  beads-dag --repo <path> --out <file> [--beads-repo <path>]
+  beads-dag --out <file> [--repo <path>] [--beads-repo <path>]
                                       Snapshot Beads into an agent DAG
   run <file> [--json] [--store <db>] [--run-id <id>] [--repo <path>]
              [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
-                                      Execute the graph (persists with --store)
-  inspect <run-id> --store <db> [--json]
+                                      Execute the graph
+  inspect <run-id> [--store <db>] [--json]
                                       Show a persisted run's node states
-  events <run-id> --store <db> [--json]
+  events <run-id> [--store <db>] [--json]
                                       Show a persisted run's event log
-  status --store <db> [--json]        List persisted runs
-  watch <run-id> --store <db> [--json] [--interval <ms>]
+  status [--store <db>] [--json]      List persisted runs
+  watch <run-id> [--store <db>] [--json] [--interval <ms>]
                                       Poll a run until it finishes
-  resume <run-id> --store <db> [--json] [--repo <path>]
+  resume <run-id> [--store <db>] [--json] [--repo <path>]
          [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
                                       Continue an interrupted run to completion
-  abort <run-id> --store <db> [--json]
+  abort <run-id> [--store <db>] [--json]
                                       Force a stuck run to a cancelled, finished state
-  signal <run-id> <node-id> --store <db> [--json]
+  signal <run-id> <node-id> [--store <db>] [--json]
                                       Reset a node so a later resume re-runs it
-  rerun-node <run-id> <node-id> --store <db> [--json]
-                                      Reset a node and its downstream, then resume`;
+  rerun-node <run-id> <node-id> [--store <db>] [--json]
+                                      Reset a node and its downstream, then resume
+
+Defaults:
+  Repository                            Current git repository
+  Beads, store, and worktrees           $PRISM_HOME/<kind>/<project>/...
+  Maximum concurrency                   ${String(DEFAULT_MAX_CONCURRENCY)}`;
 
 interface ValidateInvocation {
   readonly command: "validate";
@@ -95,7 +105,7 @@ interface RunInvocation {
 }
 interface BeadsDagInvocation {
   readonly command: "beads-dag";
-  readonly repo: string;
+  readonly repo: string | undefined;
   readonly beadsRepo: string | undefined;
   readonly out: string;
   readonly bdCommand: string;
@@ -120,39 +130,39 @@ interface ReadInvocation {
   readonly command: "inspect" | "events";
   readonly runId: string;
   readonly json: boolean;
-  readonly store: string;
+  readonly store: string | undefined;
 }
 interface StatusInvocation {
   readonly command: "status";
   readonly json: boolean;
-  readonly store: string;
+  readonly store: string | undefined;
 }
 interface WatchInvocation {
   readonly command: "watch";
   readonly runId: string;
   readonly json: boolean;
-  readonly store: string;
+  readonly store: string | undefined;
   readonly intervalMs: number;
 }
 interface ResumeInvocation {
   readonly command: "resume";
   readonly runId: string;
   readonly json: boolean;
-  readonly store: string;
+  readonly store: string | undefined;
   readonly agent: AgentInvocationOptions;
 }
 interface AbortInvocation {
   readonly command: "abort";
   readonly runId: string;
   readonly json: boolean;
-  readonly store: string;
+  readonly store: string | undefined;
 }
 interface NodeTargetInvocation {
   readonly command: "signal" | "rerun-node";
   readonly runId: string;
   readonly nodeId: string;
   readonly json: boolean;
-  readonly store: string;
+  readonly store: string | undefined;
 }
 type Invocation =
   | ValidateInvocation
@@ -319,7 +329,6 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
       if (
         count !== 1 ||
         first === undefined ||
-        flags.store === undefined ||
         flags.runId !== undefined ||
         flags.interval !== undefined ||
         !noAgentFlags(flags)
@@ -336,7 +345,6 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
       if (
         count !== 1 ||
         first === undefined ||
-        flags.store === undefined ||
         flags.runId !== undefined ||
         flags.interval !== undefined
       ) {
@@ -356,7 +364,6 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
       if (
         count !== 1 ||
         first === undefined ||
-        flags.store === undefined ||
         flags.runId !== undefined ||
         flags.interval !== undefined ||
         !noAgentFlags(flags)
@@ -370,7 +377,6 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
         count !== 2 ||
         first === undefined ||
         second === undefined ||
-        flags.store === undefined ||
         flags.runId !== undefined ||
         flags.interval !== undefined ||
         !noAgentFlags(flags)
@@ -387,7 +393,6 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
     case "status":
       if (
         count !== 0 ||
-        flags.store === undefined ||
         flags.runId !== undefined ||
         flags.interval !== undefined ||
         !noAgentFlags(flags)
@@ -399,7 +404,6 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
       if (
         count !== 1 ||
         first === undefined ||
-        flags.store === undefined ||
         flags.runId !== undefined ||
         !noAgentFlags(flags)
       ) {
@@ -437,7 +441,9 @@ function parseAgentOptions(
   flags: ParsedFlags,
 ): AgentInvocationOptions | undefined {
   const maxConcurrency =
-    flags.maxConcurrency === undefined ? 1 : Number(flags.maxConcurrency);
+    flags.maxConcurrency === undefined
+      ? DEFAULT_MAX_CONCURRENCY
+      : Number(flags.maxConcurrency);
   if (!Number.isSafeInteger(maxConcurrency) || maxConcurrency < 1) {
     return undefined;
   }
@@ -510,9 +516,8 @@ function parseBeadsDagInvocation(
     return undefined;
   }
 
-  const repo = scalar.get("--repo");
   const out = scalar.get("--out");
-  if (repo === undefined || out === undefined) {
+  if (out === undefined) {
     return undefined;
   }
   const reviewer = scalar.get("--reviewer") ?? "greptile";
@@ -549,7 +554,7 @@ function parseBeadsDagInvocation(
 
   return {
     command: "beads-dag",
-    repo,
+    repo: scalar.get("--repo"),
     beadsRepo: scalar.get("--beads-repo"),
     out,
     bdCommand: scalar.get("--bd-bin") ?? "bd",
@@ -586,6 +591,20 @@ function csvValues(values: readonly string[]): string[] {
 function describeError(error: unknown): string {
   const description = error instanceof Error ? error.message : String(error);
   return description.replace(/\s+/g, " ").trim();
+}
+
+async function openPersistentStore(
+  explicitPath: string | undefined,
+  repoDir?: string,
+): Promise<RunStore> {
+  const projectPaths = resolvePrismProjectPaths(repoDir);
+  const path =
+    explicitPath === undefined ? projectPaths.storePath : resolve(explicitPath);
+  if (path === undefined) {
+    throw new Error(missingPrismHomeMessage("--store <db>"));
+  }
+  await mkdir(dirname(path), { recursive: true });
+  return createSqliteStore({ path });
 }
 
 function reportGraphErrors(
@@ -769,10 +788,27 @@ async function runGraph(
   io: CliIo,
 ): Promise<number> {
   const json = invocation.json;
-  const store =
-    invocation.store === undefined
-      ? createMemoryStore()
-      : createSqliteStore({ path: invocation.store });
+  let hasDefaultStore: boolean;
+  try {
+    hasDefaultStore =
+      resolvePrismProjectPaths(invocation.agent.repo).storePath !== undefined;
+  } catch (error: unknown) {
+    io.stderr(`cannot resolve project paths: ${describeError(error)}`);
+    return EXIT_USAGE;
+  }
+  const durable =
+    invocation.store !== undefined ||
+    invocation.runId !== undefined ||
+    hasDefaultStore;
+  let store: RunStore;
+  try {
+    store = durable
+      ? await openPersistentStore(invocation.store, invocation.agent.repo)
+      : createMemoryStore();
+  } catch (error: unknown) {
+    io.stderr(`cannot open run store: ${describeError(error)}`);
+    return EXIT_USAGE;
+  }
   let outcome: RunOutcome;
   try {
     const engine = createEngine({
@@ -794,8 +830,7 @@ async function runGraph(
       maxConcurrency: invocation.agent.maxConcurrency,
     });
     const runId =
-      invocation.runId ??
-      (invocation.store === undefined ? undefined : `run-${randomUUID()}`);
+      invocation.runId ?? (durable ? `run-${randomUUID()}` : undefined);
     const handle = engine.run(graph, runId === undefined ? {} : { runId });
     // The run id is a human diagnostic (stderr) so `inspect`/`events` can
     // target it; stdout stays pure data.
@@ -854,7 +889,7 @@ async function inspectCommand(
 ): Promise<number> {
   let store: RunStore | undefined;
   try {
-    store = createSqliteStore({ path: invocation.store });
+    store = await openPersistentStore(invocation.store);
     const inspection = await inspectRun(store, invocation.runId);
     if (invocation.json) {
       io.stdout(
@@ -898,7 +933,7 @@ async function eventsCommand(
 ): Promise<number> {
   let store: RunStore | undefined;
   try {
-    store = createSqliteStore({ path: invocation.store });
+    store = await openPersistentStore(invocation.store);
     const run = await store.getRun(invocation.runId);
     if (run === undefined) {
       io.stderr(`unknown run: "${invocation.runId}"`);
@@ -933,7 +968,7 @@ async function resumeCommand(
 ): Promise<number> {
   let store: RunStore | undefined;
   try {
-    store = createSqliteStore({ path: invocation.store });
+    store = await openPersistentStore(invocation.store, invocation.agent.repo);
     const engine = createEngine({
       store,
       registry: createAgentExecutorRegistry({
@@ -970,7 +1005,7 @@ async function abortCommand(
 ): Promise<number> {
   let store: RunStore | undefined;
   try {
-    store = createSqliteStore({ path: invocation.store });
+    store = await openPersistentStore(invocation.store);
     await abortRun(store, invocation.runId);
     io.stderr(`aborted ${invocation.runId}`);
     if (invocation.json) {
@@ -991,7 +1026,7 @@ async function resetCommand(
 ): Promise<number> {
   let store: RunStore | undefined;
   try {
-    store = createSqliteStore({ path: invocation.store });
+    store = await openPersistentStore(invocation.store);
     await resetRun(
       store,
       invocation.runId,
@@ -1026,7 +1061,7 @@ async function statusCommand(
 ): Promise<number> {
   let store: RunStore | undefined;
   try {
-    store = createSqliteStore({ path: invocation.store });
+    store = await openPersistentStore(invocation.store);
     const runs = await store.listRuns();
     if (invocation.json) {
       io.stdout(stringifyJson({ version: 1, runs }));
@@ -1083,7 +1118,7 @@ async function watchCommand(
 ): Promise<number> {
   let store: RunStore | undefined;
   try {
-    store = createSqliteStore({ path: invocation.store });
+    store = await openPersistentStore(invocation.store);
     let terminal: RunInspection | undefined;
     for await (const inspection of watchRun(store, invocation.runId, {
       clock: createSystemClock(),
@@ -1123,7 +1158,7 @@ export async function runCli(
     case "beads-dag":
       try {
         await generateBeadsDag({
-          repoDir: invocation.repo,
+          repoDir: invocation.repo ?? process.cwd(),
           ...(invocation.beadsRepo === undefined
             ? {}
             : { beadsRepoDir: invocation.beadsRepo }),

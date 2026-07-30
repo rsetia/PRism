@@ -5,6 +5,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -60,11 +61,31 @@ interface CliResult {
 }
 
 async function cli(...args: readonly string[]): Promise<CliResult> {
+  return cliWith({ prismHome: null }, ...args);
+}
+
+async function cliWith(
+  options: {
+    readonly cwd?: string;
+    readonly prismHome?: string | null;
+  },
+  ...args: readonly string[]
+): Promise<CliResult> {
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  if (options.prismHome === null) {
+    delete env["PRISM_HOME"];
+  } else if (options.prismHome !== undefined) {
+    env["PRISM_HOME"] = options.prismHome;
+  }
   try {
     const { stdout, stderr } = await execFileAsync(
       process.execPath,
       [CLI_PATH, ...args],
-      { timeout: 10_000 },
+      {
+        timeout: 10_000,
+        ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+        env,
+      },
     );
     return { code: 0, stdout, stderr };
   } catch (error) {
@@ -214,18 +235,36 @@ describe("prism CLI", () => {
     );
   });
 
+  test("run with a run id explains how to configure PRISM_HOME", async () => {
+    const result = await cliWith(
+      { prismHome: null },
+      "run",
+      fixture("valid.json"),
+      "--run-id",
+      "needs-home",
+    );
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("PRISM_HOME is not set");
+    expect(result.stderr).not.toContain("unexpected internal error");
+  });
+
   test("beads-dag snapshots hydrated work into a Claude-reviewed graph", async () => {
     const root = mkdtempSync(join(tmpdir(), "prism-cli-beads-"));
     try {
       const repo = join(root, "code");
-      const beadsRepo = join(root, "beads");
+      const prismHome = join(root, "prism-home");
+      const beadsRepo = join(prismHome, "beads", "code");
       const out = join(root, "graph.json");
       const bd = join(root, "fake-bd.mjs");
       mkdirSync(repo);
-      mkdirSync(beadsRepo);
+      mkdirSync(beadsRepo, { recursive: true });
       writeFileSync(
         bd,
         `#!/usr/bin/env node
+if (process.cwd() !== ${JSON.stringify(realpathSync(beadsRepo))}) {
+  process.stderr.write("wrong Beads workspace: " + process.cwd());
+  process.exit(9);
+}
 const command = process.argv[2];
 if (command === "export") {
   process.stdout.write([
@@ -251,12 +290,11 @@ if (command === "export") {
       );
       chmodSync(bd, 0o755);
 
-      const result = await cli(
+      const result = await cliWith(
+        { prismHome },
         "beads-dag",
         "--repo",
         repo,
-        "--beads-repo",
-        beadsRepo,
         "--out",
         out,
         "--bd-bin",
@@ -369,6 +407,39 @@ describe("prism CLI: persisted runs", () => {
     expect(inspected.stdout).toContain("finished: true");
   });
 
+  test("PRISM_HOME persists a generated run id for run, watch, and inspect", async () => {
+    const repo = join(tempDir, "default-project");
+    const prismHome = join(tempDir, "prism-home");
+    mkdirSync(repo);
+
+    const ran = await cliWith(
+      { cwd: repo, prismHome },
+      "run",
+      fixture("valid.json"),
+    );
+    expect(ran.code).toBe(0);
+    const runId = runIdFrom(ran.stderr);
+    expect(runId).toMatch(/^run-[0-9a-f-]+$/u);
+    expect(
+      existsSync(join(prismHome, "store", "default-project", "runs.db")),
+    ).toBe(true);
+
+    const watched = await cliWith(
+      { cwd: repo, prismHome },
+      "watch",
+      runId,
+      "--interval",
+      "1",
+    );
+    expect(watched.code).toBe(0);
+    expect(watched.stdout).toContain(`run ${runId}: finished`);
+
+    const inspected = await cliWith({ cwd: repo, prismHome }, "inspect", runId);
+    expect(inspected.code).toBe(0);
+    expect(inspected.stdout).toContain("first: succeeded");
+    expect(inspected.stdout).toContain("finished: true");
+  });
+
   test("inspect --json is a versioned envelope", async () => {
     const store = db();
     await cli("run", fixture("valid.json"), "--store", store, "--run-id", "r2");
@@ -432,10 +503,10 @@ describe("prism CLI: persisted runs", () => {
     expect(inspected.stdout).toBe("");
   });
 
-  test("inspect without --store is a usage error", async () => {
-    const inspected = await cli("inspect", "r1");
+  test("inspect without --store explains how to configure PRISM_HOME", async () => {
+    const inspected = await cliWith({ prismHome: null }, "inspect", "r1");
     expect(inspected.code).toBe(2);
-    expect(inspected.stderr).toContain("Usage:");
+    expect(inspected.stderr).toContain("PRISM_HOME is not set");
   });
 
   test("events of an unknown run exits 2", async () => {
@@ -530,10 +601,10 @@ describe("prism CLI: persisted runs", () => {
     expect(parsed.runs.map((run) => run.runId)).toContain("s3");
   });
 
-  test("status without --store is a usage error", async () => {
-    const status = await cli("status");
+  test("status without --store explains how to configure PRISM_HOME", async () => {
+    const status = await cliWith({ prismHome: null }, "status");
     expect(status.code).toBe(2);
-    expect(status.stderr).toContain("Usage:");
+    expect(status.stderr).toContain("PRISM_HOME is not set");
   });
 
   test("watch emits a finished JSON snapshot and exits successfully", async () => {
@@ -695,10 +766,10 @@ describe("prism CLI: persisted runs", () => {
     expect(resumed.stderr).toContain("cannot resume");
   });
 
-  test("resume without --store is a usage error", async () => {
-    const resumed = await cli("resume", "res1");
+  test("resume without --store explains how to configure PRISM_HOME", async () => {
+    const resumed = await cliWith({ prismHome: null }, "resume", "res1");
     expect(resumed.code).toBe(2);
-    expect(resumed.stderr).toContain("Usage:");
+    expect(resumed.stderr).toContain("PRISM_HOME is not set");
   });
 
   test("rerun-node resets a node and downstream, then resume re-runs them", async () => {

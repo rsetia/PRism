@@ -12,11 +12,12 @@ import {
   createGitWorktreeProvisioner,
   createMergePrExecutor,
 } from "@rsetia/prism/node";
+import { resolvePrismProjectPaths } from "./prism-home.js";
 
 export interface AgentExecutorRegistryOptions {
   /** Git repository Codex implement/merge nodes mutate. Default cwd. */
   readonly repoDir?: string;
-  /** Parent directory for isolated git worktrees. Default OS temp. */
+  /** Parent directory for isolated git worktrees. Default PRISM_HOME, then OS temp. */
   readonly worktreeBaseDir?: string;
   /** Codex executable. Default "codex". */
   readonly codexCommand?: string;
@@ -32,9 +33,12 @@ export interface AgentExecutorRegistryOptions {
 export function createAgentExecutorRegistry(
   options: AgentExecutorRegistryOptions = {},
 ): ExecutorRegistry {
-  const repoDir = resolve(options.repoDir ?? process.cwd());
+  const projectPaths = resolvePrismProjectPaths(options.repoDir);
+  const repoDir = projectPaths.repoDir;
   const worktreeBaseDir = resolve(
-    options.worktreeBaseDir ?? join(tmpdir(), "prism-worktrees"),
+    options.worktreeBaseDir ??
+      projectPaths.worktreeBaseDir ??
+      join(tmpdir(), "prism-worktrees", projectPaths.projectSlug),
   );
   const codexEngine = createCodexEngine({
     ...(options.codexCommand === undefined

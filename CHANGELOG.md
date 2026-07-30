@@ -25,6 +25,10 @@ before 1.0.
   not load Node built-ins.
 - Execution backend handles use a backend-defined opaque identity; the local
   protocol directory is optional.
+- `PRISM_HOME` now supplies project-scoped defaults for Beads workspaces,
+  durable run stores, and agent worktrees; repository paths default to the
+  current git root. CLI runs persist with generated IDs when this home is
+  configured, and agent execution defaults to four-way concurrency.
 
 ### Fixed
 
