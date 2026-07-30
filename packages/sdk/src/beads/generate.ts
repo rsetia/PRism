@@ -136,7 +136,7 @@ export function buildBeadsGraph(
   }
 
   const targetBranch = options?.targetBranch ?? "main";
-  const review = options?.review ?? "none";
+  const review = options?.review ?? "greptile";
   const branchPrefix = options?.branchPrefix ?? "prism/";
   const validationCommands = options?.validationCommands;
   const maxIterations = options?.maxIterations;
@@ -159,6 +159,7 @@ export function buildBeadsGraph(
   );
   const reviewConfig = {
     by: review,
+    ...(review === "greptile" ? { triggerComment: "@greptile review" } : {}),
     ...options?.reviewConfig,
   };
 

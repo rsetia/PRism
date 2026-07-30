@@ -111,7 +111,11 @@ export async function generateBeadsDag(
   const reviewer = options.reviewer ?? "greptile";
   const reviewTriggerComment =
     options.reviewTriggerComment ??
-    (reviewer === "claude" ? "@claude review" : undefined);
+    (reviewer === "greptile"
+      ? "@greptile review"
+      : reviewer === "claude"
+        ? "@claude review"
+        : undefined);
   const graphOptions: BeadsGraphOptions = {
     targetBranch: options.targetBranch ?? "main",
     branchPrefix: options.branchPrefix ?? "prism/",

@@ -1,7 +1,7 @@
 # Prism
 
 Turn a project discussion into parallel implementation work. Codex implements
-each task, Claude reviews the pull requests, and Prism follows the dependency
+each task, Greptile reviews the pull requests, and Prism follows the dependency
 DAG.
 
 ## Set up once
@@ -31,7 +31,7 @@ Then tell your agent:
 ```text
 Read <PRISM checkout>/skills/prism-plan-project/SKILL.md and use it to turn
 this discussion into Beads and an executable Prism DAG. Use Codex to implement
-and Claude to review with the exact comment "@claude review".
+and Greptile to review with the exact comment "@greptile review".
 ```
 
 The skill creates the Beads and DAG, validates them, and gives you the graph
@@ -91,3 +91,5 @@ See [SECURITY.md](SECURITY.md) for details.
 
 SDK documentation is in [packages/sdk/README.md](packages/sdk/README.md).
 Release history is in [CHANGELOG.md](CHANGELOG.md).
+
+Status: `0.1.0-alpha.0` (unpublished).

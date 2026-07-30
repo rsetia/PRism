@@ -248,7 +248,7 @@ describe("prism CLI", () => {
     expect(result.stderr).not.toContain("unexpected internal error");
   });
 
-  test("beads-dag snapshots hydrated work into a Claude-reviewed graph", async () => {
+  test("beads-dag defaults hydrated work to Greptile review", async () => {
     const root = mkdtempSync(join(tmpdir(), "prism-cli-beads-"));
     try {
       const repo = join(root, "code");
@@ -299,8 +299,6 @@ if (command === "export") {
         out,
         "--bd-bin",
         bd,
-        "--reviewer",
-        "claude",
         "--validation-command",
         "npm test",
         "--no-beads-update",
@@ -324,7 +322,7 @@ if (command === "export") {
         "Hydrated implementation details",
       );
       expect(graph.nodes["implement-bd-a"]?.config).toMatchObject({
-        review: { by: "claude", triggerComment: "@claude review" },
+        review: { by: "greptile", triggerComment: "@greptile review" },
         validationCommands: ["npm test"],
       });
       expect(graph.nodes["merge-bd-a"]?.executor).toBe("merge_resolve");

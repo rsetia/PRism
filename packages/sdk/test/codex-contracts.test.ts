@@ -159,6 +159,7 @@ describe("buildImplementContract", () => {
       },
     });
     expect(contract.instructions).toContain("Greptile");
+    expect(contract.instructions).toContain("@greptile review");
     expect(contract.instructions).toContain("Confidence Score: N/5");
     expect(contract.instructions).toContain("at least 4");
     expect(contract.instructions).toContain("npm run verify");

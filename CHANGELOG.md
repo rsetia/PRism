@@ -36,6 +36,9 @@ before 1.0.
 - Interactive `prism watch` redraws the dependency DAG as execution advances,
   with high-contrast state highlighting and progress; redirected output keeps
   its stable line-oriented format.
+- Generated Beads DAGs default to Greptile review with the exact trigger
+  comment `@greptile review`; Claude and no-review workflows remain explicit
+  overrides.
 
 ### Fixed
 

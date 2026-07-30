@@ -24,14 +24,13 @@ node states. `logs` follows all worker output from the newest run until it
 finishes. Explicit path, run ID, and concurrency flags remain available as
 overrides. Redirected and `--json` watch output remain script-friendly.
 
-Generate a Codex implementation DAG from Beads, with Claude or Greptile as
-the pull-request review gate:
+Generate a Codex implementation DAG from Beads. Greptile review with the
+trigger `@greptile review` is the default:
 
 ```console
 $ cd /path/to/code
 $ prism beads-dag \
     --out work.prism.json \
-    --reviewer claude \
     --validation-command "npm test"
 
 $ prism run work.prism.json

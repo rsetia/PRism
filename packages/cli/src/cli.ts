@@ -92,6 +92,7 @@ Commands:
 Defaults:
   Repository                            Current git repository
   Beads, store, worktrees, and logs     $PRISM_HOME/<kind>/<project>/...
+  Pull-request reviewer                 Greptile (@greptile review)
   Maximum concurrency                   ${String(DEFAULT_MAX_CONCURRENCY)}`;
 
 interface ValidateInvocation {

@@ -204,8 +204,9 @@ export function parseMergeResolveConfig(
  * - run validationCommands, commit, push branchName (or a generated
  *   branch), open/update a PR against targetBranch
  * - drive the review gate by review.by:
- *     greptile — poll Greptile feedback ("Confidence Score: N/5", inline
- *       comments), honor minConfidenceScore and
+ *     greptile — post triggerComment (default "@greptile review"), poll
+ *       Greptile feedback ("Confidence Score: N/5", inline comments), honor
+ *       minConfidenceScore and
  *       allowConfidenceFourWithoutActionableFindings
  *     claude   — post triggerComment (default "@claude review"), treat
  *       CHANGES_REQUESTED and unresolved inline comments as actionable,
@@ -502,17 +503,14 @@ function implementGateInstructions(review: ReviewConfig): string {
   switch (review.by) {
     case "greptile": {
       const minimum = review.minConfidenceScore ?? 5;
-      const trigger =
-        review.triggerComment === undefined
-          ? "Greptile normally auto-triggers after a push; do not post a manual trigger unless configured feedback fails to appear."
-          : `If auto-triggered feedback does not appear, post the configured trigger comment ${quote(review.triggerComment)}.`;
+      const trigger = review.triggerComment ?? "@greptile review";
       const confidenceFour =
         review.allowConfidenceFourWithoutActionableFindings === true
           ? "When the configured minimum is 5 and Greptile reports 4/5, you may accept it only when no current-head actionable findings remain and all required checks are green; record safe_confidence_4_exception_applied=true in metadata."
           : "Do not accept a Greptile confidence score below the configured minimum.";
       return `- Use Greptile as the review gate. Read current-head summary comments containing "Confidence Score: N/5", inline review comments, and Greptile-generated test or issue comments.
 - Require a confidence score of at least ${String(minimum)} and apply current-head actionable-finding and check requirements.${criteriaInstruction}
-- ${trigger}
+- Post ${quote(trigger)} after a new head needs review, then wait for Greptile feedback on that head.
 - ${confidenceFour}`;
     }
     case "claude": {

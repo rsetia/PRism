@@ -1,6 +1,6 @@
 ---
 name: prism-plan-project
-description: Turn a project discussion and repository into a grounded product/engineering plan, a Beads backlog, and an executable Prism DAG. Use when an agent is asked to propose project improvements, convert a roadmap or conversation into Beads, determine which work can run in parallel, design the correct dependency graph, or generate a Prism workflow with Codex implementation and Claude, Greptile, or no pull-request review.
+description: Turn a project discussion and repository into a grounded product/engineering plan, a Beads backlog, and an executable Prism DAG. Use when an agent is asked to propose project improvements, convert a roadmap or conversation into Beads, determine which work can run in parallel, design the correct dependency graph, or generate a Prism workflow with Codex implementation and Greptile, Claude, or no pull-request review.
 ---
 
 # Prism Plan Project
@@ -174,19 +174,20 @@ before anything runs.
 Default to:
 
 - `implement` nodes backed by Codex.
-- Claude pull-request review.
-- The exact Claude trigger comment `@claude review`.
-- Approval, no unresolved actionable findings, and green required checks.
+- Greptile pull-request review.
+- The exact Greptile trigger comment `@greptile review`.
+- The configured confidence threshold, no unresolved actionable findings, and
+  green required checks.
 - `merge_resolve` after the implementation review gate.
 - `beads_update` after a successful merge.
 
 The reviewer is part of each implementation node's review loop, not a separate
 parallel DAG node. The implementation node must push its branch, open or update
-the pull request, post the trigger comment, wait for current-head Claude
-feedback, address actionable feedback, validate again, and repeat until
-approved or the iteration limit is reached.
+the pull request, post the trigger comment, wait for current-head Greptile
+feedback, address actionable feedback, validate again, and repeat until the
+confidence and quality gates pass or the iteration limit is reached.
 
-Use Greptile or no reviewer only when the user or project explicitly requests
+Use Claude or no reviewer only when the user or project explicitly requests
 it. Never claim a reviewer is available without checking the repository's
 GitHub integration or documented convention.
 
@@ -209,8 +210,6 @@ Generate the graph from the selected Beads:
 (cd <code-repo> && prism beads-dag \
   --out <project>.prism.json \
   --id <bead-id> \
-  --reviewer claude \
-  --review-trigger-comment "@claude review" \
   --validation-command "<implementation validation>" \
   --merge-validation-command "<merge validation>")
 ```
@@ -242,8 +241,8 @@ Also inspect the generated graph and verify:
 - Ready implementation branches remain parallel.
 - Merge/update nodes form the intended serialized lane.
 - Every `implement` node uses the selected reviewer.
-- Claude nodes contain `triggerComment: "@claude review"` when Claude review is
-  selected.
+- Default nodes contain `review.by: "greptile"` and
+  `triggerComment: "@greptile review"`.
 - Validation commands and Beads paths are correct.
 - Every executor name is registered by the installed Prism version.
 - The final node covers all terminal work.

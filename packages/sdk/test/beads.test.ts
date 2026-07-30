@@ -141,29 +141,27 @@ describe("buildBeadsGraph", () => {
   });
 
   test("implement receives the full bead snapshot and review config", () => {
-    const graph = buildBeadsGraph(
-      [
-        {
-          id: "MC-1",
-          title: "Useful title",
-          description: "Implement the useful behavior",
-          acceptance_criteria: "The behavior is covered by tests",
-          priority: 1,
-          dependencies: [],
-        },
-      ],
-      { review: "greptile" },
-    );
+    const graph = buildBeadsGraph([
+      {
+        id: "MC-1",
+        title: "Useful title",
+        description: "Implement the useful behavior",
+        acceptance_criteria: "The behavior is covered by tests",
+        priority: 1,
+        dependencies: [],
+      },
+    ]);
     const nodeId = implementNodeId(graph, "MC-1");
     expect(nodeId).toBeDefined();
     const implement = graph.nodes[nodeId ?? ""];
     const config = implement?.config as {
       workItem?: { id?: string; provider?: string };
-      review?: { by?: string };
+      review?: { by?: string; triggerComment?: string };
     };
     expect(config.workItem?.id).toBe("MC-1");
     expect(config.workItem?.provider).toBe("beads");
     expect(config.review?.by).toBe("greptile");
+    expect(config.review?.triggerComment).toBe("@greptile review");
 
     const contextNodeId = implement?.dependsOn[0];
     expect(contextNodeId).toBe("context-mc-1");
