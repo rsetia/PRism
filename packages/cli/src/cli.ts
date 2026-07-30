@@ -48,6 +48,7 @@ export interface CliIo {
   readonly write?: (text: string) => void;
   readonly interactive?: boolean;
   readonly columns?: number;
+  readonly rows?: number;
   readonly color?: boolean;
 }
 
@@ -1320,6 +1321,7 @@ async function watchCommand(
       if (io.interactive === true && !invocation.json) {
         const dashboard = renderWatchDashboard(run.graph, inspection, {
           ...(io.columns === undefined ? {} : { columns: io.columns }),
+          ...(io.rows === undefined ? {} : { rows: io.rows }),
           ...(io.color === undefined ? {} : { color: io.color }),
           frame,
         });

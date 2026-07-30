@@ -17,6 +17,7 @@ const io = {
   },
   interactive: process.stdout.isTTY === true,
   columns: process.stdout.columns,
+  rows: process.stdout.rows,
   color: process.env["NO_COLOR"] === undefined,
 };
 
