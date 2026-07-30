@@ -143,4 +143,41 @@ describe("watch dashboard", () => {
     expect(output.split("\n")).toHaveLength(11);
     expect(output.split("\n").every((line) => line.length <= 80)).toBe(true);
   });
+
+  test("shows the cross-work-item blocker for a queued workflow stage", () => {
+    const definition = buildBeadsGraph(
+      [
+        { id: "demo-1", title: "Long-running foundation", dependencies: [] },
+        { id: "demo-2", title: "Already reviewed work", dependencies: [] },
+      ],
+      { review: "none" },
+    );
+    const compiled = compileGraph(definition);
+    if (!compiled.ok) throw new Error("Beads blocker fixture did not compile");
+    const states = new Map<string, RunInspection["nodes"][number]["state"]>([
+      ["context-demo-1", "succeeded"],
+      ["implement-demo-1", "running"],
+      ["context-demo-2", "succeeded"],
+      ["implement-demo-2", "succeeded"],
+    ]);
+    const beadsInspection: RunInspection = {
+      runId: "beads-runtime-wait",
+      finished: false,
+      nodes: compiled.graph.order.map((nodeId) => ({
+        nodeId,
+        state: states.get(nodeId) ?? "pending",
+      })),
+      failures: [],
+    };
+
+    const output = renderWatchDashboard(compiled.graph, beadsInspection, {
+      columns: 100,
+      rows: 24,
+      color: false,
+    });
+
+    expect(output).toContain("MERGE WAIT ← 1 CLOSE");
+    expect(output).not.toContain("BUILD WAIT ←");
+    expect(output.split("\n").every((line) => line.length <= 100)).toBe(true);
+  });
 });

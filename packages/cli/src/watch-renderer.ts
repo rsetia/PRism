@@ -12,6 +12,7 @@ const DIM = "\u001B[2m";
 const BOLD = "\u001B[1m";
 const CYAN = "\u001B[1;36m";
 const MAGENTA = "\u001B[1;35m";
+const YELLOW = "\u001B[1;33m";
 const SPINNERS = ["◐", "◓", "◑", "◒"] as const;
 const TERMINAL_STATES: ReadonlySet<NodeState> = new Set([
   "succeeded",
@@ -48,6 +49,11 @@ interface BeadsWorkflow {
   readonly stages: readonly WorkflowStage[];
   readonly dependencyIds: readonly string[];
   readonly depth: number;
+}
+
+interface WorkflowRuntimeWait {
+  readonly stageLabel: string;
+  readonly blockerLabels: readonly string[];
 }
 
 export function renderWatchDashboard(
@@ -291,6 +297,17 @@ function renderBeadsDag(
       : id;
   const displayIds = workflows.map((workflow) => displayId(workflow.id));
   const idWidth = clamp(Math.max(...displayIds.map((id) => id.length)), 5, 16);
+  const stageOwnerByNode = new Map(
+    workflows.flatMap((workflow) =>
+      workflow.stages.map(
+        (stage) =>
+          [
+            stage.nodeId,
+            { workflowId: workflow.id, stageLabel: stage.label },
+          ] as const,
+      ),
+    ),
+  );
   const stageLabels = workflows.reduce<readonly WorkflowStage[]>(
     (longest, workflow) =>
       workflow.stages.length > longest.length ? workflow.stages : longest,
@@ -323,6 +340,13 @@ function renderBeadsDag(
           : `WAVE ${waveNumber(depth)} · 1 WORK ITEM`;
     lines.push(sectionRule(waveLabel, columns, color));
     for (const [index, workflow] of wave.entries()) {
+      const runtimeWait = findWorkflowRuntimeWait(
+        graph,
+        workflow,
+        stateByNode,
+        stageOwnerByNode,
+        displayId,
+      );
       lines.push(
         renderWorkflowLane(
           workflow,
@@ -332,6 +356,7 @@ function renderBeadsDag(
           stateByNode,
           columns,
           color,
+          runtimeWait,
         ),
       );
     }
@@ -360,6 +385,7 @@ function renderWorkflowLane(
   stateByNode: ReadonlyMap<string, NodeState>,
   columns: number,
   color: boolean,
+  runtimeWait: WorkflowRuntimeWait | undefined,
 ): string {
   const states = workflow.stages.map(
     (stage) => stateByNode.get(stage.nodeId) ?? "pending",
@@ -370,23 +396,38 @@ function renderWorkflowLane(
   const id = truncate(displayId(workflow.id), idWidth).padEnd(idWidth);
   const pipelineWidth = workflow.stages.length * 3 - 2;
   const prefixWidth = rail.length + 1 + 1 + 1 + idWidth + 2 + pipelineWidth;
-  const dependencyBudget = clamp(
-    Math.floor(columns * 0.28),
-    12,
-    Math.max(12, columns - prefixWidth - 4),
-  );
+  let detailBudget = Math.max(0, columns - prefixWidth - 2);
+  const waitBudget =
+    runtimeWait === undefined
+      ? 0
+      : Math.min(Math.max(18, Math.floor(columns * 0.3)), detailBudget);
+  const waitPrefix =
+    runtimeWait === undefined ? "" : `${runtimeWait.stageLabel} WAIT ← `;
+  const waitDetail =
+    runtimeWait === undefined || waitBudget < waitPrefix.length + 1
+      ? ""
+      : truncate(
+          `${waitPrefix}${summarizeIds(
+            runtimeWait.blockerLabels,
+            waitBudget - waitPrefix.length,
+          )}`,
+          waitBudget,
+        );
+  if (waitDetail.length > 0) {
+    detailBudget = Math.max(0, detailBudget - waitDetail.length - 2);
+  }
+  const dependencyBudget = clamp(Math.floor(columns * 0.28), 12, detailBudget);
   const dependencies =
-    workflow.dependencyIds.length === 0
+    workflow.dependencyIds.length === 0 || dependencyBudget < 4
       ? ""
       : `← ${summarizeIds(
           workflow.dependencyIds.map(displayId),
           dependencyBudget - 2,
         )}`;
-  const fixedDetail = dependencies.length === 0 ? "" : `${dependencies}  `;
-  const titleBudget = Math.max(
-    0,
-    columns - prefixWidth - fixedDetail.length - 2,
-  );
+  if (dependencies.length > 0) {
+    detailBudget = Math.max(0, detailBudget - dependencies.length - 2);
+  }
+  const titleBudget = detailBudget;
   const title = truncate(workflow.title, titleBudget);
   const pipeline = renderPipeline(workflow.stages, states, color);
 
@@ -398,9 +439,48 @@ function renderWorkflowLane(
     style(id, BOLD, color),
     "  ",
     pipeline,
+    waitDetail.length === 0 ? "" : `  ${style(waitDetail, YELLOW, color)}`,
     dependencies.length === 0 ? "" : `  ${style(dependencies, MAGENTA, color)}`,
     title.length === 0 ? "" : `  ${title}`,
   ].join("");
+}
+
+function findWorkflowRuntimeWait(
+  graph: CompiledGraph,
+  workflow: BeadsWorkflow,
+  stateByNode: ReadonlyMap<string, NodeState>,
+  stageOwnerByNode: ReadonlyMap<
+    string,
+    { readonly workflowId: string; readonly stageLabel: string }
+  >,
+  displayId: (id: string) => string,
+): WorkflowRuntimeWait | undefined {
+  const waitingStage = workflow.stages.find(
+    (stage) => (stateByNode.get(stage.nodeId) ?? "pending") === "pending",
+  );
+  if (waitingStage === undefined) return undefined;
+
+  const ownNodes = new Set(workflow.stages.map((stage) => stage.nodeId));
+  const blockerNodeIds =
+    graph.nodes[waitingStage.nodeId]?.dependsOn.filter(
+      (dependencyId) =>
+        !ownNodes.has(dependencyId) &&
+        (stateByNode.get(dependencyId) ?? "pending") !== "succeeded",
+    ) ?? [];
+  if (blockerNodeIds.length === 0) return undefined;
+
+  const blockerLabels = unique(
+    blockerNodeIds.map((nodeId) => {
+      const owner = stageOwnerByNode.get(nodeId);
+      return owner === undefined
+        ? nodeId
+        : `${displayId(owner.workflowId)} ${owner.stageLabel}`;
+    }),
+  );
+  return {
+    stageLabel: waitingStage.label,
+    blockerLabels,
+  };
 }
 
 function renderPipeline(

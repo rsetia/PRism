@@ -61,6 +61,8 @@ before 1.0.
 - Following an active run tails existing worker logs before streaming new
   output, avoiding a full historical dump while retaining complete JSON
   snapshots.
+- The live Beads DAG dashboard identifies the unsatisfied cross-work-item
+  dependency holding a queued stage, including serialized merge blockers.
 - Filesystem and Git identifiers use collision-resistant reversible encoding.
 - Codex implementation and merge workers again inherit trusted host GitHub
   access, matching Prism's documented trust model and the original prism-py
