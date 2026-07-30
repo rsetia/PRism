@@ -30,6 +30,12 @@ if (!existsSync(CLI_PATH)) {
 }
 
 const execFileAsync = promisify(execFile);
+const defaultTestPrismHome = mkdtempSync(
+  join(tmpdir(), "prism-cli-default-home-"),
+);
+afterAll(() => {
+  rmSync(defaultTestPrismHome, { recursive: true, force: true });
+});
 
 function fixture(name: string): string {
   return fileURLToPath(new URL(`./fixtures/${name}`, import.meta.url));
@@ -61,7 +67,7 @@ interface CliResult {
 }
 
 async function cli(...args: readonly string[]): Promise<CliResult> {
-  return cliWith({ prismHome: null }, ...args);
+  return cliWith({ prismHome: defaultTestPrismHome }, ...args);
 }
 
 async function cliWith(
@@ -246,6 +252,21 @@ describe("prism CLI", () => {
     expect(result.code).toBe(2);
     expect(result.stderr).toContain("PRISM_HOME is not set");
     expect(result.stderr).not.toContain("unexpected internal error");
+  });
+
+  test("run --store still requires PRISM_HOME for logs and worktrees", async () => {
+    const result = await cliWith(
+      { prismHome: null },
+      "run",
+      fixture("valid.json"),
+      "--store",
+      join(defaultTestPrismHome, "explicit-runs.db"),
+      "--run-id",
+      "store-does-not-replace-home",
+    );
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("PRISM_HOME is not set");
+    expect(result.stderr).toContain("even when --store is provided");
   });
 
   test("beads-dag defaults hydrated work to Greptile review", async () => {
@@ -522,6 +543,128 @@ describe("prism CLI: persisted runs", () => {
     expect(logs.code).toBe(0);
     expect(logs.stdout).toContain("==> first (attempt 1) <==");
     expect(logs.stdout).toContain("live worker output");
+  });
+
+  test("logs tails existing output before following an active run", async () => {
+    const repo = join(tempDir, "tail-project");
+    const prismHome = join(tempDir, "tail-prism-home");
+    const storePath = join(tempDir, "tail-runs.db");
+    mkdirSync(repo);
+    const store = createSqliteStore({ path: storePath });
+    await store.createRun({
+      runId: "tail-run",
+      graph: resumableGraph(),
+    });
+    await store.appendEvents("tail-run", [
+      { kind: "node_ready", nodeId: "first" },
+      { kind: "node_started", nodeId: "first" },
+    ]);
+    const logBackend = createFileLogBackend({
+      baseDir: join(prismHome, "logs", "tail-project"),
+    });
+    const writer = await logBackend.openWriter({
+      runId: "tail-run",
+      nodeId: "first",
+      attempt: 1,
+    });
+    await writer.write(
+      Array.from(
+        { length: 100 },
+        (_, index) => `existing line ${String(index + 1)}\n`,
+      ).join(""),
+    );
+
+    const following = cliWith(
+      { cwd: repo, prismHome },
+      "logs",
+      "tail-run",
+      "--store",
+      storePath,
+    );
+    await new Promise<void>((resolvePromise) => {
+      setTimeout(resolvePromise, 500);
+    });
+    await writer.write("new live output\n");
+    await new Promise<void>((resolvePromise) => {
+      setTimeout(resolvePromise, 600);
+    });
+    await writer.close();
+    await store.finishRun("tail-run", {
+      status: "succeeded",
+      output: "done",
+    });
+
+    const logs = await following;
+    await logBackend.close?.();
+    await store.close?.();
+    expect(logs.code).toBe(0);
+    expect(logs.stdout).not.toContain("existing line 1\n");
+    expect(logs.stdout).not.toContain("existing line 80\n");
+    expect(logs.stdout).toContain("existing line 81\n");
+    expect(logs.stdout).toContain("existing line 100\n");
+    expect(logs.stdout).toContain("new live output");
+  });
+
+  test("logs shows only the current generation after a node reset", async () => {
+    const repo = join(tempDir, "reset-logs-project");
+    const prismHome = join(tempDir, "reset-logs-prism-home");
+    const storePath = join(tempDir, "reset-logs-runs.db");
+    mkdirSync(repo);
+    const store = createSqliteStore({ path: storePath });
+    await store.createRun({
+      runId: "reset-logs-run",
+      graph: resumableGraph(),
+    });
+    await store.appendEvents("reset-logs-run", [
+      { kind: "node_ready", nodeId: "first" },
+      { kind: "node_started", nodeId: "first" },
+      {
+        kind: "node_failed",
+        nodeId: "first",
+        failure: { nodeId: "first", cause: "old failure" },
+      },
+      { kind: "node_reset", nodeId: "first" },
+      { kind: "node_ready", nodeId: "first" },
+      { kind: "node_started", nodeId: "first" },
+      { kind: "node_succeeded", nodeId: "first", output: "done" },
+    ]);
+    await store.finishRun("reset-logs-run", {
+      status: "succeeded",
+      output: "done",
+    });
+
+    const logBackend = createFileLogBackend({
+      baseDir: join(prismHome, "logs", "reset-logs-project"),
+    });
+    const oldWriter = await logBackend.openWriter({
+      runId: "reset-logs-run",
+      nodeId: "first",
+      attempt: 1,
+    });
+    await oldWriter.write("old worker output\n");
+    await oldWriter.close();
+    const currentWriter = await logBackend.openWriter({
+      runId: "reset-logs-run",
+      nodeId: "first",
+      attempt: 1,
+    });
+    await currentWriter.write("current worker output\n");
+    await currentWriter.close();
+    await logBackend.close?.();
+    await store.close?.();
+
+    const logs = await cliWith(
+      { cwd: repo, prismHome },
+      "logs",
+      "reset-logs-run",
+      "--store",
+      storePath,
+    );
+    expect(logs.code).toBe(0);
+    expect(logs.stdout).toContain("==> first (attempt 1) <==");
+    expect(logs.stdout).toContain("current worker output");
+    expect(logs.stdout).not.toContain("old worker output");
+    expect(logs.stdout).not.toContain("attempt 2");
   });
 
   test("inspect --json is a versioned envelope", async () => {
@@ -854,6 +997,19 @@ describe("prism CLI: persisted runs", () => {
     const resumed = await cliWith({ prismHome: null }, "resume", "res1");
     expect(resumed.code).toBe(2);
     expect(resumed.stderr).toContain("PRISM_HOME is not set");
+  });
+
+  test("resume --store still requires PRISM_HOME for logs and worktrees", async () => {
+    const resumed = await cliWith(
+      { prismHome: null },
+      "resume",
+      "res1",
+      "--store",
+      db(),
+    );
+    expect(resumed.code).toBe(2);
+    expect(resumed.stderr).toContain("PRISM_HOME is not set");
+    expect(resumed.stderr).toContain("even when --store is provided");
   });
 
   test("rerun-node resets a node and downstream, then resume re-runs them", async () => {

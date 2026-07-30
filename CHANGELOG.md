@@ -49,6 +49,18 @@ before 1.0.
 ### Fixed
 
 - Durable run outcomes now survive resume and process restarts.
+- Resetting a failed node can reattach its preserved attempt branch instead of
+  failing when the deterministic worktree branch already exists.
+- Reset implementation workers receive a fresh review-iteration budget while
+  continuing from the existing branch, pull request, and current-head feedback.
+- `prism run` and `prism resume` fail fast when `PRISM_HOME` is missing instead
+  of silently splitting logs and worktrees into temporary directories when an
+  explicit `--store` is supplied.
+- Reset nodes start a fresh worker-log generation and `prism logs` discards
+  pre-reset attempt targets instead of replaying stale output as current work.
+- Following an active run tails existing worker logs before streaming new
+  output, avoiding a full historical dump while retaining complete JSON
+  snapshots.
 - Filesystem and Git identifiers use collision-resistant reversible encoding.
 - Codex implementation and merge workers again inherit trusted host GitHub
   access, matching Prism's documented trust model and the original prism-py

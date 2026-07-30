@@ -246,7 +246,9 @@ export interface ReadLogOptions {
  *   are opaque and distinct values must never alias.
  * - attempt is a positive integer.
  * - only one writer may be open for a target at a time. Writes are append-only
- *   and ordered; close is idempotent, and later writes reject.
+ *   and ordered within that writer; close is idempotent, and later writes
+ *   reject. Reopening a closed target starts a new log generation and replaces
+ *   the prior text, matching an administrative reset that reuses attempt 1.
  * - a default read returns the current text snapshot and does not wait for an
  *   open writer.
  * - a follow read returns existing text, continues with appended text, and

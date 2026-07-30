@@ -80,7 +80,10 @@ export function createFileLogBackend(
       let handle: FileHandle;
       try {
         await mkdir(dirname(path), { recursive: true });
-        handle = await open(path, "a");
+        // A node_reset deliberately reuses attempt 1. Opening that logical
+        // target again therefore starts a fresh generation instead of mixing
+        // the previous failed invocation into the resumed worker's output.
+        handle = await open(path, "w");
       } catch (error: unknown) {
         state.writerOpen = false;
         state.closed = true;

@@ -834,8 +834,11 @@ async function runGraph(
   const json = invocation.json;
   let hasDefaultStore: boolean;
   try {
-    hasDefaultStore =
-      resolvePrismProjectPaths(invocation.agent.repo).storePath !== undefined;
+    const projectPaths = resolvePrismProjectPaths(invocation.agent.repo);
+    if (projectPaths.prismHome === undefined) {
+      throw new Error(executionPrismHomeMessage());
+    }
+    hasDefaultStore = projectPaths.storePath !== undefined;
   } catch (error: unknown) {
     io.stderr(`cannot resolve project paths: ${describeError(error)}`);
     return EXIT_USAGE;
@@ -1029,6 +1032,8 @@ interface WorkerLogEntry {
   readonly text: string;
 }
 
+const ACTIVE_LOG_TAIL_LINES = 20;
+
 async function collectWorkerLogs(
   store: RunStore,
   logBackend: LogBackend,
@@ -1040,9 +1045,12 @@ async function collectWorkerLogs(
   }
   const events = await readEventSnapshot(store, runId, run.revision);
   const attemptCounts = new Map<string, number>();
-  const targets: { readonly nodeId: string; readonly attempt: number }[] = [];
+  let targets: { readonly nodeId: string; readonly attempt: number }[] = [];
   for (const event of events) {
-    if (event.kind === "node_started") {
+    if (event.kind === "node_reset") {
+      attemptCounts.delete(event.nodeId);
+      targets = targets.filter((target) => target.nodeId !== event.nodeId);
+    } else if (event.kind === "node_started") {
       const attempt = (attemptCounts.get(event.nodeId) ?? 0) + 1;
       attemptCounts.set(event.nodeId, attempt);
       targets.push(Object.freeze({ nodeId: event.nodeId, attempt }));
@@ -1086,6 +1094,7 @@ async function followWorkerLogs(
 ): Promise<void> {
   const emittedLengths = new Map<string, number>();
   let emittedAny = false;
+  let attached = false;
   while (true) {
     const run = await store.getRun(runId);
     if (run === undefined) {
@@ -1094,7 +1103,11 @@ async function followWorkerLogs(
     const entries = await collectWorkerLogs(store, logBackend, runId);
     for (const entry of entries) {
       const key = workerLogKey(entry);
-      const previousLength = emittedLengths.get(key) ?? 0;
+      const previousLength =
+        emittedLengths.get(key) ??
+        (!run.finished && !attached
+          ? logTailOffset(entry.text, ACTIVE_LOG_TAIL_LINES)
+          : 0);
       const offset = previousLength <= entry.text.length ? previousLength : 0;
       const chunk = entry.text.slice(offset);
       if (chunk.length > 0) {
@@ -1103,6 +1116,7 @@ async function followWorkerLogs(
       }
       emittedLengths.set(key, entry.text.length);
     }
+    attached = true;
     if (run.finished) {
       if (!emittedAny) {
         io.stderr(`no worker logs for run "${runId}"`);
@@ -1111,6 +1125,18 @@ async function followWorkerLogs(
     }
     await createSystemClock().wait(500);
   }
+}
+
+function logTailOffset(text: string, lineCount: number): number {
+  let offset = text.length;
+  for (let line = 0; line < lineCount; line += 1) {
+    const previousNewline = text.lastIndexOf("\n", Math.max(0, offset - 2));
+    if (previousNewline < 0) {
+      return 0;
+    }
+    offset = previousNewline + 1;
+  }
+  return offset;
 }
 
 async function logsCommand(
@@ -1155,6 +1181,10 @@ async function resumeCommand(
 ): Promise<number> {
   let store: RunStore | undefined;
   try {
+    const projectPaths = resolvePrismProjectPaths(invocation.agent.repo);
+    if (projectPaths.prismHome === undefined) {
+      throw new Error(executionPrismHomeMessage());
+    }
     store = await openPersistentStore(invocation.store, invocation.agent.repo);
     const engine = createEngine({
       store,
@@ -1184,6 +1214,10 @@ async function resumeCommand(
   } finally {
     await store?.close?.();
   }
+}
+
+function executionPrismHomeMessage(): string {
+  return "PRISM_HOME is not set; prism run and prism resume require it for durable worker logs and worktrees, even when --store is provided";
 }
 
 async function abortCommand(

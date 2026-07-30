@@ -142,6 +142,18 @@ export function runLogBackendContract(
       expect(await collect(open().read(TARGET))).toBe("done");
     });
 
+    test("reopening a closed target replaces the prior generation", async () => {
+      const first = await openWriter();
+      await first.write("old generation");
+      await first.close();
+
+      const second = await openWriter();
+      await second.write("current generation");
+      await second.close();
+
+      expect(await collect(open().read(TARGET))).toBe("current generation");
+    });
+
     test("follow can start before the writer and ends after close", async () => {
       const iterator = open()
         .read(TARGET, { follow: true })
