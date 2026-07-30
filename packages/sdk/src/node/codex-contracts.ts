@@ -272,6 +272,7 @@ Review loop:
 ${gateInstructions}
 - After every push, capture the new head SHA and the push time. Ignore stale reviews, comments, and checks from older heads; poll only feedback and CI/check results applicable to the current head.
 - Fix current-head actionable findings and failing checks, rerun validation, commit, and push before polling again.
+- Count implementation/review iterations only within this worker invocation. When a reset re-enters an existing branch or pull request, start the iteration count at zero; never count historical commits, comments, review cycles, or a prior failed result against this invocation's budget.
 - Stop successfully only when the configured review gate is merge-ready. Perform at most ${String(maxIterations)} implementation/review iterations. If the limit is reached first, write a failed result with failureClass "manual_review_required".
 
 Result:

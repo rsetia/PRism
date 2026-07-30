@@ -90,7 +90,13 @@ export function createGitWorktreeProvisioner(
       );
 
       try {
-        await runGit(repoDir, ["worktree", "add", "-b", branch, dir, baseRef]);
+        const branchExists = await localBranchExists(repoDir, branch);
+        await runGit(
+          repoDir,
+          branchExists
+            ? ["worktree", "add", dir, branch]
+            : ["worktree", "add", "-b", branch, dir, baseRef],
+        );
       } catch (error: unknown) {
         await rm(dir, { recursive: true, force: true }).catch(() => undefined);
         throw error;
@@ -124,6 +130,35 @@ export function createGitWorktreeProvisioner(
         );
       }
     },
+  });
+}
+
+async function localBranchExists(
+  cwd: string,
+  branch: string,
+): Promise<boolean> {
+  return await new Promise<boolean>((resolvePromise, rejectPromise) => {
+    execFile(
+      "git",
+      ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`],
+      { cwd, encoding: "utf8" },
+      (error) => {
+        if (error === null) {
+          resolvePromise(true);
+          return;
+        }
+        if (error.code === 1) {
+          resolvePromise(false);
+          return;
+        }
+        rejectPromise(
+          new Error(
+            `git show-ref failed while checking ${quoteArgument(branch)}`,
+            { cause: error },
+          ),
+        );
+      },
+    );
   });
 }
 

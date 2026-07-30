@@ -145,6 +145,12 @@ describe("buildImplementContract", () => {
     expect(contract.instructions).toContain('"status":"succeeded"');
     expect(contract.instructions).toContain('"metadata"');
     expect(contract.instructions).toContain('"branch"');
+    expect(contract.instructions).toContain(
+      "start the iteration count at zero",
+    );
+    expect(contract.instructions).toContain(
+      "never count historical commits, comments, review cycles",
+    );
   });
 
   test("reflects the greptile review gate in the instructions", () => {

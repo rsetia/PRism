@@ -75,6 +75,33 @@ describe("createGitWorktreeProvisioner Git behavior", () => {
     await git(repoDir, "branch", "-D", branch);
   });
 
+  test("reattaches a preserved branch when an attempt is reset", async () => {
+    const p = provisioner();
+    const input = {
+      runId: "recovery",
+      nodeId: "preserved-attempt",
+      attempt: 1,
+    };
+    const first = await p.provision(input);
+    const branch = first.branch;
+    if (branch === undefined) {
+      throw new Error("Git worktree provisioner did not report its branch");
+    }
+    writeFileSync(join(first.dir, "RECOVERY.md"), "preserved\n");
+    await git(first.dir, "add", "RECOVERY.md");
+    await git(first.dir, "commit", "-m", "preserve attempt");
+    const preservedHead = await git(first.dir, "rev-parse", "HEAD");
+
+    await p.release(first, { preserveBranch: true });
+    const resumed = await p.provision(input);
+    expect(resumed.branch).toBe(branch);
+    expect(existsSync(join(resumed.dir, "RECOVERY.md"))).toBe(true);
+    expect(await git(resumed.dir, "rev-parse", "HEAD")).toBe(preservedHead);
+
+    await p.release(resumed);
+    expect(await git(repoDir, "branch", "--list", branch)).toBe("");
+  });
+
   test("removes the temporary directory when Git provisioning fails", async () => {
     const failedBaseDir = join(root, "failed-worktrees");
     const p = createGitWorktreeProvisioner({
