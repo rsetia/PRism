@@ -6,6 +6,8 @@ import { normalizeThrownCause } from "../runtime/failures.js";
 import type {
   ExecutionContext,
   ExecutorDefinition,
+  LogBackend,
+  LogWriter,
   NodeExecutionOutcome,
 } from "../runtime/ports.js";
 import type { CodexEngine, CodexExecutorContract } from "./codex-engine.js";
@@ -49,6 +51,8 @@ export interface CodexExecutorOptions {
    * default in-worktree directories are removed after execution.
    */
   readonly nodeDirBase?: string;
+  /** Durable destination for combined Codex stdout/stderr. */
+  readonly logBackend?: LogBackend;
   /**
    * Turn ordered upstream outputs into the worker's serialized input.
    * Default: [] -> null, one -> that value, many -> the array. JSON-safe.
@@ -144,6 +148,8 @@ export function createCodexExecutor(
 
       let workspace: WorkspaceHandle | undefined;
       let nodeDir: string | undefined;
+      let logWriter: LogWriter | undefined;
+      let pendingLogWrites = Promise.resolve();
       let outcome: NodeExecutionOutcome;
       try {
         workspace = await options.provisioner?.provision({
@@ -165,6 +171,11 @@ export function createCodexExecutor(
           JSON.stringify(spec),
           "utf8",
         );
+        logWriter = await options.logBackend?.openWriter({
+          runId: context.runId,
+          nodeId: context.nodeId,
+          attempt: context.attempt,
+        });
 
         const result = await options.engine.execute({
           spec,
@@ -172,7 +183,17 @@ export function createCodexExecutor(
           worktreeDir,
           contract,
           signal: context.signal,
+          ...(logWriter === undefined
+            ? {}
+            : {
+                onOutput: (chunk: string): void => {
+                  pendingLogWrites = pendingLogWrites.then(() =>
+                    logWriter?.write(chunk),
+                  );
+                },
+              }),
         });
+        await pendingLogWrites;
         outcome =
           result.status === "succeeded"
             ? { status: "succeeded", output: result.output }
@@ -185,6 +206,23 @@ export function createCodexExecutor(
               };
       } catch (error: unknown) {
         outcome = infrastructureFailure("CODEX_EXECUTION_FAILED", error);
+      }
+
+      if (logWriter !== undefined) {
+        let logFailure: unknown;
+        try {
+          await pendingLogWrites;
+        } catch (error: unknown) {
+          logFailure = error;
+        }
+        try {
+          await logWriter.close();
+        } catch (error: unknown) {
+          logFailure ??= error;
+        }
+        if (logFailure !== undefined) {
+          outcome = infrastructureFailure("LOG_PERSISTENCE_FAILED", logFailure);
+        }
       }
 
       if (nodeDir !== undefined && explicitNodeDirBase === undefined) {

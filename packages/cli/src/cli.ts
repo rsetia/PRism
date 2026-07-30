@@ -27,11 +27,12 @@ import type {
   GraphParseError,
   NodeFailure,
   PersistedRunEvent,
+  LogBackend,
   RunInspection,
   RunOutcome,
   RunStore,
 } from "@rsetia/prism";
-import { createSqliteStore } from "@rsetia/prism/node";
+import { createFileLogBackend, createSqliteStore } from "@rsetia/prism/node";
 import { createAgentExecutorRegistry } from "./agent-executors.js";
 import { generateBeadsDag } from "./beads-dag.js";
 import {
@@ -68,9 +69,11 @@ Commands:
                                       Show a persisted run's node states
   events <run-id> [--store <db>] [--json]
                                       Show a persisted run's event log
+  logs [<run-id>] [--store <db>] [--json] [--repo <path>]
+                                      Follow worker output (default latest run)
   status [--store <db>] [--json]      List persisted runs
-  watch <run-id> [--store <db>] [--json] [--interval <ms>]
-                                      Poll a run until it finishes
+  watch [<run-id>] [--store <db>] [--json] [--interval <ms>] [--repo <path>]
+                                      Poll until finished (default latest running run)
   resume <run-id> [--store <db>] [--json] [--repo <path>]
          [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
                                       Continue an interrupted run to completion
@@ -83,7 +86,7 @@ Commands:
 
 Defaults:
   Repository                            Current git repository
-  Beads, store, and worktrees           $PRISM_HOME/<kind>/<project>/...
+  Beads, store, worktrees, and logs     $PRISM_HOME/<kind>/<project>/...
   Maximum concurrency                   ${String(DEFAULT_MAX_CONCURRENCY)}`;
 
 interface ValidateInvocation {
@@ -132,6 +135,13 @@ interface ReadInvocation {
   readonly json: boolean;
   readonly store: string | undefined;
 }
+interface LogsInvocation {
+  readonly command: "logs";
+  readonly runId: string | undefined;
+  readonly json: boolean;
+  readonly store: string | undefined;
+  readonly repo: string | undefined;
+}
 interface StatusInvocation {
   readonly command: "status";
   readonly json: boolean;
@@ -139,9 +149,10 @@ interface StatusInvocation {
 }
 interface WatchInvocation {
   readonly command: "watch";
-  readonly runId: string;
+  readonly runId: string | undefined;
   readonly json: boolean;
   readonly store: string | undefined;
+  readonly repo: string | undefined;
   readonly intervalMs: number;
 }
 interface ResumeInvocation {
@@ -170,6 +181,7 @@ type Invocation =
   | BeadsDagInvocation
   | RunInvocation
   | ReadInvocation
+  | LogsInvocation
   | StatusInvocation
   | WatchInvocation
   | ResumeInvocation
@@ -341,6 +353,22 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
         json: flags.json,
         store: flags.store,
       };
+    case "logs":
+      if (
+        count > 1 ||
+        (first !== undefined && flags.runId !== undefined) ||
+        flags.interval !== undefined ||
+        !noWorkerFlags(flags)
+      ) {
+        return undefined;
+      }
+      return {
+        command,
+        runId: first ?? flags.runId,
+        json: flags.json,
+        store: flags.store,
+        repo: flags.repo,
+      };
     case "resume": {
       if (
         count !== 1 ||
@@ -402,10 +430,9 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
       return { command, json: flags.json, store: flags.store };
     case "watch": {
       if (
-        count !== 1 ||
-        first === undefined ||
-        flags.runId !== undefined ||
-        !noAgentFlags(flags)
+        count > 1 ||
+        (first !== undefined && flags.runId !== undefined) ||
+        !noWorkerFlags(flags)
       ) {
         return undefined;
       }
@@ -416,9 +443,10 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
       }
       return {
         command,
-        runId: first,
+        runId: first ?? flags.runId,
         json: flags.json,
         store: flags.store,
+        repo: flags.repo,
         intervalMs,
       };
     }
@@ -430,6 +458,15 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
 function noAgentFlags(flags: ParsedFlags): boolean {
   return (
     flags.repo === undefined &&
+    flags.maxConcurrency === undefined &&
+    flags.codexCommand === undefined &&
+    flags.codexModel === undefined &&
+    flags.worktreeDir === undefined
+  );
+}
+
+function noWorkerFlags(flags: ParsedFlags): boolean {
+  return (
     flags.maxConcurrency === undefined &&
     flags.codexCommand === undefined &&
     flags.codexModel === undefined &&
@@ -883,6 +920,23 @@ async function readEventSnapshot(
   return events;
 }
 
+async function resolveRunId(
+  store: RunStore,
+  requestedRunId: string | undefined,
+  preferRunning = false,
+): Promise<string> {
+  if (requestedRunId !== undefined) {
+    return requestedRunId;
+  }
+  const runs = await store.listRuns();
+  const selected =
+    (preferRunning ? runs.find((run) => !run.finished) : undefined) ?? runs[0];
+  if (selected === undefined) {
+    throw new Error("no persisted runs exist for the current project");
+  }
+  return selected.runId;
+}
+
 async function inspectCommand(
   invocation: ReadInvocation,
   io: CliIo,
@@ -958,6 +1012,132 @@ async function eventsCommand(
     );
     return EXIT_USAGE;
   } finally {
+    await store?.close?.();
+  }
+}
+
+interface WorkerLogEntry {
+  readonly nodeId: string;
+  readonly attempt: number;
+  readonly text: string;
+}
+
+async function collectWorkerLogs(
+  store: RunStore,
+  logBackend: LogBackend,
+  runId: string,
+): Promise<readonly WorkerLogEntry[]> {
+  const run = await store.getRun(runId);
+  if (run === undefined) {
+    throw new Error(`unknown run: "${runId}"`);
+  }
+  const events = await readEventSnapshot(store, runId, run.revision);
+  const attemptCounts = new Map<string, number>();
+  const targets: { readonly nodeId: string; readonly attempt: number }[] = [];
+  for (const event of events) {
+    if (event.kind === "node_started") {
+      const attempt = (attemptCounts.get(event.nodeId) ?? 0) + 1;
+      attemptCounts.set(event.nodeId, attempt);
+      targets.push(Object.freeze({ nodeId: event.nodeId, attempt }));
+    }
+  }
+
+  const entries: WorkerLogEntry[] = [];
+  for (const { nodeId, attempt } of targets) {
+    let text = "";
+    for await (const chunk of logBackend.read({ runId, nodeId, attempt })) {
+      text += chunk;
+    }
+    if (text.length > 0) {
+      entries.push(Object.freeze({ nodeId, attempt, text }));
+    }
+  }
+  return Object.freeze(entries);
+}
+
+function workerLogKey(entry: WorkerLogEntry): string {
+  return `${entry.nodeId}\u0000${String(entry.attempt)}`;
+}
+
+function printWorkerLogChunk(
+  entry: WorkerLogEntry,
+  chunk: string,
+  printHeader: boolean,
+  io: CliIo,
+): void {
+  if (printHeader) {
+    io.stdout(`==> ${entry.nodeId} (attempt ${String(entry.attempt)}) <==`);
+  }
+  io.stdout(chunk.replace(/\n$/u, ""));
+}
+
+async function followWorkerLogs(
+  store: RunStore,
+  logBackend: LogBackend,
+  runId: string,
+  io: CliIo,
+): Promise<void> {
+  const emittedLengths = new Map<string, number>();
+  let emittedAny = false;
+  while (true) {
+    const run = await store.getRun(runId);
+    if (run === undefined) {
+      throw new Error(`unknown run: "${runId}"`);
+    }
+    const entries = await collectWorkerLogs(store, logBackend, runId);
+    for (const entry of entries) {
+      const key = workerLogKey(entry);
+      const previousLength = emittedLengths.get(key) ?? 0;
+      const offset = previousLength <= entry.text.length ? previousLength : 0;
+      const chunk = entry.text.slice(offset);
+      if (chunk.length > 0) {
+        printWorkerLogChunk(entry, chunk, offset === 0, io);
+        emittedAny = true;
+      }
+      emittedLengths.set(key, entry.text.length);
+    }
+    if (run.finished) {
+      if (!emittedAny) {
+        io.stderr(`no worker logs for run "${runId}"`);
+      }
+      return;
+    }
+    await createSystemClock().wait(500);
+  }
+}
+
+async function logsCommand(
+  invocation: LogsInvocation,
+  io: CliIo,
+): Promise<number> {
+  let store: RunStore | undefined;
+  let logBackend: LogBackend | undefined;
+  let resolvedRunId: string | undefined;
+  try {
+    const projectPaths = resolvePrismProjectPaths(invocation.repo);
+    if (projectPaths.logBaseDir === undefined) {
+      throw new Error(
+        "PRISM_HOME is not set; worker logs require the project logs/ directory under PRISM_HOME",
+      );
+    }
+    store = await openPersistentStore(invocation.store, invocation.repo);
+    resolvedRunId = await resolveRunId(store, invocation.runId, true);
+    logBackend = createFileLogBackend({
+      baseDir: projectPaths.logBaseDir,
+    });
+    if (invocation.json) {
+      const logs = await collectWorkerLogs(store, logBackend, resolvedRunId);
+      io.stdout(stringifyJson({ version: 1, runId: resolvedRunId, logs }));
+    } else {
+      await followWorkerLogs(store, logBackend, resolvedRunId, io);
+    }
+    return EXIT_SUCCESS;
+  } catch (error: unknown) {
+    const target = resolvedRunId ?? invocation.runId ?? "latest run";
+    io.stderr(`cannot read logs for "${target}": ${describeError(error)}`);
+    return EXIT_USAGE;
+  } finally {
+    await logBackend?.close?.();
     await store?.close?.();
   }
 }
@@ -1117,10 +1297,12 @@ async function watchCommand(
   io: CliIo,
 ): Promise<number> {
   let store: RunStore | undefined;
+  let resolvedRunId: string | undefined;
   try {
-    store = await openPersistentStore(invocation.store);
+    store = await openPersistentStore(invocation.store, invocation.repo);
+    resolvedRunId = await resolveRunId(store, invocation.runId, true);
     let terminal: RunInspection | undefined;
-    for await (const inspection of watchRun(store, invocation.runId, {
+    for await (const inspection of watchRun(store, resolvedRunId, {
       clock: createSystemClock(),
       intervalMs: invocation.intervalMs,
     })) {
@@ -1128,11 +1310,12 @@ async function watchCommand(
       terminal = inspection;
     }
     if (terminal === undefined) {
-      throw new Error(`watch produced no snapshots for "${invocation.runId}"`);
+      throw new Error(`watch produced no snapshots for "${resolvedRunId}"`);
     }
     return inspectionFailed(terminal) ? EXIT_RUN_FAILED : EXIT_SUCCESS;
   } catch (error: unknown) {
-    io.stderr(`cannot watch "${invocation.runId}": ${describeError(error)}`);
+    const target = resolvedRunId ?? invocation.runId ?? "latest run";
+    io.stderr(`cannot watch "${target}": ${describeError(error)}`);
     return EXIT_USAGE;
   } finally {
     await store?.close?.();
@@ -1217,6 +1400,9 @@ export async function runCli(
 
     case "events":
       return eventsCommand(invocation, io);
+
+    case "logs":
+      return logsCommand(invocation, io);
 
     case "status":
       return statusCommand(invocation, io);

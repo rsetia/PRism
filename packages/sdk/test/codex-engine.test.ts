@@ -115,6 +115,19 @@ describe("createCodexEngine", () => {
     expect(existsSync(join(location.nodeDir, "heartbeat.json"))).toBe(true);
   });
 
+  test("captures combined Codex stdout and stderr", async () => {
+    const output: string[] = [];
+    const result = await engine().execute({
+      ...paths(),
+      spec: spec(),
+      contract,
+      onOutput: (chunk) => output.push(chunk),
+    });
+    expect(result.status).toBe("succeeded");
+    expect(output.join("")).toContain("fake codex stdout");
+    expect(output.join("")).toContain("fake codex stderr");
+  });
+
   test("accepts a result before Codex exits and terminates the child", async () => {
     const result = await engine().execute({
       ...paths(),

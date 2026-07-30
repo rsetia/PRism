@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { compileGraph, parseGraph } from "@rsetia/prism";
 import type { CompiledGraph } from "@rsetia/prism";
-import { createSqliteStore } from "@rsetia/prism/node";
+import { createFileLogBackend, createSqliteStore } from "@rsetia/prism/node";
 import { afterAll, describe, expect, test } from "vitest";
 
 /**
@@ -427,7 +427,6 @@ describe("prism CLI: persisted runs", () => {
     const watched = await cliWith(
       { cwd: repo, prismHome },
       "watch",
-      runId,
       "--interval",
       "1",
     );
@@ -438,6 +437,80 @@ describe("prism CLI: persisted runs", () => {
     expect(inspected.code).toBe(0);
     expect(inspected.stdout).toContain("first: succeeded");
     expect(inspected.stdout).toContain("finished: true");
+  });
+
+  test("logs defaults to the latest run and reads durable worker output", async () => {
+    const repo = join(tempDir, "logged-project");
+    const prismHome = join(tempDir, "logged-prism-home");
+    mkdirSync(repo);
+    const ran = await cliWith(
+      { cwd: repo, prismHome },
+      "run",
+      fixture("valid.json"),
+    );
+    expect(ran.code).toBe(0);
+    const runId = runIdFrom(ran.stderr);
+    const logBackend = createFileLogBackend({
+      baseDir: join(prismHome, "logs", "logged-project"),
+    });
+    const writer = await logBackend.openWriter({
+      runId,
+      nodeId: "first",
+      attempt: 1,
+    });
+    await writer.write("worker output\n");
+    await writer.close();
+
+    const logs = await cliWith({ cwd: repo, prismHome }, "logs");
+    expect(logs.code).toBe(0);
+    expect(logs.stdout).toContain("==> first (attempt 1) <==");
+    expect(logs.stdout).toContain("worker output");
+  });
+
+  test("logs follows new worker output until the run finishes", async () => {
+    const repo = join(tempDir, "follow-project");
+    const prismHome = join(tempDir, "follow-prism-home");
+    const storePath = join(tempDir, "follow-runs.db");
+    mkdirSync(repo);
+    const store = createSqliteStore({ path: storePath });
+    await store.createRun({
+      runId: "follow-run",
+      graph: resumableGraph(),
+    });
+    await store.appendEvents("follow-run", [
+      { kind: "node_ready", nodeId: "first" },
+      { kind: "node_started", nodeId: "first" },
+    ]);
+
+    const following = cliWith(
+      { cwd: repo, prismHome },
+      "logs",
+      "--store",
+      storePath,
+    );
+    await new Promise<void>((resolvePromise) => {
+      setTimeout(resolvePromise, 100);
+    });
+    const logBackend = createFileLogBackend({
+      baseDir: join(prismHome, "logs", "follow-project"),
+    });
+    const writer = await logBackend.openWriter({
+      runId: "follow-run",
+      nodeId: "first",
+      attempt: 1,
+    });
+    await writer.write("live worker output\n");
+    await writer.close();
+    await store.finishRun("follow-run", {
+      status: "succeeded",
+      output: "done",
+    });
+
+    const logs = await following;
+    await store.close?.();
+    expect(logs.code).toBe(0);
+    expect(logs.stdout).toContain("==> first (attempt 1) <==");
+    expect(logs.stdout).toContain("live worker output");
   });
 
   test("inspect --json is a versioned envelope", async () => {

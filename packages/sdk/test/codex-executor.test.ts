@@ -14,7 +14,10 @@ import type {
   ExecutionContext,
   JsonValue,
 } from "../src/index.js";
-import { createCodexExecutor } from "../src/node/index.js";
+import {
+  createCodexExecutor,
+  createFileLogBackend,
+} from "../src/node/index.js";
 import type {
   CodexEngine,
   CodexExecutionInput,
@@ -177,6 +180,44 @@ describe("createCodexExecutor", () => {
     expect(released).toEqual(provisioned);
     // The engine ran in the provisioned worktree.
     expect(inputs[0]?.worktreeDir).toBe(provisioned[0]);
+  });
+
+  test("persists combined Codex worker output", async () => {
+    const engine: CodexEngine = {
+      execute(input) {
+        input.onOutput?.("planning\n");
+        input.onOutput?.("implemented\n");
+        return Promise.resolve({ status: "succeeded", output: null });
+      },
+    };
+    const logBackend = createFileLogBackend({
+      baseDir: join(tempDir, "worker-logs"),
+    });
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      logBackend,
+    });
+
+    await executor.execute(
+      context([], {
+        runId: "logged-run",
+        nodeId: "logged-node",
+        attempt: 2,
+      }),
+    );
+
+    let output = "";
+    for await (const chunk of logBackend.read({
+      runId: "logged-run",
+      nodeId: "logged-node",
+      attempt: 2,
+    })) {
+      output += chunk;
+    }
+    expect(output).toBe("planning\nimplemented\n");
   });
 
   test("preflight rejects an invalid implement config", async () => {

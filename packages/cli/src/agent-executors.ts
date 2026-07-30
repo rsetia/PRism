@@ -9,6 +9,7 @@ import {
   createBeadsUpdateExecutor,
   createCodexEngine,
   createCodexExecutor,
+  createFileLogBackend,
   createGitWorktreeProvisioner,
   createMergePrExecutor,
 } from "@rsetia/prism/node";
@@ -19,6 +20,8 @@ export interface AgentExecutorRegistryOptions {
   readonly repoDir?: string;
   /** Parent directory for isolated git worktrees. Default PRISM_HOME, then OS temp. */
   readonly worktreeBaseDir?: string;
+  /** Parent directory for durable worker logs. Default PRISM_HOME, then OS temp. */
+  readonly logBaseDir?: string;
   /** Codex executable. Default "codex". */
   readonly codexCommand?: string;
   /** Optional model passed to `codex exec`. */
@@ -40,6 +43,12 @@ export function createAgentExecutorRegistry(
       projectPaths.worktreeBaseDir ??
       join(tmpdir(), "prism-worktrees", projectPaths.projectSlug),
   );
+  const logBaseDir = resolve(
+    options.logBaseDir ??
+      projectPaths.logBaseDir ??
+      join(tmpdir(), "prism-logs", projectPaths.projectSlug),
+  );
+  const logBackend = createFileLogBackend({ baseDir: logBaseDir });
   const codexEngine = createCodexEngine({
     ...(options.codexCommand === undefined
       ? {}
@@ -57,11 +66,13 @@ export function createAgentExecutorRegistry(
       name: "implement",
       engine: codexEngine,
       provisioner,
+      logBackend,
     }),
     createCodexExecutor({
       name: "merge_resolve",
       engine: codexEngine,
       provisioner,
+      logBackend,
     }),
     // Kept for hand-authored graphs that only need deterministic PR merging.
     createMergePrExecutor({ cwd: repoDir }),

@@ -12,6 +12,7 @@ export interface PrismProjectPaths {
   readonly beadsRepoDir: string | undefined;
   readonly storePath: string | undefined;
   readonly worktreeBaseDir: string | undefined;
+  readonly logBaseDir: string | undefined;
 }
 
 /**
@@ -41,11 +42,15 @@ export function resolvePrismProjectPaths(
       prismHome === undefined
         ? undefined
         : join(prismHome, "worktrees", projectSlug),
+    logBaseDir:
+      prismHome === undefined
+        ? undefined
+        : join(prismHome, "logs", projectSlug),
   });
 }
 
 export function missingPrismHomeMessage(purpose: string): string {
-  return `${PRISM_HOME_ENV} is not set; set it to an absolute directory containing beads/, store/, and worktrees/, or pass an explicit ${purpose}`;
+  return `${PRISM_HOME_ENV} is not set; set it to an absolute directory containing beads/, store/, worktrees/, and logs/, or pass an explicit ${purpose}`;
 }
 
 function parsePrismHome(value: string | undefined): string | undefined {

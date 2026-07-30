@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { StringDecoder } from "node:string_decoder";
 import type { WorkerResult, WorkerSpec } from "./worker-protocol.js";
 import {
   NODE_DIR_ENV_VAR,
@@ -40,6 +41,8 @@ export interface CodexExecutionInput {
   readonly worktreeDir: string;
   readonly contract: CodexExecutorContract;
   readonly signal?: AbortSignal;
+  /** Receives combined stdout/stderr text when worker output is captured. */
+  readonly onOutput?: (chunk: string) => void;
 }
 
 export interface CodexPromptInput extends CodexExecutionInput {
@@ -202,8 +205,13 @@ export function createCodexEngine(
           ...options.env,
           [NODE_DIR_ENV_VAR]: nodeDir,
         },
-        stdio: ["pipe", options.stdio ?? "inherit", options.stdio ?? "inherit"],
+        stdio: [
+          "pipe",
+          input.onOutput === undefined ? (options.stdio ?? "inherit") : "pipe",
+          input.onOutput === undefined ? (options.stdio ?? "inherit") : "pipe",
+        ],
       });
+      const outputDrained = captureChildOutput(child, input.onOutput);
       const settled = processSettlement(child);
       child.stdin?.on("error", () => {
         // Codex may exit before consuming all stdin. Its process result and
@@ -226,11 +234,13 @@ export function createCodexEngine(
         const resultRead = await readWorkerResult(resultPath);
         if (resultRead.kind === "valid") {
           await terminateProcess(child, settled, killGraceMs);
+          await outputDrained;
           return resultRead.result;
         }
 
         if (isAborted(input.signal)) {
           await terminateProcess(child, settled, killGraceMs);
+          await outputDrained;
           return persistInfrastructureFailure(
             resultPath,
             "codex execution was cancelled",
@@ -245,6 +255,7 @@ export function createCodexEngine(
         settlement = await waitForProcess(settled, pollIntervalMs);
       }
 
+      await outputDrained;
       const finalResult = await readWorkerResult(resultPath);
       if (finalResult.kind === "valid") {
         return finalResult.result;
@@ -272,6 +283,50 @@ export function createCodexEngine(
           : `${contractFailure}: ${details}`,
       );
     },
+  });
+}
+
+function captureChildOutput(
+  child: ChildProcess,
+  onOutput: ((chunk: string) => void) | undefined,
+): Promise<void> {
+  if (onOutput === undefined) {
+    return Promise.resolve();
+  }
+  const streams = [child.stdout, child.stderr].filter(
+    (stream) => stream !== null,
+  );
+  if (streams.length === 0) {
+    return Promise.resolve();
+  }
+
+  return new Promise((resolveOutput) => {
+    let remaining = streams.length;
+    for (const stream of streams) {
+      const decoder = new StringDecoder("utf8");
+      let finished = false;
+      const finish = (): void => {
+        if (finished) return;
+        finished = true;
+        const finalText = decoder.end();
+        if (finalText.length > 0) {
+          onOutput(finalText);
+        }
+        remaining -= 1;
+        if (remaining === 0) {
+          resolveOutput();
+        }
+      };
+      stream.on("data", (chunk: Buffer) => {
+        const text = decoder.write(chunk);
+        if (text.length > 0) {
+          onOutput(text);
+        }
+      });
+      stream.once("end", finish);
+      stream.once("close", finish);
+      stream.once("error", finish);
+    }
   });
 }
 

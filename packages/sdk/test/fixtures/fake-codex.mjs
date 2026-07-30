@@ -21,6 +21,9 @@ const spec = JSON.parse(await readFile(join(nodeDir, "spec.json"), "utf8"));
 const mode = spec.config?.mode ?? "success";
 const resultPath = join(nodeDir, "result.json");
 
+process.stdout.write("fake codex stdout\n");
+process.stderr.write("fake codex stderr\n");
+
 if (mode === "success" || mode === "result-then-stall") {
   await writeFile(
     resultPath,

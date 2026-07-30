@@ -26,9 +26,13 @@ before 1.0.
 - Execution backend handles use a backend-defined opaque identity; the local
   protocol directory is optional.
 - `PRISM_HOME` now supplies project-scoped defaults for Beads workspaces,
-  durable run stores, and agent worktrees; repository paths default to the
-  current git root. CLI runs persist with generated IDs when this home is
-  configured, and agent execution defaults to four-way concurrency.
+  durable run stores, agent worktrees, and worker logs; repository paths
+  default to the current git root. CLI runs persist with generated IDs when
+  this home is configured, and agent execution defaults to four-way
+  concurrency.
+- `prism watch` and `prism logs` default to the current project's latest run;
+  Codex worker output is captured durably, and `logs` follows every worker
+  until the run finishes.
 
 ### Fixed
 

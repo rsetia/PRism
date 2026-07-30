@@ -42,6 +42,7 @@ describe("resolvePrismProjectPaths", () => {
         beadsRepoDir: join(prismHome, "beads", "conversation-coach"),
         storePath: join(prismHome, "store", "conversation-coach", "runs.db"),
         worktreeBaseDir: join(prismHome, "worktrees", "conversation-coach"),
+        logBaseDir: join(prismHome, "logs", "conversation-coach"),
       },
     );
   });
@@ -54,6 +55,7 @@ describe("resolvePrismProjectPaths", () => {
       beadsRepoDir: undefined,
       storePath: undefined,
       worktreeBaseDir: undefined,
+      logBaseDir: undefined,
     });
   });
 
@@ -69,7 +71,7 @@ describe("resolvePrismProjectPaths", () => {
 
   test("provides an actionable missing-variable message", () => {
     expect(missingPrismHomeMessage("--store <db>")).toContain(
-      "set it to an absolute directory containing beads/, store/, and worktrees/",
+      "beads/, store/, worktrees/, and logs/",
     );
   });
 });
