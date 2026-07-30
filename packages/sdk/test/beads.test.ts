@@ -74,6 +74,37 @@ describe("parseBeadsJsonl", () => {
     );
     expect(beads[0]?.dependencies).toEqual(["A", "C"]);
   });
+
+  test("normalizes current bd export relationships without self-cycles", () => {
+    const beads = parseBeadsJsonl(
+      JSON.stringify({
+        id: "B",
+        dependencies: [
+          {
+            issue_id: "B",
+            depends_on_id: "A",
+            type: "blocks",
+          },
+          {
+            issue_id: "B",
+            depends_on_id: "EPIC",
+            type: "parent-child",
+          },
+        ],
+      }),
+    );
+    expect(beads[0]?.dependencies).toEqual(["A"]);
+  });
+
+  test("accepts dependency aliases emitted by older bd versions", () => {
+    const beads = parseBeadsJsonl(
+      JSON.stringify({
+        id: "B",
+        blocked_by: [{ id: "A", dependency_type: "requires" }],
+      }),
+    );
+    expect(beads[0]?.dependencies).toEqual(["A"]);
+  });
 });
 
 describe("buildBeadsGraph", () => {
@@ -151,6 +182,46 @@ describe("buildBeadsGraph", () => {
         },
       },
     });
+  });
+
+  test("copies review-loop and validation settings into agent nodes", () => {
+    const graph = buildBeadsGraph([bead("A")], {
+      review: "claude",
+      reviewConfig: {
+        requireApproved: true,
+        requireNoActionableFindings: true,
+        requireGreenChecks: true,
+        triggerComment: "@claude review",
+      },
+      validationCommands: ["npm test"],
+      mergeValidationCommands: ["npm run verify"],
+      maxIterations: 6,
+    });
+    expect(graph.nodes["implement-a"]?.config).toMatchObject({
+      review: {
+        by: "claude",
+        requireApproved: true,
+        requireNoActionableFindings: true,
+        requireGreenChecks: true,
+        triggerComment: "@claude review",
+      },
+      maxIterations: 6,
+      validationCommands: ["npm test"],
+    });
+    expect(graph.nodes["merge-a"]?.config).toMatchObject({
+      validationCommands: ["npm run verify"],
+    });
+  });
+
+  test("fans out implementations while serializing merge/update chains", () => {
+    const graph = buildBeadsGraph([bead("A"), bead("B")]);
+    expect(graph.nodes["implement-a"]?.dependsOn).toEqual(["context-a"]);
+    expect(graph.nodes["implement-b"]?.dependsOn).toEqual(["context-b"]);
+    expect(graph.nodes["merge-a"]?.dependsOn).toEqual(["implement-a"]);
+    expect(graph.nodes["merge-b"]?.dependsOn).toEqual([
+      "implement-b",
+      "update-a",
+    ]);
   });
 
   test("includeBeadsUpdate: false omits beads_update nodes", () => {

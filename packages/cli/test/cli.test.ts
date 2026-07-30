@@ -1,5 +1,13 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -204,6 +212,120 @@ describe("prism CLI", () => {
         .map((line) => `${line}\n`)
         .join(""),
     );
+  });
+
+  test("beads-dag snapshots hydrated work into a Claude-reviewed graph", async () => {
+    const root = mkdtempSync(join(tmpdir(), "prism-cli-beads-"));
+    try {
+      const repo = join(root, "code");
+      const beadsRepo = join(root, "beads");
+      const out = join(root, "graph.json");
+      const bd = join(root, "fake-bd.mjs");
+      mkdirSync(repo);
+      mkdirSync(beadsRepo);
+      writeFileSync(
+        bd,
+        `#!/usr/bin/env node
+const command = process.argv[2];
+if (command === "export") {
+  process.stdout.write([
+    JSON.stringify({ id: "bd-a", title: "A", status: "open" }),
+    JSON.stringify({ id: "bd-closed", title: "Closed", status: "closed" }),
+  ].join("\\n") + "\\n");
+} else if (command === "show") {
+  process.stdout.write(JSON.stringify([
+    {
+      id: "bd-a",
+      title: "A",
+      description: "Hydrated implementation details",
+      acceptance_criteria: "Tests pass",
+      status: "open",
+      labels: ["prism"]
+    },
+    { id: "bd-closed", title: "Closed", status: "closed" }
+  ]));
+} else {
+  process.exitCode = 2;
+}
+`,
+      );
+      chmodSync(bd, 0o755);
+
+      const result = await cli(
+        "beads-dag",
+        "--repo",
+        repo,
+        "--beads-repo",
+        beadsRepo,
+        "--out",
+        out,
+        "--bd-bin",
+        bd,
+        "--reviewer",
+        "claude",
+        "--validation-command",
+        "npm test",
+        "--no-beads-update",
+      );
+      expect(result.code).toBe(0);
+      expect(result.stdout.trim()).toBe(out);
+      const graph = JSON.parse(readFileSync(out, "utf8")) as {
+        nodes: Record<
+          string,
+          {
+            executor: string;
+            config?: {
+              value?: { description?: string };
+              review?: { by?: string; triggerComment?: string };
+              validationCommands?: string[];
+            };
+          }
+        >;
+      };
+      expect(graph.nodes["context-bd-a"]?.config?.value?.description).toBe(
+        "Hydrated implementation details",
+      );
+      expect(graph.nodes["implement-bd-a"]?.config).toMatchObject({
+        review: { by: "claude", triggerComment: "@claude review" },
+        validationCommands: ["npm test"],
+      });
+      expect(graph.nodes["merge-bd-a"]?.executor).toBe("merge_resolve");
+      expect(graph.nodes["implement-bd-closed"]).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("run registers implement as a Codex executor", async () => {
+    const root = mkdtempSync(join(tmpdir(), "prism-cli-agent-registry-"));
+    try {
+      const graph = join(root, "invalid-implement.json");
+      writeFileSync(
+        graph,
+        JSON.stringify({
+          version: 1,
+          nodes: {
+            task: {
+              executor: "implement",
+              config: {
+                targetBranch: "main",
+                review: { by: "claude" },
+              },
+            },
+          },
+          finalNode: "task",
+        }),
+      );
+      const result = await cli("run", graph, "--repo", root, "--json");
+      expect(result.code).toBe(1);
+      const outcome = JSON.parse(result.stdout) as {
+        failures: { cause: { code?: string } }[];
+      };
+      expect(outcome.failures[0]?.cause.code).toBe("INVALID_CONFIG");
+      expect(result.stderr).not.toContain("UNKNOWN_EXECUTOR");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
 

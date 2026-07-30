@@ -29,15 +29,40 @@ export interface Bead {
 /** Which review gate the generated implement nodes use. */
 export type ReviewGate = "greptile" | "claude" | "none";
 
+/**
+ * Review-loop settings copied into every generated implement node.
+ * Kept in the Node-free graph layer so Beads DAGs can be authored without
+ * importing the Node-only Codex executor entry point.
+ */
+export interface BeadsReviewConfig {
+  readonly by: ReviewGate;
+  readonly minConfidenceScore?: number;
+  readonly requireApproved?: boolean;
+  readonly requireNoActionableFindings?: boolean;
+  readonly requireGreenChecks?: boolean;
+  readonly allowConfidenceFourWithoutActionableFindings?: boolean;
+  readonly triggerComment?: string;
+}
+
 export interface BeadsGraphOptions {
   /** Branch PRs target. Default "main". */
   readonly targetBranch?: string;
   /** Review gate for every implement node. Default "none". */
   readonly review?: ReviewGate;
+  /** Detailed review-loop settings; `by` defaults to `review` or "none". */
+  readonly reviewConfig?: Omit<BeadsReviewConfig, "by">;
   /** Prefix for generated feature branch names. Default "prism/". */
   readonly branchPrefix?: string;
+  /** Validation commands run by every implement node. */
+  readonly validationCommands?: readonly string[];
+  /** Maximum implementation/review iterations. Default 8 in the executor. */
+  readonly maxIterations?: number;
   /** Add a merge_resolve node after each implement. Default true. */
   readonly includeMerge?: boolean;
+  /** Validation commands run after merge conflict resolution. */
+  readonly mergeValidationCommands?: readonly string[];
+  /** Serialize merge/update chains while implementations fan out. Default true. */
+  readonly serializeMerges?: boolean;
   /** Add a beads_update node after each merge. Default true. */
   readonly includeBeadsUpdate?: boolean;
   /** Passed to beads_update nodes so they know where to run `bd`. */
@@ -77,7 +102,14 @@ export function parseBeadsJsonl(text: string): readonly Bead[] {
       );
     }
 
-    const dependencies = normalizeDependencies(parsed["dependencies"]);
+    const dependencies = normalizeDependencies([
+      parsed["dependencies"],
+      parsed["depends_on"],
+      parsed["dependsOn"],
+      parsed["blocked_by"],
+      parsed["blockedBy"],
+      parsed["blockers"],
+    ]);
     beads.push(
       Object.freeze({
         ...parsed,
@@ -106,16 +138,29 @@ export function buildBeadsGraph(
   const targetBranch = options?.targetBranch ?? "main";
   const review = options?.review ?? "none";
   const branchPrefix = options?.branchPrefix ?? "prism/";
+  const validationCommands = options?.validationCommands;
+  const maxIterations = options?.maxIterations;
   const includeMerge = options?.includeMerge ?? true;
+  const mergeValidationCommands = options?.mergeValidationCommands;
+  const serializeMerges = options?.serializeMerges ?? true;
   const includeBeadsUpdate = options?.includeBeadsUpdate ?? true;
   validateOptions(
     targetBranch,
     review,
     branchPrefix,
+    options?.reviewConfig,
+    validationCommands,
+    maxIterations,
     includeMerge,
+    mergeValidationCommands,
+    serializeMerges,
     includeBeadsUpdate,
     options?.beadsRepo,
   );
+  const reviewConfig = {
+    by: review,
+    ...options?.reviewConfig,
+  };
 
   interface BeadPlan {
     readonly bead: Bead;
@@ -169,6 +214,7 @@ export function buildBeadsGraph(
   const orderedPlans = topologicalPlans(plansById);
   const nodes: Record<string, GraphDefinition["nodes"][string]> = {};
   const terminalNodeIds: string[] = [];
+  let previousSerializedNodeId: string | undefined;
 
   for (const plan of orderedPlans) {
     nodes[plan.contextNodeId] = {
@@ -205,20 +251,33 @@ export function buildBeadsGraph(
         workItem,
         targetBranch,
         branchName: `${branchPrefix}${plan.slug}`,
-        review: { by: review },
+        review: reviewConfig,
+        ...(maxIterations === undefined ? {} : { maxIterations }),
+        ...(validationCommands === undefined ? {} : { validationCommands }),
       },
     };
 
     let terminalNodeId = plan.implementNodeId;
     if (includeMerge) {
+      const mergeDependencies = [plan.implementNodeId];
+      if (
+        serializeMerges &&
+        previousSerializedNodeId !== undefined &&
+        !mergeDependencies.includes(previousSerializedNodeId)
+      ) {
+        mergeDependencies.push(previousSerializedNodeId);
+      }
       nodes[plan.mergeNodeId] = {
         executor: "merge_resolve",
         kind: "task",
-        dependsOn: [plan.implementNodeId],
+        dependsOn: mergeDependencies,
         config: {
           targetBranch,
           sourceBranchFrom: plan.implementNodeId,
           mergeMethod: "squash",
+          ...(mergeValidationCommands === undefined
+            ? {}
+            : { validationCommands: mergeValidationCommands }),
         },
       };
       terminalNodeId = plan.mergeNodeId;
@@ -237,6 +296,9 @@ export function buildBeadsGraph(
         },
       };
       terminalNodeId = plan.updateNodeId;
+    }
+    if (includeMerge && serializeMerges) {
+      previousSerializedNodeId = terminalNodeId;
     }
     terminalNodeIds.push(terminalNodeId);
   }
@@ -280,29 +342,36 @@ function beadContext(bead: Bead, dependencies: readonly string[]): JsonValue {
   };
 }
 
+const HARD_DEPENDENCY_TYPES: ReadonlySet<string> = new Set([
+  "blocks",
+  "blocked_by",
+  "depends_on",
+  "dependency",
+  "requires",
+]);
+
 const DEPENDENCY_ID_PROPERTIES = [
-  "id",
-  "issue_id",
-  "issueId",
-  "bead_id",
-  "beadId",
-  "dependency_id",
-  "dependencyId",
+  // `bd export` relationship records identify the current issue with
+  // issue_id and the actual prerequisite with depends_on_id. Prefer the
+  // directional fields so a relationship never becomes a self-cycle.
   "depends_on_id",
   "dependsOnId",
+  "dependency_id",
+  "dependencyId",
   "blocker_id",
   "blockerId",
+  // `bd show --long` emits hydrated dependency records with `id`.
+  "id",
+  "bead_id",
+  "beadId",
+  "issue_id",
+  "issueId",
   "source_id",
   "sourceId",
 ] as const;
 
 function normalizeDependencies(value: unknown): string[] {
-  const entries =
-    value === undefined || value === null
-      ? []
-      : Array.isArray(value)
-        ? value
-        : [value];
+  const entries = flattenDependencyEntries(value);
   const dependencies: string[] = [];
   const seen = new Set<string>();
 
@@ -317,6 +386,18 @@ function normalizeDependencies(value: unknown): string[] {
   return dependencies;
 }
 
+function flattenDependencyEntries(value: unknown): readonly unknown[] {
+  if (value === undefined || value === null) {
+    return [];
+  }
+  if (!Array.isArray(value)) {
+    return [value];
+  }
+  return value.flatMap((entry) =>
+    Array.isArray(entry) ? flattenDependencyEntries(entry) : [entry],
+  );
+}
+
 function dependencyIdFrom(value: unknown): string | undefined {
   if (typeof value === "string") {
     const id = value.trim();
@@ -325,7 +406,32 @@ function dependencyIdFrom(value: unknown): string | undefined {
   if (!isPlainObject(value)) {
     return undefined;
   }
+  const relationshipType = firstStringProperty(value, [
+    "type",
+    "relation",
+    "dependency_type",
+    "dependencyType",
+  ]);
+  if (
+    relationshipType !== undefined &&
+    !HARD_DEPENDENCY_TYPES.has(relationshipType.toLowerCase())
+  ) {
+    return undefined;
+  }
   for (const property of DEPENDENCY_ID_PROPERTIES) {
+    const candidate = value[property];
+    if (typeof candidate === "string" && candidate.trim().length > 0) {
+      return candidate.trim();
+    }
+  }
+  return undefined;
+}
+
+function firstStringProperty(
+  value: Readonly<Record<string, unknown>>,
+  properties: readonly string[],
+): string | undefined {
+  for (const property of properties) {
     const candidate = value[property];
     if (typeof candidate === "string" && candidate.trim().length > 0) {
       return candidate.trim();
@@ -415,7 +521,12 @@ function validateOptions(
   targetBranch: string,
   review: ReviewGate,
   branchPrefix: string,
+  reviewConfig: Omit<BeadsReviewConfig, "by"> | undefined,
+  validationCommands: readonly string[] | undefined,
+  maxIterations: number | undefined,
   includeMerge: boolean,
+  mergeValidationCommands: readonly string[] | undefined,
+  serializeMerges: boolean,
   includeBeadsUpdate: boolean,
   beadsRepo: string | undefined,
 ): void {
@@ -428,14 +539,79 @@ function validateOptions(
   if (typeof branchPrefix !== "string") {
     throw new Error("branchPrefix must be a string");
   }
+  validateReviewConfig(reviewConfig);
+  validateCommands(validationCommands, "validationCommands");
+  if (
+    maxIterations !== undefined &&
+    (!Number.isInteger(maxIterations) || maxIterations < 1)
+  ) {
+    throw new Error("maxIterations must be a positive integer");
+  }
   if (typeof includeMerge !== "boolean") {
     throw new Error("includeMerge must be a boolean");
+  }
+  validateCommands(mergeValidationCommands, "mergeValidationCommands");
+  if (typeof serializeMerges !== "boolean") {
+    throw new Error("serializeMerges must be a boolean");
   }
   if (typeof includeBeadsUpdate !== "boolean") {
     throw new Error("includeBeadsUpdate must be a boolean");
   }
   if (beadsRepo !== undefined && typeof beadsRepo !== "string") {
     throw new Error("beadsRepo must be a string when provided");
+  }
+}
+
+function validateReviewConfig(
+  config: Omit<BeadsReviewConfig, "by"> | undefined,
+): void {
+  if (config === undefined) {
+    return;
+  }
+  if (
+    config.minConfidenceScore !== undefined &&
+    (!Number.isInteger(config.minConfidenceScore) ||
+      config.minConfidenceScore < 1 ||
+      config.minConfidenceScore > 5)
+  ) {
+    throw new Error("reviewConfig.minConfidenceScore must be from 1 to 5");
+  }
+  for (const [field, value] of [
+    ["requireApproved", config.requireApproved],
+    ["requireNoActionableFindings", config.requireNoActionableFindings],
+    ["requireGreenChecks", config.requireGreenChecks],
+    [
+      "allowConfidenceFourWithoutActionableFindings",
+      config.allowConfidenceFourWithoutActionableFindings,
+    ],
+  ] as const) {
+    if (value !== undefined && typeof value !== "boolean") {
+      throw new Error(`reviewConfig.${field} must be a boolean`);
+    }
+  }
+  if (
+    config.triggerComment !== undefined &&
+    (typeof config.triggerComment !== "string" ||
+      config.triggerComment.trim().length === 0)
+  ) {
+    throw new Error("reviewConfig.triggerComment must be a non-empty string");
+  }
+}
+
+function validateCommands(
+  commands: readonly string[] | undefined,
+  field: string,
+): void {
+  if (commands === undefined) {
+    return;
+  }
+  if (!Array.isArray(commands)) {
+    throw new Error(`${field} must be an array`);
+  }
+  for (const [index, command] of commands.entries()) {
+    if (typeof command !== "string" || command.trim().length === 0) {
+      throw new Error(`${field}[${String(index)}] must be a non-empty string`);
+    }
   }
 }
 

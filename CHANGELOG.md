@@ -12,6 +12,8 @@ before 1.0.
   outcomes, retries, cancellation, resume, and streamed events.
 - Node-only SQLite, subprocess, Git worktree, artifact, log, Codex, and
   command-line integrations.
+- CLI Beads-to-DAG generation with parallel Codex implementation, configurable
+  Claude or Greptile review gates, serialized merges, and Beads updates.
 - Public Vitest conformance suites for run stores, artifact stores, log
   backends, execution backends, and workspace provisioners.
 - OSS governance, contribution, support, security, and dependency-maintenance

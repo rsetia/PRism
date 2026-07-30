@@ -12,10 +12,8 @@ import { extname } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
   abortRun,
-  builtinExecutors,
   compileGraph,
   createEngine,
-  createExecutorRegistry,
   createMemoryStore,
   createSystemClock,
   inspectRun,
@@ -34,6 +32,8 @@ import type {
   RunStore,
 } from "@rsetia/prism";
 import { createSqliteStore } from "@rsetia/prism/node";
+import { createAgentExecutorRegistry } from "./agent-executors.js";
+import { generateBeadsDag } from "./beads-dag.js";
 
 /** stdout: data only. stderr: humans only. */
 export interface CliIo {
@@ -54,7 +54,10 @@ export const USAGE = `Usage: prism <command> [options]
 Commands:
   validate <file>                     Check a graph file; exit 0 if valid
   graph <file> [--json]               Print the compiled plan
-  run <file> [--json] [--store <db>] [--run-id <id>]
+  beads-dag --repo <path> --out <file> [--beads-repo <path>]
+                                      Snapshot Beads into an agent DAG
+  run <file> [--json] [--store <db>] [--run-id <id>] [--repo <path>]
+             [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
                                       Execute the graph (persists with --store)
   inspect <run-id> --store <db> [--json]
                                       Show a persisted run's node states
@@ -63,7 +66,8 @@ Commands:
   status --store <db> [--json]        List persisted runs
   watch <run-id> --store <db> [--json] [--interval <ms>]
                                       Poll a run until it finishes
-  resume <run-id> --store <db> [--json]
+  resume <run-id> --store <db> [--json] [--repo <path>]
+         [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
                                       Continue an interrupted run to completion
   abort <run-id> --store <db> [--json]
                                       Force a stuck run to a cancelled, finished state
@@ -87,6 +91,30 @@ interface RunInvocation {
   readonly json: boolean;
   readonly store: string | undefined;
   readonly runId: string | undefined;
+  readonly agent: AgentInvocationOptions;
+}
+interface BeadsDagInvocation {
+  readonly command: "beads-dag";
+  readonly repo: string;
+  readonly beadsRepo: string | undefined;
+  readonly out: string;
+  readonly bdCommand: string;
+  readonly ids: readonly string[];
+  readonly statuses: ReadonlySet<string> | null;
+  readonly labels: readonly string[];
+  readonly targetBranch: string;
+  readonly branchPrefix: string;
+  readonly validationCommands: readonly string[];
+  readonly mergeValidationCommands: readonly string[];
+  readonly maxIterations: number;
+  readonly reviewer: "greptile" | "claude" | "none";
+  readonly minConfidenceScore: number;
+  readonly requireNoActionableFindings: boolean;
+  readonly requireGreenChecks: boolean;
+  readonly reviewTriggerComment: string | undefined;
+  readonly includeMerge: boolean;
+  readonly includeBeadsUpdate: boolean;
+  readonly serializeMerges: boolean;
 }
 interface ReadInvocation {
   readonly command: "inspect" | "events";
@@ -111,6 +139,7 @@ interface ResumeInvocation {
   readonly runId: string;
   readonly json: boolean;
   readonly store: string;
+  readonly agent: AgentInvocationOptions;
 }
 interface AbortInvocation {
   readonly command: "abort";
@@ -128,6 +157,7 @@ interface NodeTargetInvocation {
 type Invocation =
   | ValidateInvocation
   | GraphInvocation
+  | BeadsDagInvocation
   | RunInvocation
   | ReadInvocation
   | StatusInvocation
@@ -136,12 +166,25 @@ type Invocation =
   | AbortInvocation
   | NodeTargetInvocation;
 
+interface AgentInvocationOptions {
+  readonly repo: string | undefined;
+  readonly maxConcurrency: number;
+  readonly codexCommand: string | undefined;
+  readonly codexModel: string | undefined;
+  readonly worktreeDir: string | undefined;
+}
+
 interface ParsedFlags {
   readonly positionals: readonly string[];
   readonly json: boolean;
   readonly store: string | undefined;
   readonly runId: string | undefined;
   readonly interval: string | undefined;
+  readonly repo: string | undefined;
+  readonly maxConcurrency: string | undefined;
+  readonly codexCommand: string | undefined;
+  readonly codexModel: string | undefined;
+  readonly worktreeDir: string | undefined;
 }
 
 /** Positional args plus known scalar flags; an unknown flag is invalid. */
@@ -151,6 +194,11 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
   let store: string | undefined;
   let runId: string | undefined;
   let interval: string | undefined;
+  let repo: string | undefined;
+  let maxConcurrency: string | undefined;
+  let codexCommand: string | undefined;
+  let codexModel: string | undefined;
+  let worktreeDir: string | undefined;
 
   for (let index = 0; index < rest.length; index += 1) {
     const arg = rest[index];
@@ -160,7 +208,12 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
     } else if (
       arg === "--store" ||
       arg === "--run-id" ||
-      arg === "--interval"
+      arg === "--interval" ||
+      arg === "--repo" ||
+      arg === "--max-concurrency" ||
+      arg === "--codex-bin" ||
+      arg === "--codex-model" ||
+      arg === "--worktree-dir"
     ) {
       const value = rest[index + 1];
       if (value === undefined || value.startsWith("--")) return undefined;
@@ -171,9 +224,24 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
       } else if (arg === "--run-id") {
         if (runId !== undefined) return undefined;
         runId = value;
-      } else {
+      } else if (arg === "--interval") {
         if (interval !== undefined) return undefined;
         interval = value;
+      } else if (arg === "--repo") {
+        if (repo !== undefined) return undefined;
+        repo = value;
+      } else if (arg === "--max-concurrency") {
+        if (maxConcurrency !== undefined) return undefined;
+        maxConcurrency = value;
+      } else if (arg === "--codex-bin") {
+        if (codexCommand !== undefined) return undefined;
+        codexCommand = value;
+      } else if (arg === "--codex-model") {
+        if (codexModel !== undefined) return undefined;
+        codexModel = value;
+      } else {
+        if (worktreeDir !== undefined) return undefined;
+        worktreeDir = value;
       }
     } else if (arg?.startsWith("--") === true) {
       return undefined;
@@ -182,11 +250,25 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
     }
   }
 
-  return { positionals, json, store, runId, interval };
+  return {
+    positionals,
+    json,
+    store,
+    runId,
+    interval,
+    repo,
+    maxConcurrency,
+    codexCommand,
+    codexModel,
+    worktreeDir,
+  };
 }
 
 function parseInvocation(argv: readonly string[]): Invocation | undefined {
   const [command, ...rest] = argv;
+  if (command === "beads-dag") {
+    return parseBeadsDagInvocation(rest);
+  }
   const flags = parseFlags(rest);
   if (flags === undefined) return undefined;
 
@@ -195,7 +277,8 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
   const noExtras =
     flags.store === undefined &&
     flags.runId === undefined &&
-    flags.interval === undefined;
+    flags.interval === undefined &&
+    noAgentFlags(flags);
 
   switch (command) {
     case "validate":
@@ -209,7 +292,8 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
         first === undefined ||
         flags.store !== undefined ||
         flags.runId !== undefined ||
-        flags.interval !== undefined
+        flags.interval !== undefined ||
+        !noAgentFlags(flags)
       ) {
         return undefined;
       }
@@ -218,22 +302,27 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
       if (count !== 1 || first === undefined || flags.interval !== undefined) {
         return undefined;
       }
-      return {
-        command,
-        file: first,
-        json: flags.json,
-        store: flags.store,
-        runId: flags.runId,
-      };
+      {
+        const agent = parseAgentOptions(flags);
+        if (agent === undefined) return undefined;
+        return {
+          command,
+          file: first,
+          json: flags.json,
+          store: flags.store,
+          runId: flags.runId,
+          agent,
+        };
+      }
     case "inspect":
     case "events":
-    case "resume":
       if (
         count !== 1 ||
         first === undefined ||
         flags.store === undefined ||
         flags.runId !== undefined ||
-        flags.interval !== undefined
+        flags.interval !== undefined ||
+        !noAgentFlags(flags)
       ) {
         return undefined;
       }
@@ -243,13 +332,34 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
         json: flags.json,
         store: flags.store,
       };
-    case "abort":
+    case "resume": {
       if (
         count !== 1 ||
         first === undefined ||
         flags.store === undefined ||
         flags.runId !== undefined ||
         flags.interval !== undefined
+      ) {
+        return undefined;
+      }
+      const agent = parseAgentOptions(flags);
+      if (agent === undefined) return undefined;
+      return {
+        command,
+        runId: first,
+        json: flags.json,
+        store: flags.store,
+        agent,
+      };
+    }
+    case "abort":
+      if (
+        count !== 1 ||
+        first === undefined ||
+        flags.store === undefined ||
+        flags.runId !== undefined ||
+        flags.interval !== undefined ||
+        !noAgentFlags(flags)
       ) {
         return undefined;
       }
@@ -262,7 +372,8 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
         second === undefined ||
         flags.store === undefined ||
         flags.runId !== undefined ||
-        flags.interval !== undefined
+        flags.interval !== undefined ||
+        !noAgentFlags(flags)
       ) {
         return undefined;
       }
@@ -278,7 +389,8 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
         count !== 0 ||
         flags.store === undefined ||
         flags.runId !== undefined ||
-        flags.interval !== undefined
+        flags.interval !== undefined ||
+        !noAgentFlags(flags)
       ) {
         return undefined;
       }
@@ -288,7 +400,8 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
         count !== 1 ||
         first === undefined ||
         flags.store === undefined ||
-        flags.runId !== undefined
+        flags.runId !== undefined ||
+        !noAgentFlags(flags)
       ) {
         return undefined;
       }
@@ -308,6 +421,166 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
     default:
       return undefined;
   }
+}
+
+function noAgentFlags(flags: ParsedFlags): boolean {
+  return (
+    flags.repo === undefined &&
+    flags.maxConcurrency === undefined &&
+    flags.codexCommand === undefined &&
+    flags.codexModel === undefined &&
+    flags.worktreeDir === undefined
+  );
+}
+
+function parseAgentOptions(
+  flags: ParsedFlags,
+): AgentInvocationOptions | undefined {
+  const maxConcurrency =
+    flags.maxConcurrency === undefined ? 1 : Number(flags.maxConcurrency);
+  if (!Number.isSafeInteger(maxConcurrency) || maxConcurrency < 1) {
+    return undefined;
+  }
+  return {
+    repo: flags.repo,
+    maxConcurrency,
+    codexCommand: flags.codexCommand,
+    codexModel: flags.codexModel,
+    worktreeDir: flags.worktreeDir,
+  };
+}
+
+function parseBeadsDagInvocation(
+  args: readonly string[],
+): BeadsDagInvocation | undefined {
+  const scalar = new Map<string, string>();
+  const repeated = new Map<string, string[]>();
+  const switches = new Set<string>();
+  const scalarFlags = new Set([
+    "--repo",
+    "--beads-repo",
+    "--out",
+    "--bd-bin",
+    "--target-branch",
+    "--branch-prefix",
+    "--max-iterations",
+    "--reviewer",
+    "--min-confidence-score",
+    "--review-trigger-comment",
+    "--greptile-trigger-comment",
+  ]);
+  const repeatedFlags = new Set([
+    "--id",
+    "--status",
+    "--label",
+    "--validation-command",
+    "--merge-validation-command",
+  ]);
+  const switchFlags = new Set([
+    "--all-statuses",
+    "--allow-actionable-findings",
+    "--skip-green-checks",
+    "--no-merge-nodes",
+    "--no-beads-update",
+    "--no-serialize-merges",
+  ]);
+
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index];
+    if (arg === undefined) return undefined;
+    if (scalarFlags.has(arg) || repeatedFlags.has(arg)) {
+      const value = args[index + 1];
+      if (value === undefined || value.startsWith("--")) return undefined;
+      index += 1;
+      if (scalarFlags.has(arg)) {
+        if (scalar.has(arg)) return undefined;
+        scalar.set(arg, value);
+      } else {
+        const values = repeated.get(arg) ?? [];
+        values.push(value);
+        repeated.set(arg, values);
+      }
+      continue;
+    }
+    if (switchFlags.has(arg)) {
+      if (switches.has(arg)) return undefined;
+      switches.add(arg);
+      continue;
+    }
+    return undefined;
+  }
+
+  const repo = scalar.get("--repo");
+  const out = scalar.get("--out");
+  if (repo === undefined || out === undefined) {
+    return undefined;
+  }
+  const reviewer = scalar.get("--reviewer") ?? "greptile";
+  if (reviewer !== "greptile" && reviewer !== "claude" && reviewer !== "none") {
+    return undefined;
+  }
+  const maxIterations = Number(scalar.get("--max-iterations") ?? "8");
+  const minConfidenceScore = Number(
+    scalar.get("--min-confidence-score") ?? "5",
+  );
+  if (
+    !Number.isSafeInteger(maxIterations) ||
+    maxIterations < 1 ||
+    !Number.isSafeInteger(minConfidenceScore) ||
+    minConfidenceScore < 1 ||
+    minConfidenceScore > 5
+  ) {
+    return undefined;
+  }
+  const allStatuses = switches.has("--all-statuses");
+  if (allStatuses && repeated.has("--status")) {
+    return undefined;
+  }
+  const statuses = allStatuses
+    ? null
+    : new Set(
+        csvValues(repeated.get("--status") ?? ["open,in_progress,blocked"]).map(
+          (status) => status.toLowerCase(),
+        ),
+      );
+  if (statuses !== null && statuses.size === 0) {
+    return undefined;
+  }
+
+  return {
+    command: "beads-dag",
+    repo,
+    beadsRepo: scalar.get("--beads-repo"),
+    out,
+    bdCommand: scalar.get("--bd-bin") ?? "bd",
+    ids: csvValues(repeated.get("--id") ?? []),
+    statuses,
+    labels: csvValues(repeated.get("--label") ?? []),
+    targetBranch: scalar.get("--target-branch") ?? "main",
+    branchPrefix: scalar.get("--branch-prefix") ?? "prism/",
+    validationCommands: repeated.get("--validation-command") ?? [],
+    mergeValidationCommands: repeated.get("--merge-validation-command") ?? [],
+    maxIterations,
+    reviewer,
+    minConfidenceScore,
+    requireNoActionableFindings: !switches.has("--allow-actionable-findings"),
+    requireGreenChecks: !switches.has("--skip-green-checks"),
+    reviewTriggerComment:
+      scalar.get("--review-trigger-comment") ??
+      scalar.get("--greptile-trigger-comment"),
+    includeMerge: !switches.has("--no-merge-nodes"),
+    includeBeadsUpdate: !switches.has("--no-beads-update"),
+    serializeMerges: !switches.has("--no-serialize-merges"),
+  };
+}
+
+function csvValues(values: readonly string[]): string[] {
+  return values.flatMap((value) =>
+    value
+      .split(",")
+      .map((item) => item.trim())
+      .filter((item) => item.length > 0),
+  );
 }
 
 function describeError(error: unknown): string {
@@ -504,7 +777,21 @@ async function runGraph(
   try {
     const engine = createEngine({
       store,
-      registry: createExecutorRegistry(builtinExecutors),
+      registry: createAgentExecutorRegistry({
+        ...(invocation.agent.repo === undefined
+          ? {}
+          : { repoDir: invocation.agent.repo }),
+        ...(invocation.agent.worktreeDir === undefined
+          ? {}
+          : { worktreeBaseDir: invocation.agent.worktreeDir }),
+        ...(invocation.agent.codexCommand === undefined
+          ? {}
+          : { codexCommand: invocation.agent.codexCommand }),
+        ...(invocation.agent.codexModel === undefined
+          ? {}
+          : { codexModel: invocation.agent.codexModel }),
+      }),
+      maxConcurrency: invocation.agent.maxConcurrency,
     });
     const runId =
       invocation.runId ??
@@ -649,7 +936,21 @@ async function resumeCommand(
     store = createSqliteStore({ path: invocation.store });
     const engine = createEngine({
       store,
-      registry: createExecutorRegistry(builtinExecutors),
+      registry: createAgentExecutorRegistry({
+        ...(invocation.agent.repo === undefined
+          ? {}
+          : { repoDir: invocation.agent.repo }),
+        ...(invocation.agent.worktreeDir === undefined
+          ? {}
+          : { worktreeBaseDir: invocation.agent.worktreeDir }),
+        ...(invocation.agent.codexCommand === undefined
+          ? {}
+          : { codexCommand: invocation.agent.codexCommand }),
+        ...(invocation.agent.codexModel === undefined
+          ? {}
+          : { codexModel: invocation.agent.codexModel }),
+      }),
+      maxConcurrency: invocation.agent.maxConcurrency,
     });
     const handle = engine.resume(invocation.runId);
     io.stderr(`resume ${handle.id}`);
@@ -819,6 +1120,42 @@ export async function runCli(
   }
 
   switch (invocation.command) {
+    case "beads-dag":
+      try {
+        await generateBeadsDag({
+          repoDir: invocation.repo,
+          ...(invocation.beadsRepo === undefined
+            ? {}
+            : { beadsRepoDir: invocation.beadsRepo }),
+          outFile: invocation.out,
+          bdCommand: invocation.bdCommand,
+          ids: invocation.ids,
+          statuses: invocation.statuses,
+          labels: invocation.labels,
+          targetBranch: invocation.targetBranch,
+          branchPrefix: invocation.branchPrefix,
+          validationCommands: invocation.validationCommands,
+          mergeValidationCommands: invocation.mergeValidationCommands,
+          maxIterations: invocation.maxIterations,
+          reviewer: invocation.reviewer,
+          minConfidenceScore: invocation.minConfidenceScore,
+          requireNoActionableFindings: invocation.requireNoActionableFindings,
+          requireGreenChecks: invocation.requireGreenChecks,
+          ...(invocation.reviewTriggerComment === undefined
+            ? {}
+            : { reviewTriggerComment: invocation.reviewTriggerComment }),
+          includeMerge: invocation.includeMerge,
+          includeBeadsUpdate:
+            invocation.includeMerge && invocation.includeBeadsUpdate,
+          serializeMerges: invocation.serializeMerges,
+        });
+        io.stdout(invocation.out);
+        return EXIT_SUCCESS;
+      } catch (error: unknown) {
+        io.stderr(`cannot generate Beads DAG: ${describeError(error)}`);
+        return EXIT_USAGE;
+      }
+
     case "validate":
     case "graph":
     case "run": {
