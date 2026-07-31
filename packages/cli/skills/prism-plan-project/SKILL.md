@@ -257,11 +257,25 @@ handoff.
 
 ## 7. Generate the Prism graph
 
+Write the graph to the operator-owned Prism tree, **not the code repository**.
+The graph is a generated run artifact that belongs beside the run store; leaving
+it in the working tree pollutes the very repo the DAG is about to modify. Resolve
+an absolute output path outside the repo:
+
+```text
+<graph-path> = $PRISM_HOME/store/<project-slug>/<project-slug>.prism.json
+```
+
+When `PRISM_HOME` is unset, fall back to the resolved Beads workspace
+(`<beads-repo>/<project-slug>.prism.json`) or an explicit path the user supplied
+— never a path inside `<code-repo>`. Create the parent directory first.
+
 Generate the graph from the selected Beads:
 
 ```bash
+mkdir -p "$PRISM_HOME/store/<project-slug>"
 (cd <code-repo> && prism beads-dag \
-  --out <project>.prism.json \
+  --out "<graph-path>" \
   --id <bead-id> \
   --target-branch "<target-branch>" \
   --validation-command "<implementation validation>" \
@@ -270,9 +284,10 @@ Generate the graph from the selected Beads:
 
 Repeat `--id`, `--label`, and validation flags as needed. Prefer explicit IDs
 for a scoped project DAG so unrelated open Beads and the coordinating epic are
-not accidentally implemented. When `PRISM_HOME` is configured, the current
-Git repository and `$PRISM_HOME/beads/<project-slug>` are implicit. Pass
-`--repo` or `--beads-repo` only to override those locations.
+not accidentally implemented. Run `beads-dag` from `<code-repo>` so the current
+Git repository and `$PRISM_HOME/beads/<project-slug>` resolve implicitly, but
+always give `--out` an absolute path outside the working tree. Pass `--repo` or
+`--beads-repo` only to override those auto-resolved locations.
 
 Use `--no-beads-update`, `--no-merge-nodes`, or
 `--no-serialize-merges` only when the requested workflow requires that
@@ -283,8 +298,8 @@ behavior.
 Run:
 
 ```bash
-prism validate <project>.prism.json
-prism graph <project>.prism.json
+prism validate "<graph-path>"
+prism graph "<graph-path>"
 ```
 
 Also inspect the generated graph and verify:

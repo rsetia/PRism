@@ -50,13 +50,16 @@ trigger `@greptile review` is the default:
 ```console
 $ cd /path/to/code
 $ prism beads-dag \
-    --out work.prism.json \
+    --out "$PRISM_HOME/store/myproject/work.prism.json" \
     --validation-command "npm test"
 
-$ prism run work.prism.json
+$ prism run "$PRISM_HOME/store/myproject/work.prism.json"
 $ prism watch
 $ prism logs
 ```
+
+The graph is a generated run artifact — write `--out` under `$PRISM_HOME`, not
+into the code repository it is about to modify.
 
 `beads-dag` snapshots each selected Bead into the graph, honors hard dependency
 edges, fans out ready implementation nodes, and serializes merge/update nodes
