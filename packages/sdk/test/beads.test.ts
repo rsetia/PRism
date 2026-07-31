@@ -39,6 +39,16 @@ function executorNames(graph: GraphDefinition): string[] {
   return Object.values(graph.nodes).map((node) => node.executor);
 }
 
+/**
+ * Drain n macrotask ticks. Enough for the in-memory store's awaits to
+ * settle, and it fails fast rather than hanging on a vitest timeout.
+ */
+async function flushTicks(count: number): Promise<void> {
+  for (let tick = 0; tick < count; tick += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+}
+
 function succeeds(name: string): ExecutorDefinition {
   return {
     name,
@@ -314,6 +324,57 @@ describe("buildBeadsGraph", () => {
       }),
       { executor: "merge_resolve", nodeId: "merge-a" },
     ]);
+  });
+
+  test("a later merge overlaps an earlier bead's beads_update", async () => {
+    // The shape assertions above say beads_update is off the lane. This one
+    // proves it costs nothing: hold update-a open forever and merge-b must
+    // still run. Chained through the terminal node, merge-b never starts.
+    const mergeStarts: string[] = [];
+    const merge: ExecutorDefinition = {
+      name: "merge_resolve",
+      execute(context) {
+        mergeStarts.push(context.nodeId);
+        return { status: "succeeded", output: { nodeId: context.nodeId } };
+      },
+    };
+    let releaseUpdateA: (() => void) | undefined;
+    const update: ExecutorDefinition = {
+      name: "beads_update",
+      execute(context) {
+        if (context.nodeId !== "update-a") {
+          return { status: "succeeded", output: null };
+        }
+        return new Promise((resolve) => {
+          releaseUpdateA = () => {
+            resolve({ status: "succeeded", output: null });
+          };
+        });
+      },
+    };
+
+    const compiled = compileGraph(buildBeadsGraph([bead("A"), bead("B")]));
+    if (!compiled.ok) throw new Error("generated graph did not compile");
+    const handle = createEngine({
+      store: createMemoryStore(),
+      registry: createExecutorRegistry([
+        ...builtinExecutors,
+        succeeds("implement"),
+        merge,
+        update,
+      ]),
+      maxConcurrency: 4,
+    }).run(compiled.graph);
+
+    await flushTicks(20);
+    // update-a is still in flight — nothing has released it.
+    expect(releaseUpdateA).toBeDefined();
+    expect(mergeStarts).toContain("merge-b");
+
+    releaseUpdateA?.();
+    await expect(handle.result).resolves.toMatchObject({
+      status: "succeeded",
+    });
   });
 
   test("rejects an empty bead set", () => {
