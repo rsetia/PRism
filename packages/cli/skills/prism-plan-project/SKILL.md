@@ -158,8 +158,9 @@ Apply these rules:
 - Let independent roots and branches fan out.
 - Make downstream implementation depend on the upstream merge result, not only
   on the upstream implementation attempt.
-- Serialize merge/update chains by default so concurrent successful branches do
-  not race each other into the target branch.
+- Serialize the merge lane by default so concurrent successful branches do
+  not race each other into the target branch. Beads updates hang off each
+  merge and stay off the lane.
 - Ignore parent-child, related-to, and other soft Beads relationships as
   execution dependencies.
 - Finish with integration only after every artifact it validates is available.
@@ -308,7 +309,8 @@ Also inspect the generated graph and verify:
 - No unrelated Bead or coordinating epic appears as implementation work.
 - Every hard dependency points in the intended direction.
 - Ready implementation branches remain parallel.
-- Merge/update nodes form the intended serialized lane.
+- `merge_resolve` nodes form the intended serialized lane, and each
+  `beads_update` depends only on its own merge.
 - The remote integration target exists and every `implement` and
   `merge_resolve` node names it as `targetBranch`.
 - Every `implement` node uses the selected reviewer.

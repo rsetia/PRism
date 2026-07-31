@@ -211,15 +211,18 @@ describe("buildBeadsGraph", () => {
     });
   });
 
-  test("fans out implementations while serializing merge/update chains", () => {
+  test("fans out implementations while serializing the merge lane", () => {
     const graph = buildBeadsGraph([bead("A"), bead("B")]);
     expect(graph.nodes["implement-a"]?.dependsOn).toEqual(["context-a"]);
     expect(graph.nodes["implement-b"]?.dependsOn).toEqual(["context-b"]);
     expect(graph.nodes["merge-a"]?.dependsOn).toEqual(["implement-a"]);
+    // The lane chains merge -> merge. beads_update is bookkeeping and stays
+    // off the critical path of every later merge.
     expect(graph.nodes["merge-b"]?.dependsOn).toEqual([
       "implement-b",
-      "update-a",
+      "merge-a",
     ]);
+    expect(graph.nodes["update-a"]?.dependsOn).toEqual(["merge-a"]);
   });
 
   test("includeBeadsUpdate: false omits beads_update nodes", () => {
