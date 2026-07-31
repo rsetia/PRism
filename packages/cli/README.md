@@ -24,6 +24,26 @@ node states. `logs` follows all worker output from the newest run until it
 finishes. Explicit path, run ID, and concurrency flags remain available as
 overrides. Redirected and `--json` watch output remain script-friendly.
 
+## Plan with your agent
+
+The package bundles an agent skill, `prism-plan-project`, that turns a product
+or engineering discussion into a Beads backlog and an executable DAG. Install
+it once so your agent discovers it by itself:
+
+```console
+$ prism skills install
+$ prism skills list
+```
+
+`install` copies into `~/.claude/skills/` by default. `--agent codex` targets
+`~/.codex/skills/`, `--project` writes into the current repository, and
+`--force` overwrites an existing copy. Restart the agent session afterwards,
+then ask it to plan the project in plain language — the skill matches on its
+own description, so no path needs pasting.
+
+`beads-dag` below is the compiler that skill drives. Use it directly only when
+the work items and dependencies already exist.
+
 Generate a Codex implementation DAG from Beads. Greptile review with the
 trigger `@greptile review` is the default:
 
@@ -46,7 +66,8 @@ by default. It includes `open`, `in_progress`, and `blocked` work unless
 greptile|claude|none` to choose the gate, and `--no-merge-nodes`,
 `--no-beads-update`, or `--no-serialize-merges` to alter the generated DAG.
 
-Commands: `validate`, `graph`, `beads-dag`, `run` (author and execute);
+Commands: `skills` (install the planning skill); `validate`, `graph`,
+`beads-dag`, `run` (author and execute);
 `status`, `inspect`, `events`, `watch`, `logs` (observe); `resume`, `abort`,
 `signal`, `rerun-node` (recover). Graphs may be JSON or YAML.
 

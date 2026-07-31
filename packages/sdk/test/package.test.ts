@@ -34,18 +34,21 @@ async function packedFiles(packageDir: string): Promise<readonly string[]> {
 
 const ALLOWED =
   /^(package\.json|README\.md|LICENSE)$|^dist\/.+\.(js|d\.ts|js\.map|d\.ts\.map)$/;
+/** The CLI also ships agent skills, which may carry files beside SKILL.md. */
+const CLI_ALLOWED = new RegExp(`${ALLOWED.source}|^skills/[^/]+/.+`);
 const FORBIDDEN =
   /(^|\/)(test|tests|fixture|fixtures|coverage)(\/|$)|\.(test|spec)\.|tsconfig|tsbuildinfo|\.env|^src\//;
 
 function assertContents(
   files: readonly string[],
   required: readonly string[],
+  allowed: RegExp = ALLOWED,
 ): void {
   for (const file of required) {
     expect(files).toContain(file);
   }
   for (const file of files) {
-    expect(file).toMatch(ALLOWED);
+    expect(file).toMatch(allowed);
     expect(file).not.toMatch(FORBIDDEN);
   }
 }
@@ -64,8 +67,19 @@ describe("packed tarball contents", () => {
     ]);
   }, 60_000);
 
-  test("cli ships only package.json and dist output, including the bin", async () => {
+  // The skill is the only way a consumer discovers the planning workflow, so
+  // it must be in the tarball — a `files` omission would drop it silently.
+  test("cli ships package.json, dist output, the bin, and its agent skills", async () => {
     const files = await packedFiles(CLI_DIR);
-    assertContents(files, ["package.json", "dist/main.js", "dist/cli.js"]);
+    assertContents(
+      files,
+      [
+        "package.json",
+        "dist/main.js",
+        "dist/cli.js",
+        "skills/prism-plan-project/SKILL.md",
+      ],
+      CLI_ALLOWED,
+    );
   }, 60_000);
 });

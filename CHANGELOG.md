@@ -18,6 +18,10 @@ before 1.0.
   backends, execution backends, and workspace provisioners.
 - OSS governance, contribution, support, security, and dependency-maintenance
   policies.
+- `prism skills list` and `prism skills install` ship the `prism-plan-project`
+  agent skill inside the CLI package and install it into `~/.claude/skills`
+  or `~/.codex/skills`, so agents discover the planning workflow instead of
+  needing an absolute path pasted at them. `prism --help` now advertises it.
 
 ### Changed
 

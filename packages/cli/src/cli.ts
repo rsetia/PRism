@@ -39,6 +39,13 @@ import {
   missingPrismHomeMessage,
   resolvePrismProjectPaths,
 } from "./prism-home.js";
+import {
+  SKILL_AGENTS,
+  installSkills,
+  listBundledSkills,
+  resolveSkillsInstallDir,
+} from "./skills.js";
+import type { SkillAgent, SkillScope } from "./skills.js";
 import { renderWatchDashboard } from "./watch-renderer.js";
 
 /** Non-TTY stdout is data; interactive watch may redraw a human dashboard. */
@@ -63,7 +70,22 @@ export const DEFAULT_MAX_CONCURRENCY = 4;
 
 export const USAGE = `Usage: prism <command> [options]
 
+Plan first:
+  Prism bundles an agent skill, "prism-plan-project", that turns a product or
+  engineering discussion into a Beads backlog and an executable Prism DAG.
+  Install it once so your agent discovers it on its own:
+
+    prism skills install
+
+  Then ask your agent to plan the project in plain language. The skill decides
+  what can run in parallel and calls "beads-dag", which is a compiler, not a
+  planner — reach for it directly only when the work items already exist.
+
 Commands:
+  skills list [--json]                Show the agent skills bundled with Prism
+  skills install [<name>...] [--agent claude|codex] [--project] [--repo <path>]
+                 [--force] [--json]
+                                      Install them into the agent's skills directory
   validate <file>                     Check a graph file; exit 0 if valid
   graph <file> [--json]               Print the compiled plan
   beads-dag --out <file> [--repo <path>] [--beads-repo <path>]
@@ -93,6 +115,7 @@ Commands:
 Defaults:
   Repository                            Current git repository
   Beads, store, worktrees, and logs     $PRISM_HOME/<kind>/<project>/...
+  Skill install target                  ~/.claude/skills
   Pull-request reviewer                 Greptile (@greptile review)
   Maximum concurrency                   ${String(DEFAULT_MAX_CONCURRENCY)}`;
 
@@ -182,6 +205,19 @@ interface NodeTargetInvocation {
   readonly json: boolean;
   readonly store: string | undefined;
 }
+interface SkillsInvocation {
+  readonly command: "skills";
+  readonly action: "list" | "install";
+  readonly names: readonly string[];
+  readonly agent: SkillAgent;
+  readonly scope: SkillScope;
+  readonly repo: string | undefined;
+  readonly force: boolean;
+  readonly json: boolean;
+}
+interface HelpInvocation {
+  readonly command: "help";
+}
 type Invocation =
   | ValidateInvocation
   | GraphInvocation
@@ -193,7 +229,9 @@ type Invocation =
   | WatchInvocation
   | ResumeInvocation
   | AbortInvocation
-  | NodeTargetInvocation;
+  | NodeTargetInvocation
+  | SkillsInvocation
+  | HelpInvocation;
 
 interface AgentInvocationOptions {
   readonly repo: string | undefined;
@@ -297,6 +335,15 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
   const [command, ...rest] = argv;
   if (command === "beads-dag") {
     return parseBeadsDagInvocation(rest);
+  }
+  if (command === "skills") {
+    return parseSkillsInvocation(rest);
+  }
+  if (
+    rest.length === 0 &&
+    (command === "help" || command === "--help" || command === "-h")
+  ) {
+    return { command: "help" };
   }
   const flags = parseFlags(rest);
   if (flags === undefined) return undefined;
@@ -497,6 +544,81 @@ function parseAgentOptions(
     codexCommand: flags.codexCommand,
     codexModel: flags.codexModel,
     worktreeDir: flags.worktreeDir,
+  };
+}
+
+/** `skills` takes flags the shared parser does not know, so it parses its own. */
+function parseSkillsInvocation(
+  args: readonly string[],
+): SkillsInvocation | undefined {
+  const [action, ...rest] = args;
+  if (action !== "list" && action !== "install") return undefined;
+
+  const names: string[] = [];
+  let agent: SkillAgent | undefined;
+  let repo: string | undefined;
+  let scope: SkillScope | undefined;
+  let force = false;
+  let json = false;
+
+  for (let index = 0; index < rest.length; index += 1) {
+    const arg = rest[index];
+    if (arg === undefined) return undefined;
+    if (arg === "--agent" || arg === "--repo") {
+      const value = rest[index + 1];
+      if (value === undefined || value.startsWith("--")) return undefined;
+      index += 1;
+      if (arg === "--repo") {
+        if (repo !== undefined) return undefined;
+        repo = value;
+      } else {
+        if (agent !== undefined) return undefined;
+        if (!SKILL_AGENTS.includes(value as SkillAgent)) return undefined;
+        agent = value as SkillAgent;
+      }
+      continue;
+    }
+    if (arg === "--project" || arg === "--user") {
+      const requested: SkillScope = arg === "--project" ? "project" : "user";
+      if (scope !== undefined) return undefined;
+      scope = requested;
+      continue;
+    }
+    if (arg === "--force") {
+      if (force) return undefined;
+      force = true;
+      continue;
+    }
+    if (arg === "--json") {
+      if (json) return undefined;
+      json = true;
+      continue;
+    }
+    if (arg.startsWith("--")) return undefined;
+    names.push(arg);
+  }
+
+  // `list` reports what ships; install targets are meaningless there.
+  if (
+    action === "list" &&
+    (names.length > 0 ||
+      force ||
+      agent !== undefined ||
+      scope !== undefined ||
+      repo !== undefined)
+  ) {
+    return undefined;
+  }
+
+  return {
+    command: "skills",
+    action,
+    names,
+    agent: agent ?? "claude",
+    scope: scope ?? "user",
+    repo,
+    force,
+    json,
   };
 }
 
@@ -1384,6 +1506,87 @@ async function watchCommand(
   }
 }
 
+async function skillsCommand(
+  invocation: SkillsInvocation,
+  io: CliIo,
+): Promise<number> {
+  const available = await listBundledSkills();
+  if (available.length === 0) {
+    io.stderr("no skills are bundled with this Prism installation");
+    return EXIT_USAGE;
+  }
+
+  if (invocation.action === "list") {
+    if (invocation.json) {
+      io.stdout(
+        JSON.stringify(
+          available.map((skill) => ({
+            name: skill.name,
+            description: skill.description,
+            path: skill.sourceDir,
+          })),
+        ),
+      );
+      return EXIT_SUCCESS;
+    }
+    for (const skill of available) {
+      io.stdout(skill.name);
+      if (skill.description.length > 0) {
+        io.stderr(`  ${skill.description}`);
+      }
+    }
+    return EXIT_SUCCESS;
+  }
+
+  const selected =
+    invocation.names.length === 0
+      ? available
+      : available.filter((skill) => invocation.names.includes(skill.name));
+  const unknown = invocation.names.filter(
+    (name) => !available.some((skill) => skill.name === name),
+  );
+  if (unknown.length > 0) {
+    io.stderr(
+      `unknown skill: ${unknown.join(", ")}; available: ${available
+        .map((skill) => skill.name)
+        .join(", ")}`,
+    );
+    return EXIT_USAGE;
+  }
+
+  const { repoDir } = resolvePrismProjectPaths(
+    invocation.repo ?? process.cwd(),
+  );
+  const targetDir = resolveSkillsInstallDir(
+    invocation.agent,
+    invocation.scope,
+    repoDir,
+  );
+
+  try {
+    await mkdir(targetDir, { recursive: true });
+    const installed = await installSkills(
+      selected,
+      targetDir,
+      invocation.force,
+    );
+    if (invocation.json) {
+      io.stdout(JSON.stringify(installed));
+    } else {
+      for (const skill of installed) {
+        io.stdout(skill.path);
+      }
+    }
+    io.stderr(
+      `installed ${String(installed.length)} skill(s) into ${targetDir}; restart your agent session to pick them up`,
+    );
+    return EXIT_SUCCESS;
+  } catch (error: unknown) {
+    io.stderr(`cannot install skills: ${describeError(error)}`);
+    return EXIT_USAGE;
+  }
+}
+
 /**
  * Dispatch. stdout carries data only; diagnostics and the run id go to
  * stderr. Exit codes: 0 success, 1 graph run failed, 2 invalid input or
@@ -1400,6 +1603,14 @@ export async function runCli(
   }
 
   switch (invocation.command) {
+    // Requested help is data, not a usage error: stdout, exit 0.
+    case "help":
+      io.stdout(USAGE);
+      return EXIT_SUCCESS;
+
+    case "skills":
+      return skillsCommand(invocation, io);
+
     case "beads-dag":
       try {
         await generateBeadsDag({

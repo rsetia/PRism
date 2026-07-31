@@ -23,19 +23,32 @@ profile:
 export PRISM_HOME="$HOME/.prism"
 ```
 
+Install the planning skill so your agent can find it:
+
+```sh
+prism skills install
+```
+
+That copies `prism-plan-project` into `~/.claude/skills/`. Use `--agent codex`
+for `~/.codex/skills/`, or `--project` to commit it to the repository you are
+planning. Restart the agent session afterwards.
+
 ## Plan with your agent
 
 First, have the normal product or engineering discussion about your project.
-Then tell your agent:
+Then ask, in plain language:
 
 ```text
-Read <PRISM checkout>/skills/prism-plan-project/SKILL.md and use it to turn
-this discussion into Beads and an executable Prism DAG. Use Codex to implement
-and Greptile to review with the exact comment "@greptile review".
+Turn this discussion into Beads and an executable Prism DAG. Use Codex to
+implement and Greptile to review with the exact comment "@greptile review".
 ```
 
-The skill creates the Beads, initializes a remote integration branch, builds
+The installed skill matches on its own description, so there is no path to
+paste. It creates the Beads, initializes a remote integration branch, builds
 and validates the DAG, and gives you the graph path. It does not start the run.
+
+If your agent does not support skills, point it at the file directly — run
+`prism skills list --json` to get the installed path.
 
 ## Run
 
@@ -75,6 +88,7 @@ $PRISM_HOME/
 ## Useful commands
 
 ```sh
+prism skills list
 prism status
 prism inspect <run-id>
 prism resume <run-id>

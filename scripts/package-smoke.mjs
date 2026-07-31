@@ -6,7 +6,7 @@
  * never on the module path — only the tarballs are tested.
  */
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -242,6 +242,37 @@ try {
   const result = JSON.parse(cliOut);
   if (result.status !== "succeeded" || result.output !== "hello") {
     throw new Error(`packed CLI failed: ${cliOut}`);
+  }
+
+  // The skill is how a consumer discovers Prism's planning workflow at all,
+  // so it has to survive packing — a `files` omission would silently drop it.
+  log("verifying the packed CLI ships and installs its agent skills");
+  const { stdout: skillsOut } = await run(
+    cliBin,
+    ["skills", "list", "--json"],
+    {
+      cwd: consumerDir,
+    },
+  );
+  const packedSkills = JSON.parse(skillsOut);
+  if (!packedSkills.some((skill) => skill.name === "prism-plan-project")) {
+    throw new Error(`packed CLI ships no planning skill: ${skillsOut}`);
+  }
+  await run(cliBin, ["skills", "install", "--project", "--repo", consumerDir], {
+    cwd: consumerDir,
+  });
+  const installedSkill = await readFile(
+    path.join(
+      consumerDir,
+      ".claude",
+      "skills",
+      "prism-plan-project",
+      "SKILL.md",
+    ),
+    "utf8",
+  );
+  if (!installedSkill.includes("name: prism-plan-project")) {
+    throw new Error("installed skill is missing its frontmatter");
   }
 
   log("package smoke OK");

@@ -399,6 +399,139 @@ if (command === "export") {
   });
 });
 
+describe("prism CLI: skills", () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "prism-cli-skills-"));
+  afterAll(() => {
+    rmSync(tempDir, { recursive: true, force: true });
+  });
+
+  let counter = 0;
+  function project(): string {
+    counter += 1;
+    const dir = join(tempDir, `project-${String(counter)}`);
+    mkdirSync(dir, { recursive: true });
+    return dir;
+  }
+
+  test("--help prints usage to stdout, exit 0", async () => {
+    const result = await cli("--help");
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("Usage:");
+    expect(result.stderr).toBe("");
+  });
+
+  test("help advertises the bundled planning skill", async () => {
+    const result = await cli("help");
+    expect(result.stdout).toContain("prism skills install");
+    expect(result.stdout).toContain("prism-plan-project");
+  });
+
+  test("skills list names the bundled planning skill", async () => {
+    const result = await cli("skills", "list");
+    expect(result.code).toBe(0);
+    expect(result.stdout.trim()).toBe("prism-plan-project");
+  });
+
+  test("skills list --json carries the description agents match on", async () => {
+    const result = await cli("skills", "list", "--json");
+    expect(result.code).toBe(0);
+    const skills = JSON.parse(result.stdout) as {
+      name: string;
+      description: string;
+    }[];
+    expect(skills[0]?.name).toBe("prism-plan-project");
+    expect(skills[0]?.description).toContain("Beads");
+  });
+
+  test("skills install copies the whole skill directory", async () => {
+    const dir = project();
+    const result = await cli("skills", "install", "--project", "--repo", dir);
+    expect(result.code).toBe(0);
+    const installed = join(dir, ".claude", "skills", "prism-plan-project");
+    expect(result.stdout.trim()).toBe(installed);
+    expect(readFileSync(join(installed, "SKILL.md"), "utf8")).toContain(
+      "name: prism-plan-project",
+    );
+  });
+
+  test("skills install --agent codex targets the Codex home", async () => {
+    const dir = project();
+    const result = await cli(
+      "skills",
+      "install",
+      "--project",
+      "--repo",
+      dir,
+      "--agent",
+      "codex",
+    );
+    expect(result.code).toBe(0);
+    expect(
+      existsSync(join(dir, ".codex", "skills", "prism-plan-project")),
+    ).toBe(true);
+  });
+
+  test("skills install refuses to clobber without --force", async () => {
+    const dir = project();
+    await cli("skills", "install", "--project", "--repo", dir);
+    const second = await cli("skills", "install", "--project", "--repo", dir);
+    expect(second.code).toBe(2);
+    expect(second.stderr).toContain("--force");
+  });
+
+  test("skills install --force overwrites an edited install", async () => {
+    const dir = project();
+    await cli("skills", "install", "--project", "--repo", dir);
+    const skillFile = join(
+      dir,
+      ".claude",
+      "skills",
+      "prism-plan-project",
+      "SKILL.md",
+    );
+    writeFileSync(skillFile, "stale");
+    const result = await cli(
+      "skills",
+      "install",
+      "--project",
+      "--repo",
+      dir,
+      "--force",
+    );
+    expect(result.code).toBe(0);
+    expect(readFileSync(skillFile, "utf8")).toContain(
+      "name: prism-plan-project",
+    );
+  });
+
+  test("skills install rejects an unknown skill name", async () => {
+    const dir = project();
+    const result = await cli(
+      "skills",
+      "install",
+      "not-a-skill",
+      "--project",
+      "--repo",
+      dir,
+    );
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("prism-plan-project");
+    expect(existsSync(join(dir, ".claude"))).toBe(false);
+  });
+
+  test("skills install rejects an unsupported agent", async () => {
+    const result = await cli("skills", "install", "--agent", "cursor");
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("Usage:");
+  });
+
+  test("skills rejects an unknown action", async () => {
+    const result = await cli("skills", "uninstall");
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("Usage:");
+  });
+});
+
 describe("prism CLI: persisted runs", () => {
   const tempDir = mkdtempSync(join(tmpdir(), "prism-cli-store-"));
   afterAll(() => {
