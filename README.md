@@ -104,6 +104,5 @@ your network and credentials and without a sandbox. Only run DAGs you trust.
 See [SECURITY.md](SECURITY.md) for details.
 
 SDK documentation is in [packages/sdk/README.md](packages/sdk/README.md).
-Release history is in [CHANGELOG.md](CHANGELOG.md).
 
 Status: `0.1.0-alpha.0` (unpublished).
