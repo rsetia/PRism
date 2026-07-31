@@ -158,6 +158,14 @@ const EXAMPLE_GRAPH = JSON.stringify({
 
 const workDir = await mkdtemp(path.join(tmpdir(), "prism-smoke-"));
 try {
+  // `prism run` requires PRISM_HOME. Inheriting the developer's own home would
+  // make the smoke depend on ambient state — it passes locally for anyone who
+  // followed the README and fails in CI, which has none. Point every child at
+  // a throwaway home inside workDir so the run is hermetic either way.
+  const smokeHome = path.join(workDir, "prism-home");
+  await mkdir(smokeHome);
+  process.env.PRISM_HOME = smokeHome;
+
   const pack = async (packageName) => {
     const { stdout } = await run(
       "npm",
