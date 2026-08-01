@@ -235,6 +235,14 @@ describe("buildBeadsGraph", () => {
     expect(graph.nodes["update-a"]?.dependsOn).toEqual(["merge-a"]);
   });
 
+  test("serializeMerges: false leaves every merge independent", () => {
+    const graph = buildBeadsGraph([bead("A"), bead("B")], {
+      serializeMerges: false,
+    });
+    expect(graph.nodes["merge-a"]?.dependsOn).toEqual(["implement-a"]);
+    expect(graph.nodes["merge-b"]?.dependsOn).toEqual(["implement-b"]);
+  });
+
   test("includeBeadsUpdate: false omits beads_update nodes", () => {
     const withUpdate = buildBeadsGraph([bead("A")]);
     expect(executorNames(withUpdate)).toContain("beads_update");
