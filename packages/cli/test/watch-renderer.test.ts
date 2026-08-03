@@ -176,7 +176,9 @@ describe("watch dashboard", () => {
       color: false,
     });
 
-    expect(output).toContain("MERGE WAIT ← 1 CLOSE");
+    // Work item 2's merge waits on work item 1's MERGE, not its CLOSE: the
+    // lane chains merge -> merge and beads_update hangs off to the side.
+    expect(output).toContain("MERGE WAIT ← 1 MERGE");
     expect(output).not.toContain("BUILD WAIT ←");
     expect(output.split("\n").every((line) => line.length <= 100)).toBe(true);
   });
