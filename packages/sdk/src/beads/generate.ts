@@ -61,7 +61,7 @@ export interface BeadsGraphOptions {
   readonly includeMerge?: boolean;
   /** Validation commands run after merge conflict resolution. */
   readonly mergeValidationCommands?: readonly string[];
-  /** Serialize merge/update chains while implementations fan out. Default true. */
+  /** Serialize the merge lane while implementations fan out. Default true. */
   readonly serializeMerges?: boolean;
   /** Add a beads_update node after each merge. Default true. */
   readonly includeBeadsUpdate?: boolean;
@@ -299,7 +299,11 @@ export function buildBeadsGraph(
       terminalNodeId = plan.updateNodeId;
     }
     if (includeMerge && serializeMerges) {
-      previousSerializedNodeId = terminalNodeId;
+      // Chain to the merge itself, not the terminal node: the lane exists to
+      // stop two merges touching targetBranch at once, and beads_update does
+      // not. Chaining to the update node would put Beads bookkeeping on the
+      // critical path of every later merge.
+      previousSerializedNodeId = plan.mergeNodeId;
     }
     terminalNodeIds.push(terminalNodeId);
   }
