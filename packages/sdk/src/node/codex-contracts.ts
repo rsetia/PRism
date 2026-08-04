@@ -25,6 +25,8 @@ export interface WorkItem {
 
 export interface ReviewConfig {
   readonly by: ReviewGate;
+  /** Restrict Greptile feedback to this GitHub App slug when configured. */
+  readonly greptileAppSlug?: string;
   readonly minConfidenceScore?: number;
   /**
    * Legacy compatibility flag. For comment-only reviewer integrations, an
@@ -92,6 +94,15 @@ export function parseImplementConfig(
   const title = optionalString(workItemValue["title"], "config.workItem.title");
 
   const by = parseReviewGate(reviewValue["by"]);
+  const greptileAppSlug = optionalNonEmptyString(
+    reviewValue["greptileAppSlug"],
+    "config.review.greptileAppSlug",
+  );
+  if (greptileAppSlug !== undefined && by !== "greptile") {
+    throw new Error(
+      'config.review.greptileAppSlug requires config.review.by to be "greptile"',
+    );
+  }
   const minConfidenceScore = optionalConfidenceScore(
     reviewValue["minConfidenceScore"],
     "config.review.minConfidenceScore",
@@ -142,6 +153,7 @@ export function parseImplementConfig(
   });
   const review: ReviewConfig = Object.freeze({
     by,
+    ...(greptileAppSlug === undefined ? {} : { greptileAppSlug }),
     ...(minConfidenceScore === undefined ? {} : { minConfidenceScore }),
     ...(requireApproved === undefined ? {} : { requireApproved }),
     ...(requireNoActionableFindings === undefined
@@ -507,11 +519,15 @@ function implementGateInstructions(review: ReviewConfig): string {
     case "greptile": {
       const minimum = review.minConfidenceScore ?? 5;
       const trigger = review.triggerComment ?? "@greptile review";
+      const appFilter =
+        review.greptileAppSlug === undefined
+          ? ""
+          : `\n- Restrict Greptile feedback to the GitHub App slug ${quote(review.greptileAppSlug)}. For Greptile check runs, require check_run.app.slug === ${quote(review.greptileAppSlug)}. For Greptile issue comments, review summaries, reviews, and inline review comments, require the author login to be ${quote(review.greptileAppSlug)} or ${quote(`${review.greptileAppSlug}[bot]`)}. Ignore every other Greptile app identity, including staging apps.\n- Apply that app-identity filter before making code changes, extracting a score, deciding whether a finding is actionable, waiting for review, evaluating Greptile's green check, or counting a review iteration. A response from another Greptile app does not satisfy the gate; if it responds first, keep waiting for ${quote(review.greptileAppSlug)}.`;
       const confidenceFour =
         review.allowConfidenceFourWithoutActionableFindings === true
           ? "When the configured minimum is 5 and Greptile reports 4/5, you may accept it only when no current-head actionable findings remain and all required checks are green; record safe_confidence_4_exception_applied=true in metadata."
           : "Do not accept a Greptile confidence score below the configured minimum.";
-      return `- Use Greptile as the review gate. Read current-head summary comments containing "Confidence Score: N/5", inline review comments, and Greptile-generated test or issue comments.
+      return `- Use Greptile as the review gate. Read current-head summary comments containing "Confidence Score: N/5", inline review comments, and Greptile-generated test or issue comments.${appFilter}
 - Use the latest substantive Greptile response that applies to the current head. Require a confidence score of at least ${String(minimum)}/5 from that response and apply current-head actionable-finding and check requirements; never reuse a score from an older head.${criteriaInstruction}
 - Post ${quote(trigger)} after a new head needs review, then wait for Greptile feedback on that head.
 - ${confidenceFour}`;
@@ -535,7 +551,9 @@ function implementGateInstructions(review: ReviewConfig): string {
 function implementExtraRules(review: ReviewConfig): readonly string[] {
   const gateRule =
     review.by === "greptile"
-      ? "For Greptile, use only the latest current-head confidence score and consider current-head summary concerns, inline review comments, and reviewer-generated test or issue feedback actionable unless clearly stale or explicitly non-actionable."
+      ? review.greptileAppSlug === undefined
+        ? "For Greptile, use only the latest current-head confidence score and consider current-head summary concerns, inline review comments, and reviewer-generated test or issue feedback actionable unless clearly stale or explicitly non-actionable."
+        : `For Greptile, consume only current-head feedback from GitHub App slug ${quote(review.greptileAppSlug)} and its ${quote(`${review.greptileAppSlug}[bot]`)} author identity; discard all other app feedback before any action or gate decision.`
       : review.by === "claude"
         ? "For Claude, post the configured trigger comment and infer readiness from the latest substantive current-head Claude response; a formal GitHub approval object is not required."
         : "With review.by set to none, do not manufacture a reviewer approval requirement; use validation and current-head checks.";

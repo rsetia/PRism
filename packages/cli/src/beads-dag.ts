@@ -34,6 +34,7 @@ export interface GenerateBeadsDagOptions {
   readonly mergeValidationCommands?: readonly string[];
   readonly maxIterations?: number;
   readonly reviewer?: ReviewGate;
+  readonly greptileAppSlug?: string;
   readonly minConfidenceScore?: number;
   readonly requireNoActionableFindings?: boolean;
   readonly requireGreenChecks?: boolean;
@@ -109,6 +110,9 @@ export async function generateBeadsDag(
     ),
   }));
   const reviewer = options.reviewer ?? "greptile";
+  if (options.greptileAppSlug !== undefined && reviewer !== "greptile") {
+    throw new Error('greptileAppSlug requires reviewer to be "greptile"');
+  }
   const reviewTriggerComment =
     options.reviewTriggerComment ??
     (reviewer === "greptile"
@@ -124,6 +128,9 @@ export async function generateBeadsDag(
       ...(reviewer === "greptile"
         ? {
             minConfidenceScore: options.minConfidenceScore ?? 5,
+            ...(options.greptileAppSlug === undefined
+              ? {}
+              : { greptileAppSlug: options.greptileAppSlug }),
           }
         : {}),
       requireNoActionableFindings: options.requireNoActionableFindings ?? true,

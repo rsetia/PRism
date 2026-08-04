@@ -38,6 +38,7 @@ describe("parseImplementConfig", () => {
         validationCommands: ["npm test", "npm run lint"],
         review: {
           by: "greptile",
+          greptileAppSlug: " greptile-apps ",
           minConfidenceScore: 5,
           requireApproved: false,
           requireNoActionableFindings: true,
@@ -54,6 +55,7 @@ describe("parseImplementConfig", () => {
     expect(parsed.maxIterations).toBe(4);
     expect(parsed.validationCommands).toEqual(["npm test", "npm run lint"]);
     expect(parsed.review).toMatchObject({
+      greptileAppSlug: "greptile-apps",
       minConfidenceScore: 5,
       requireApproved: false,
       requireNoActionableFindings: true,
@@ -105,6 +107,11 @@ describe("parseImplementConfig", () => {
       "config.validationCommands[1]",
     ],
     [
+      "greptileAppSlug",
+      { review: { by: "greptile", greptileAppSlug: "" } },
+      "config.review.greptileAppSlug",
+    ],
+    [
       "minConfidenceScore",
       { review: { by: "greptile", minConfidenceScore: 6 } },
       "config.review.minConfidenceScore",
@@ -125,6 +132,16 @@ describe("parseImplementConfig", () => {
         implementConfig(override as Record<string, JsonValue>),
       ),
     ).toThrow(errorField);
+  });
+
+  test("rejects a Greptile app slug for another review gate", () => {
+    expect(() =>
+      parseImplementConfig(
+        implementConfig({
+          review: { by: "claude", greptileAppSlug: "greptile-apps" },
+        }),
+      ),
+    ).toThrow('requires config.review.by to be "greptile"');
   });
 });
 
@@ -181,6 +198,27 @@ describe("buildImplementContract", () => {
     );
     expect(contract.instructions).toContain(
       "Do not accept a Greptile confidence score below",
+    );
+    expect(contract.instructions).not.toContain("greptile-apps[bot]");
+  });
+
+  test("filters Greptile feedback to the configured GitHub App", () => {
+    const contract = buildImplementContract({
+      ...base,
+      review: { by: "greptile", greptileAppSlug: "greptile-apps" },
+    });
+    expect(contract.instructions).toContain(
+      'check_run.app.slug === "greptile-apps"',
+    );
+    expect(contract.instructions).toContain('"greptile-apps[bot]"');
+    expect(contract.instructions).toContain(
+      "Apply that app-identity filter before making code changes",
+    );
+    expect(contract.instructions).toContain(
+      "if it responds first, keep waiting",
+    );
+    expect(contract.extraRules?.join("\n")).toContain(
+      "discard all other app feedback before any action or gate decision",
     );
   });
 

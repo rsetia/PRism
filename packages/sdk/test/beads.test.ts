@@ -211,6 +211,19 @@ describe("buildBeadsGraph", () => {
     });
   });
 
+  test("copies and normalizes a Greptile GitHub App slug", () => {
+    const graph = buildBeadsGraph([bead("A")], {
+      review: "greptile",
+      reviewConfig: { greptileAppSlug: " greptile-apps " },
+    });
+    expect(graph.nodes["implement-a"]?.config).toMatchObject({
+      review: {
+        by: "greptile",
+        greptileAppSlug: "greptile-apps",
+      },
+    });
+  });
+
   test("fans out implementations while serializing merge/update chains", () => {
     const graph = buildBeadsGraph([bead("A"), bead("B")]);
     expect(graph.nodes["implement-a"]?.dependsOn).toEqual(["context-a"]);
@@ -343,5 +356,14 @@ describe("buildBeadsGraph", () => {
         },
       ]),
     ).toThrow("JSON-safe");
+  });
+
+  test("rejects a Greptile app slug for a non-Greptile review gate", () => {
+    expect(() =>
+      buildBeadsGraph([bead("A")], {
+        review: "claude",
+        reviewConfig: { greptileAppSlug: "greptile-apps" },
+      }),
+    ).toThrow('requires review to be "greptile"');
   });
 });
