@@ -51,6 +51,7 @@ trigger `@greptile review` is the default:
 $ cd /path/to/code
 $ prism beads-dag \
     --out "$PRISM_HOME/store/myproject/work.prism.json" \
+    --greptile-app-slug greptile-apps \
     --validation-command "npm test"
 
 $ prism run "$PRISM_HOME/store/myproject/work.prism.json"
@@ -66,8 +67,18 @@ edges, fans out ready implementation nodes, and serializes merge/update nodes
 by default. It includes `open`, `in_progress`, and `blocked` work unless
 `--all-statuses` or repeatable `--status` filters are supplied. Use repeatable
 `--id` and `--label` filters to select work, `--reviewer
-greptile|claude|none` to choose the gate, and `--no-merge-nodes`,
+greptile|claude|none` to choose the gate, `--greptile-app-slug` to restrict
+Greptile feedback to one GitHub App identity, and `--no-merge-nodes`,
 `--no-beads-update`, or `--no-serialize-merges` to alter the generated DAG.
+
+The same selector can be applied globally at execution time with
+`prism run <graph> --greptile-app-slug greptile-apps`. Prism rejects the flag
+when the graph has no Greptile implementation nodes or a node selects a
+different app. The effective graph is saved in the run store, so `resume`
+does not accept or need the flag. Without a selector, existing broad Greptile
+review behavior is unchanged. App filtering is enforced by the Codex worker's
+review-loop contract, rather than by a separate deterministic reviewer
+adapter.
 
 Commands: `skills` (install the planning skill); `validate`, `graph`,
 `beads-dag`, `run` (author and execute);

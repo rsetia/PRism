@@ -35,6 +35,7 @@ import type {
 import { createFileLogBackend, createSqliteStore } from "@rsetia/prism/node";
 import { createAgentExecutorRegistry } from "./agent-executors.js";
 import { generateBeadsDag } from "./beads-dag.js";
+import { applyGreptileAppSlug } from "./review-policy.js";
 import {
   missingPrismHomeMessage,
   resolvePrismProjectPaths,
@@ -89,9 +90,11 @@ Commands:
   validate <file>                     Check a graph file; exit 0 if valid
   graph <file> [--json]               Print the compiled plan
   beads-dag --out <file> [--repo <path>] [--beads-repo <path>]
+            [--greptile-app-slug <slug>]
                                       Snapshot Beads into an agent DAG
   run <file> [--json] [--store <db>] [--run-id <id>] [--repo <path>]
              [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
+             [--greptile-app-slug <slug>]
                                       Execute the graph
   inspect <run-id> [--store <db>] [--json]
                                       Show a persisted run's node states
@@ -134,6 +137,7 @@ interface RunInvocation {
   readonly json: boolean;
   readonly store: string | undefined;
   readonly runId: string | undefined;
+  readonly greptileAppSlug: string | undefined;
   readonly agent: AgentInvocationOptions;
 }
 interface BeadsDagInvocation {
@@ -151,6 +155,7 @@ interface BeadsDagInvocation {
   readonly mergeValidationCommands: readonly string[];
   readonly maxIterations: number;
   readonly reviewer: "greptile" | "claude" | "none";
+  readonly greptileAppSlug: string | undefined;
   readonly minConfidenceScore: number;
   readonly requireNoActionableFindings: boolean;
   readonly requireGreenChecks: boolean;
@@ -252,6 +257,7 @@ interface ParsedFlags {
   readonly codexCommand: string | undefined;
   readonly codexModel: string | undefined;
   readonly worktreeDir: string | undefined;
+  readonly greptileAppSlug: string | undefined;
 }
 
 /** Positional args plus known scalar flags; an unknown flag is invalid. */
@@ -266,6 +272,7 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
   let codexCommand: string | undefined;
   let codexModel: string | undefined;
   let worktreeDir: string | undefined;
+  let greptileAppSlug: string | undefined;
 
   for (let index = 0; index < rest.length; index += 1) {
     const arg = rest[index];
@@ -280,7 +287,8 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
       arg === "--max-concurrency" ||
       arg === "--codex-bin" ||
       arg === "--codex-model" ||
-      arg === "--worktree-dir"
+      arg === "--worktree-dir" ||
+      arg === "--greptile-app-slug"
     ) {
       const value = rest[index + 1];
       if (value === undefined || value.startsWith("--")) return undefined;
@@ -306,9 +314,14 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
       } else if (arg === "--codex-model") {
         if (codexModel !== undefined) return undefined;
         codexModel = value;
-      } else {
+      } else if (arg === "--worktree-dir") {
         if (worktreeDir !== undefined) return undefined;
         worktreeDir = value;
+      } else {
+        if (greptileAppSlug !== undefined || value.trim().length === 0) {
+          return undefined;
+        }
+        greptileAppSlug = value.trim();
       }
     } else if (arg?.startsWith("--") === true) {
       return undefined;
@@ -328,6 +341,7 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
     codexCommand,
     codexModel,
     worktreeDir,
+    greptileAppSlug,
   };
 }
 
@@ -387,6 +401,7 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
           json: flags.json,
           store: flags.store,
           runId: flags.runId,
+          greptileAppSlug: flags.greptileAppSlug,
           agent,
         };
       }
@@ -428,7 +443,8 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
         count !== 1 ||
         first === undefined ||
         flags.runId !== undefined ||
-        flags.interval !== undefined
+        flags.interval !== undefined ||
+        flags.greptileAppSlug !== undefined
       ) {
         return undefined;
       }
@@ -515,7 +531,8 @@ function noAgentFlags(flags: ParsedFlags): boolean {
     flags.maxConcurrency === undefined &&
     flags.codexCommand === undefined &&
     flags.codexModel === undefined &&
-    flags.worktreeDir === undefined
+    flags.worktreeDir === undefined &&
+    flags.greptileAppSlug === undefined
   );
 }
 
@@ -524,7 +541,8 @@ function noWorkerFlags(flags: ParsedFlags): boolean {
     flags.maxConcurrency === undefined &&
     flags.codexCommand === undefined &&
     flags.codexModel === undefined &&
-    flags.worktreeDir === undefined
+    flags.worktreeDir === undefined &&
+    flags.greptileAppSlug === undefined
   );
 }
 
@@ -637,6 +655,7 @@ function parseBeadsDagInvocation(
     "--branch-prefix",
     "--max-iterations",
     "--reviewer",
+    "--greptile-app-slug",
     "--min-confidence-score",
     "--review-trigger-comment",
     "--greptile-trigger-comment",
@@ -690,6 +709,13 @@ function parseBeadsDagInvocation(
   if (reviewer !== "greptile" && reviewer !== "claude" && reviewer !== "none") {
     return undefined;
   }
+  const greptileAppSlug = scalar.get("--greptile-app-slug")?.trim();
+  if (
+    (greptileAppSlug !== undefined && greptileAppSlug.length === 0) ||
+    (greptileAppSlug !== undefined && reviewer !== "greptile")
+  ) {
+    return undefined;
+  }
   const maxIterations = Number(scalar.get("--max-iterations") ?? "8");
   const minConfidenceScore = Number(
     scalar.get("--min-confidence-score") ?? "5",
@@ -733,6 +759,7 @@ function parseBeadsDagInvocation(
     mergeValidationCommands: repeated.get("--merge-validation-command") ?? [],
     maxIterations,
     reviewer,
+    greptileAppSlug,
     minConfidenceScore,
     requireNoActionableFindings: !switches.has("--allow-actionable-findings"),
     requireGreenChecks: !switches.has("--skip-green-checks"),
@@ -954,6 +981,18 @@ async function runGraph(
   io: CliIo,
 ): Promise<number> {
   const json = invocation.json;
+  let effectiveGraph = graph;
+  if (invocation.greptileAppSlug !== undefined) {
+    try {
+      effectiveGraph = applyGreptileAppSlug(
+        graph,
+        invocation.greptileAppSlug,
+      ).graph;
+    } catch (error: unknown) {
+      io.stderr(`cannot apply Greptile app override: ${describeError(error)}`);
+      return EXIT_USAGE;
+    }
+  }
   let hasDefaultStore: boolean;
   try {
     const projectPaths = resolvePrismProjectPaths(invocation.agent.repo);
@@ -1000,7 +1039,10 @@ async function runGraph(
     });
     const runId =
       invocation.runId ?? (durable ? `run-${randomUUID()}` : undefined);
-    const handle = engine.run(graph, runId === undefined ? {} : { runId });
+    const handle = engine.run(
+      effectiveGraph,
+      runId === undefined ? {} : { runId },
+    );
     // The run id is a human diagnostic (stderr) so `inspect`/`events` can
     // target it; stdout stays pure data.
     io.stderr(`run ${handle.id}`);
@@ -1629,6 +1671,9 @@ export async function runCli(
           mergeValidationCommands: invocation.mergeValidationCommands,
           maxIterations: invocation.maxIterations,
           reviewer: invocation.reviewer,
+          ...(invocation.greptileAppSlug === undefined
+            ? {}
+            : { greptileAppSlug: invocation.greptileAppSlug }),
           minConfidenceScore: invocation.minConfidenceScore,
           requireNoActionableFindings: invocation.requireNoActionableFindings,
           requireGreenChecks: invocation.requireGreenChecks,

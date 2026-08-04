@@ -127,6 +127,12 @@ describe("prism CLI", () => {
     expect(result.code).toBe(2);
   });
 
+  test("help advertises the Greptile GitHub App selector", async () => {
+    const result = await cli("help");
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("--greptile-app-slug <slug>");
+  });
+
   test("validate: valid file exits 0 with empty stdout", async () => {
     const result = await cli("validate", fixture("valid.json"));
     expect(result.code).toBe(0);
@@ -322,6 +328,8 @@ if (command === "export") {
         bd,
         "--validation-command",
         "npm test",
+        "--greptile-app-slug",
+        "greptile-apps",
         "--no-beads-update",
       );
       expect(result.code).toBe(0);
@@ -335,6 +343,7 @@ if (command === "export") {
               value?: { description?: string };
               review?: {
                 by?: string;
+                greptileAppSlug?: string;
                 minConfidenceScore?: number;
                 allowConfidenceFourWithoutActionableFindings?: boolean;
                 triggerComment?: string;
@@ -350,6 +359,7 @@ if (command === "export") {
       expect(graph.nodes["implement-bd-a"]?.config).toMatchObject({
         review: {
           by: "greptile",
+          greptileAppSlug: "greptile-apps",
           minConfidenceScore: 5,
           triggerComment: "@greptile review",
         },
@@ -361,6 +371,129 @@ if (command === "export") {
       ).toBeUndefined();
       expect(graph.nodes["merge-bd-a"]?.executor).toBe("merge_resolve");
       expect(graph.nodes["implement-bd-closed"]).toBeUndefined();
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("beads-dag rejects a Greptile app selector for another reviewer", async () => {
+    const result = await cli(
+      "beads-dag",
+      "--out",
+      "unused.json",
+      "--reviewer",
+      "claude",
+      "--greptile-app-slug",
+      "greptile-apps",
+    );
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("Usage:");
+  });
+
+  test("run rejects a Greptile app selector when the graph has no Greptile nodes", async () => {
+    const result = await cli(
+      "run",
+      fixture("valid.json"),
+      "--greptile-app-slug",
+      "greptile-apps",
+    );
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("graph has no Greptile implement nodes");
+  });
+
+  test("run rejects a selector that conflicts with a graph node", async () => {
+    const root = mkdtempSync(join(tmpdir(), "prism-cli-greptile-conflict-"));
+    try {
+      const graph = join(root, "graph.json");
+      writeFileSync(
+        graph,
+        JSON.stringify({
+          version: 1,
+          nodes: {
+            task: {
+              executor: "implement",
+              config: {
+                review: {
+                  by: "greptile",
+                  greptileAppSlug: "greptile-apps-staging",
+                },
+              },
+            },
+          },
+          finalNode: "task",
+        }),
+      );
+      const result = await cli(
+        "run",
+        graph,
+        "--greptile-app-slug",
+        "greptile-apps",
+      );
+      expect(result.code).toBe(2);
+      expect(result.stderr).toContain("already selects app slug");
+      expect(result.stderr).toContain("conflicts with");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("resume rejects a Greptile app selector because the run stores its policy", async () => {
+    const result = await cli(
+      "resume",
+      "existing-run",
+      "--greptile-app-slug",
+      "greptile-apps",
+    );
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("Usage:");
+  });
+
+  test("run persists the effective Greptile app selector", async () => {
+    const root = mkdtempSync(join(tmpdir(), "prism-cli-greptile-app-"));
+    try {
+      const graph = join(root, "graph.json");
+      const storePath = join(root, "runs.db");
+      writeFileSync(
+        graph,
+        JSON.stringify({
+          version: 1,
+          nodes: {
+            task: {
+              executor: "implement",
+              config: {
+                targetBranch: "main",
+                review: { by: "greptile" },
+              },
+            },
+          },
+          finalNode: "task",
+        }),
+      );
+
+      const result = await cli(
+        "run",
+        graph,
+        "--repo",
+        root,
+        "--store",
+        storePath,
+        "--run-id",
+        "filtered-run",
+        "--greptile-app-slug",
+        "greptile-apps",
+        "--json",
+      );
+      expect(result.code).toBe(1);
+
+      const store = createSqliteStore({ path: storePath });
+      const run = await store.getRun("filtered-run");
+      await store.close?.();
+      expect(run?.graph.nodes["task"]?.config).toMatchObject({
+        review: {
+          by: "greptile",
+          greptileAppSlug: "greptile-apps",
+        },
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

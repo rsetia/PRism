@@ -58,6 +58,19 @@ From your project repository:
 prism run <graph-file>
 ```
 
+If both production and staging Greptile apps review the same pull requests,
+select the production GitHub App for the whole run:
+
+```sh
+prism run <graph-file> --greptile-app-slug greptile-apps
+```
+
+The selector applies to every Greptile `implement` node and is persisted with
+the run, so a later `prism resume <run-id>` keeps the same policy without the
+flag. A graph can also bake in the selector when it is generated with
+`prism beads-dag ... --greptile-app-slug greptile-apps`. Omitting the selector
+preserves the normal broad Greptile behavior.
+
 In another terminal, view the live DAG:
 
 ```sh
@@ -101,6 +114,8 @@ prism --help
 
 Prism runs Codex, Git, GitHub CLI, Beads, and validation commands as you, with
 your network and credentials and without a sandbox. Only run DAGs you trust.
+Greptile app selection is enforced through the Codex worker instructions; it
+is not a separate deterministic GitHub review adapter.
 See [SECURITY.md](SECURITY.md) for details.
 
 SDK documentation is in [packages/sdk/README.md](packages/sdk/README.md).

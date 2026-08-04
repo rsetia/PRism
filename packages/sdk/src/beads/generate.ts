@@ -36,6 +36,7 @@ export type ReviewGate = "greptile" | "claude" | "none";
  */
 export interface BeadsReviewConfig {
   readonly by: ReviewGate;
+  readonly greptileAppSlug?: string;
   readonly minConfidenceScore?: number;
   readonly requireApproved?: boolean;
   readonly requireNoActionableFindings?: boolean;
@@ -161,6 +162,9 @@ export function buildBeadsGraph(
     by: review,
     ...(review === "greptile" ? { triggerComment: "@greptile review" } : {}),
     ...options?.reviewConfig,
+    ...(options?.reviewConfig?.greptileAppSlug === undefined
+      ? {}
+      : { greptileAppSlug: options.reviewConfig.greptileAppSlug.trim() }),
   };
 
   interface BeadPlan {
@@ -540,7 +544,7 @@ function validateOptions(
   if (typeof branchPrefix !== "string") {
     throw new Error("branchPrefix must be a string");
   }
-  validateReviewConfig(reviewConfig);
+  validateReviewConfig(review, reviewConfig);
   validateCommands(validationCommands, "validationCommands");
   if (
     maxIterations !== undefined &&
@@ -564,10 +568,23 @@ function validateOptions(
 }
 
 function validateReviewConfig(
+  review: ReviewGate,
   config: Omit<BeadsReviewConfig, "by"> | undefined,
 ): void {
   if (config === undefined) {
     return;
+  }
+  if (
+    config.greptileAppSlug !== undefined &&
+    (typeof config.greptileAppSlug !== "string" ||
+      config.greptileAppSlug.trim().length === 0)
+  ) {
+    throw new Error("reviewConfig.greptileAppSlug must be a non-empty string");
+  }
+  if (config.greptileAppSlug !== undefined && review !== "greptile") {
+    throw new Error(
+      'reviewConfig.greptileAppSlug requires review to be "greptile"',
+    );
   }
   if (
     config.minConfidenceScore !== undefined &&

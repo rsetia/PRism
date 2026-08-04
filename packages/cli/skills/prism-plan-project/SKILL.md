@@ -187,6 +187,15 @@ the pull request, post the trigger comment, wait for current-head Greptile
 feedback, address actionable feedback, validate again, and repeat until the
 confidence and quality gates pass or the iteration limit is reached.
 
+If the repository has multiple Greptile GitHub Apps (for example production
+and staging), or the user requests one specific installation, identify the
+desired GitHub App slug and select it with `--greptile-app-slug <slug>` during
+graph generation. This bakes `review.greptileAppSlug` into every Greptile
+implementation node. The worker must discard other app identities before
+editing, scoring, waiting, evaluating the Greptile check, or counting an
+iteration. Omit the selector when no specific app was requested; omission
+preserves Prism's broad Greptile behavior.
+
 Use Claude or no reviewer only when the user or project explicitly requests
 it. Never claim a reviewer is available without checking the repository's
 GitHub integration or documented convention.
@@ -289,6 +298,11 @@ Git repository and `$PRISM_HOME/beads/<project-slug>` resolve implicitly, but
 always give `--out` an absolute path outside the working tree. Pass `--repo` or
 `--beads-repo` only to override those auto-resolved locations.
 
+Pass `--greptile-app-slug <slug>` here when section 5 selected a particular
+Greptile GitHub App. As an execution-time alternative, `prism run` accepts the
+same flag and applies it to all Greptile implementation nodes. That effective
+graph is persisted, so do not repeat the flag on `prism resume`.
+
 Use `--no-beads-update`, `--no-merge-nodes`, or
 `--no-serialize-merges` only when the requested workflow requires that
 behavior.
@@ -314,6 +328,8 @@ Also inspect the generated graph and verify:
 - Every `implement` node uses the selected reviewer.
 - Default nodes contain `review.by: "greptile"` and
   `triggerComment: "@greptile review"`.
+- When a specific Greptile App was selected, every Greptile implementation
+  node contains the same `review.greptileAppSlug`.
 - Validation commands and Beads paths are correct.
 - Every executor name is registered by the installed Prism version.
 - The final node covers all terminal work.
