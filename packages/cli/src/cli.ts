@@ -90,7 +90,7 @@ Commands:
   validate <file>                     Check a graph file; exit 0 if valid
   graph <file> [--json]               Print the compiled plan
   beads-dag --out <file> [--repo <path>] [--beads-repo <path>]
-            [--greptile-app-slug <slug>]
+            [--greptile-app-slug <slug>] [--spec-file <path>]
                                       Snapshot Beads into an agent DAG
   run <file> [--json] [--store <db>] [--run-id <id>] [--repo <path>]
              [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
@@ -146,6 +146,7 @@ interface BeadsDagInvocation {
   readonly beadsRepo: string | undefined;
   readonly out: string;
   readonly bdCommand: string;
+  readonly specFile: string | undefined;
   readonly ids: readonly string[];
   readonly statuses: ReadonlySet<string> | null;
   readonly labels: readonly string[];
@@ -651,6 +652,7 @@ function parseBeadsDagInvocation(
     "--beads-repo",
     "--out",
     "--bd-bin",
+    "--spec-file",
     "--target-branch",
     "--branch-prefix",
     "--max-iterations",
@@ -750,6 +752,7 @@ function parseBeadsDagInvocation(
     beadsRepo: scalar.get("--beads-repo"),
     out,
     bdCommand: scalar.get("--bd-bin") ?? "bd",
+    specFile: scalar.get("--spec-file"),
     ids: csvValues(repeated.get("--id") ?? []),
     statuses,
     labels: csvValues(repeated.get("--label") ?? []),
@@ -1662,6 +1665,9 @@ export async function runCli(
             : { beadsRepoDir: invocation.beadsRepo }),
           outFile: invocation.out,
           bdCommand: invocation.bdCommand,
+          ...(invocation.specFile === undefined
+            ? {}
+            : { specFile: invocation.specFile }),
           ids: invocation.ids,
           statuses: invocation.statuses,
           labels: invocation.labels,

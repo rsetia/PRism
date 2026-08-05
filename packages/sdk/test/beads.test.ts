@@ -211,6 +211,42 @@ describe("buildBeadsGraph", () => {
     });
   });
 
+  test("freezes a spec document into every context node", () => {
+    const graph = buildBeadsGraph([bead("A"), bead("B", ["A"])], {
+      spec: {
+        source: "docs/rfc-example.md",
+        content: "## Design contract\n`kb.findRevertCandidates@1`",
+      },
+    });
+    for (const contextNodeId of ["context-a", "context-b"]) {
+      const config = graph.nodes[contextNodeId]?.config as
+        { value?: { specDocument?: unknown } } | undefined;
+      expect(config?.value?.specDocument).toEqual({
+        source: "docs/rfc-example.md",
+        content: "## Design contract\n`kb.findRevertCandidates@1`",
+      });
+    }
+  });
+
+  test("shared spec wins over a bead field named specDocument", () => {
+    const graph = buildBeadsGraph(
+      [{ ...bead("A"), specDocument: "stale per-bead value" }],
+      { spec: { content: "authoritative" } },
+    );
+    const config = graph.nodes["context-a"]?.config as
+      { value?: { specDocument?: unknown } } | undefined;
+    expect(config?.value?.specDocument).toEqual({ content: "authoritative" });
+  });
+
+  test("rejects a blank spec document", () => {
+    expect(() =>
+      buildBeadsGraph([bead("A")], { spec: { content: "   " } }),
+    ).toThrow(/spec\.content/);
+    expect(() =>
+      buildBeadsGraph([bead("A")], { spec: { source: " ", content: "ok" } }),
+    ).toThrow(/spec\.source/);
+  });
+
   test("copies and normalizes a Greptile GitHub App slug", () => {
     const graph = buildBeadsGraph([bead("A")], {
       review: "greptile",

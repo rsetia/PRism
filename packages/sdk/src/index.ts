@@ -20,6 +20,7 @@ export type {
   Bead,
   BeadsGraphOptions,
   BeadsReviewConfig,
+  BeadsSpecDocument,
   ReviewGate,
 } from "./beads/generate.js";
 export {
