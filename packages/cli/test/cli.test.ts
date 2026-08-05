@@ -376,6 +376,91 @@ if (command === "export") {
     }
   });
 
+  test("beads-dag freezes --spec-file content into every context node", async () => {
+    const root = mkdtempSync(join(tmpdir(), "prism-cli-beads-spec-"));
+    try {
+      const repo = join(root, "code");
+      const prismHome = join(root, "prism-home");
+      const beadsRepo = join(prismHome, "beads", "code");
+      const out = join(root, "graph.json");
+      const specFile = join(root, "rfc.md");
+      const bd = join(root, "fake-bd.mjs");
+      mkdirSync(repo);
+      mkdirSync(beadsRepo, { recursive: true });
+      writeFileSync(
+        specFile,
+        "## Design contract\n`kb.findRevertCandidates@1`\n",
+      );
+      writeFileSync(
+        bd,
+        `#!/usr/bin/env node
+const command = process.argv[2];
+if (command === "export") {
+  process.stdout.write([
+    JSON.stringify({ id: "bd-a", title: "A", status: "open" }),
+    JSON.stringify({ id: "bd-b", title: "B", status: "open" }),
+  ].join("\\n") + "\\n");
+} else if (command === "show") {
+  process.stdout.write(JSON.stringify([
+    { id: "bd-a", title: "A", status: "open" },
+    { id: "bd-b", title: "B", status: "open" }
+  ]));
+} else {
+  process.exitCode = 2;
+}
+`,
+      );
+      chmodSync(bd, 0o755);
+
+      const result = await cliWith(
+        { prismHome },
+        "beads-dag",
+        "--repo",
+        repo,
+        "--out",
+        out,
+        "--bd-bin",
+        bd,
+        "--spec-file",
+        specFile,
+      );
+      expect(result.code).toBe(0);
+      const graph = JSON.parse(readFileSync(out, "utf8")) as {
+        nodes: Record<
+          string,
+          {
+            config?: {
+              value?: { specDocument?: { source?: string; content?: string } };
+            };
+          }
+        >;
+      };
+      for (const contextNodeId of ["context-bd-a", "context-bd-b"]) {
+        expect(graph.nodes[contextNodeId]?.config?.value?.specDocument).toEqual(
+          {
+            source: specFile,
+            content: "## Design contract\n`kb.findRevertCandidates@1`\n",
+          },
+        );
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("beads-dag reports an unreadable spec file before running bd", async () => {
+    const result = await cli(
+      "beads-dag",
+      "--out",
+      "unused.json",
+      "--spec-file",
+      join(tmpdir(), "prism-missing-spec-file.md"),
+    );
+    expect(result.code).toBe(2);
+    expect(result.stderr).toContain("cannot generate Beads DAG");
+    expect(result.stderr).toContain("cannot read spec file");
+  });
+
   test("beads-dag rejects a Greptile app selector for another reviewer", async () => {
     const result = await cli(
       "beads-dag",

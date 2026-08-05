@@ -45,7 +45,22 @@ export interface BeadsReviewConfig {
   readonly triggerComment?: string;
 }
 
+/**
+ * A spec/RFC document frozen verbatim into every generated context node.
+ * Workers cannot read the Beads database or repository docs at task time —
+ * the graph node is their entire context — so a bead that merely names its
+ * spec hands the worker a name, not the contracts. Embedding the document
+ * makes the contracts reach the worker even when a bead paraphrases them.
+ */
+export interface BeadsSpecDocument {
+  /** Provenance, e.g. the file path the content was read from. */
+  readonly source?: string;
+  readonly content: string;
+}
+
 export interface BeadsGraphOptions {
+  /** Spec document embedded into every context node as `specDocument`. */
+  readonly spec?: BeadsSpecDocument;
   /** Branch PRs target. Default "main". */
   readonly targetBranch?: string;
   /** Review gate for every implement node. Default "none". */
@@ -145,6 +160,18 @@ export function buildBeadsGraph(
   const mergeValidationCommands = options?.mergeValidationCommands;
   const serializeMerges = options?.serializeMerges ?? true;
   const includeBeadsUpdate = options?.includeBeadsUpdate ?? true;
+  const spec = options?.spec;
+  if (spec !== undefined) {
+    if (typeof spec.content !== "string" || spec.content.trim().length === 0) {
+      throw new Error("spec.content must be a non-empty string");
+    }
+    if (
+      spec.source !== undefined &&
+      (typeof spec.source !== "string" || spec.source.trim().length === 0)
+    ) {
+      throw new Error("spec.source must be a non-empty string when present");
+    }
+  }
   validateOptions(
     targetBranch,
     review,
@@ -226,7 +253,7 @@ export function buildBeadsGraph(
       executor: "constant",
       kind: "task",
       dependsOn: [],
-      config: { value: beadContext(plan.bead, plan.dependencies) },
+      config: { value: beadContext(plan.bead, plan.dependencies, spec) },
     };
     const workItem = {
       provider: "beads",
@@ -333,7 +360,11 @@ export function buildBeadsGraph(
   return { version: 1, nodes, finalNode };
 }
 
-function beadContext(bead: Bead, dependencies: readonly string[]): JsonValue {
+function beadContext(
+  bead: Bead,
+  dependencies: readonly string[],
+  spec?: BeadsSpecDocument,
+): JsonValue {
   const value: unknown = bead;
   if (!isJsonValue(value) || !isPlainObject(value)) {
     throw new Error(`Bead "${bead.id}" must contain only JSON-safe data`);
@@ -344,6 +375,16 @@ function beadContext(bead: Bead, dependencies: readonly string[]): JsonValue {
     id: bead.id,
     url: `beads://${bead.id}`,
     dependencies: [...dependencies],
+    // Spread last so a bead field named specDocument cannot shadow the
+    // shared spec the operator asked to freeze into every node.
+    ...(spec === undefined
+      ? {}
+      : {
+          specDocument: {
+            ...(spec.source === undefined ? {} : { source: spec.source }),
+            content: spec.content,
+          },
+        }),
   };
 }
 

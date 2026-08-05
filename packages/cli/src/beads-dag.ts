@@ -1,4 +1,4 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, extname, resolve } from "node:path";
 import { stringify as stringifyYaml } from "yaml";
 import {
@@ -28,6 +28,11 @@ export interface GenerateBeadsDagOptions {
   /** Undefined means the PRism-py default; null disables status filtering. */
   readonly statuses?: ReadonlySet<string> | null;
   readonly labels?: readonly string[];
+  /**
+   * Spec/RFC document whose full text is frozen into every context node as
+   * `specDocument`, so workers receive the design contracts verbatim.
+   */
+  readonly specFile?: string;
   readonly targetBranch?: string;
   readonly branchPrefix?: string;
   readonly validationCommands?: readonly string[];
@@ -59,6 +64,26 @@ export async function generateBeadsDag(
     options.beadsRepoDir ?? projectPaths.beadsRepoDir ?? repoDir,
   );
   const bdCommand = options.bdCommand ?? "bd";
+  // Read the spec before touching `bd`: an unreadable spec should fail fast
+  // rather than after a full Beads export.
+  let spec: { source: string; content: string } | undefined;
+  if (options.specFile !== undefined) {
+    const specPath = resolve(options.specFile);
+    let content: string;
+    try {
+      content = await readFile(specPath, "utf8");
+    } catch (error: unknown) {
+      throw new Error(
+        `cannot read spec file "${specPath}": ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+    if (content.trim().length === 0) {
+      throw new Error(`spec file "${specPath}" is empty`);
+    }
+    spec = { source: specPath, content };
+  }
   const exported = await runner.run(
     bdCommand,
     ["export", "--no-memories", "--readonly"],
@@ -121,6 +146,7 @@ export async function generateBeadsDag(
         ? "@claude review"
         : undefined);
   const graphOptions: BeadsGraphOptions = {
+    ...(spec === undefined ? {} : { spec }),
     targetBranch: options.targetBranch ?? "main",
     branchPrefix: options.branchPrefix ?? "prism/",
     review: reviewer,
