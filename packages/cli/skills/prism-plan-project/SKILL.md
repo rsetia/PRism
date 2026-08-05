@@ -128,9 +128,34 @@ has an equivalent structure. Give every implementation Bead:
 - A user- or system-visible title.
 - A description of the outcome, not merely the files to edit.
 - A design section recording important boundaries and tradeoffs.
+- A design contract when a spec applies (see below).
 - Testable acceptance criteria, including relevant failure states.
 - Product and engineering labels appropriate to the work.
 - Priority or estimate when the repository convention uses them.
+
+### Copy design contracts verbatim; never paraphrase them
+
+When the plan derives from a spec, RFC, or design document that names
+interfaces — node, endpoint, or workflow names; input/output schemas; enums;
+table or column names; topology — every interface a Bead touches must appear
+**verbatim** in that Bead under a `Design contract:` heading, with acceptance
+criteria that reference those named interfaces rather than only behaviors.
+
+This is load-bearing, not stylistic: `prism beads-dag` freezes each Bead
+record into its graph node as the worker's entire task context. Workers cannot
+read the spec or the Beads database. A bare `Spec: <name>` reference hands the
+worker a name, not the contracts, and a worker missing the contracts will
+invent its own shapes — passing every behavioral acceptance criterion and
+per-PR review while still violating the spec. Behavioral acceptance testing
+cannot detect this class of drift by construction.
+
+After creating the Beads, run a contract inventory check: list every named
+interface in the spec and confirm each appears verbatim in at least one Bead's
+design contract. Report the coverage to the user. An uncovered interface means
+a missing Bead or a lossy description; fix it before generating the DAG.
+Alternatively (or additionally), pass the spec document itself to
+`prism beads-dag --spec-file <path>` so its full text is frozen into every
+worker's task input alongside the Bead.
 
 Keep tasks independently mergeable. Split work when separate owners could
 implement it without coordinating edits continually. Combine work when the
