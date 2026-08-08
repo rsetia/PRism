@@ -91,6 +91,8 @@ Commands:
   graph <file> [--json]               Print the compiled plan
   beads-dag --out <file> [--repo <path>] [--beads-repo <path>]
             [--greptile-app-slug <slug>] [--spec-file <path>]
+            [--final-pr-base <branch>] [--final-pr-reviewer claude|greptile|none]
+            [--final-pr-validation-command <command>] [--final-pr-draft]
                                       Snapshot Beads into an agent DAG
   run <file> [--json] [--store <db>] [--run-id <id>] [--repo <path>]
              [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
@@ -164,6 +166,12 @@ interface BeadsDagInvocation {
   readonly includeMerge: boolean;
   readonly includeBeadsUpdate: boolean;
   readonly serializeMerges: boolean;
+  readonly finalPrBase: string | undefined;
+  readonly finalPrReviewer: "greptile" | "claude" | "none";
+  readonly finalPrReviewTriggerComment: string | undefined;
+  readonly finalPrValidationCommands: readonly string[];
+  readonly finalPrMaxIterations: number;
+  readonly finalPrDraft: boolean;
 }
 interface ReadInvocation {
   readonly command: "inspect" | "events";
@@ -661,6 +669,10 @@ function parseBeadsDagInvocation(
     "--min-confidence-score",
     "--review-trigger-comment",
     "--greptile-trigger-comment",
+    "--final-pr-base",
+    "--final-pr-reviewer",
+    "--final-pr-review-trigger-comment",
+    "--final-pr-max-iterations",
   ]);
   const repeatedFlags = new Set([
     "--id",
@@ -668,6 +680,7 @@ function parseBeadsDagInvocation(
     "--label",
     "--validation-command",
     "--merge-validation-command",
+    "--final-pr-validation-command",
   ]);
   const switchFlags = new Set([
     "--all-statuses",
@@ -676,6 +689,7 @@ function parseBeadsDagInvocation(
     "--no-merge-nodes",
     "--no-beads-update",
     "--no-serialize-merges",
+    "--final-pr-draft",
   ]);
 
   for (let index = 0; index < args.length; index += 1) {
@@ -722,12 +736,25 @@ function parseBeadsDagInvocation(
   const minConfidenceScore = Number(
     scalar.get("--min-confidence-score") ?? "5",
   );
+  const finalPrReviewer = scalar.get("--final-pr-reviewer") ?? reviewer;
+  if (
+    finalPrReviewer !== "greptile" &&
+    finalPrReviewer !== "claude" &&
+    finalPrReviewer !== "none"
+  ) {
+    return undefined;
+  }
+  const finalPrMaxIterations = Number(
+    scalar.get("--final-pr-max-iterations") ?? String(maxIterations),
+  );
   if (
     !Number.isSafeInteger(maxIterations) ||
     maxIterations < 1 ||
     !Number.isSafeInteger(minConfidenceScore) ||
     minConfidenceScore < 1 ||
-    minConfidenceScore > 5
+    minConfidenceScore > 5 ||
+    !Number.isSafeInteger(finalPrMaxIterations) ||
+    finalPrMaxIterations < 1
   ) {
     return undefined;
   }
@@ -743,6 +770,16 @@ function parseBeadsDagInvocation(
         ),
       );
   if (statuses !== null && statuses.size === 0) {
+    return undefined;
+  }
+  const finalPrBase = scalar.get("--final-pr-base");
+  const hasFinalPrOptions =
+    scalar.has("--final-pr-reviewer") ||
+    scalar.has("--final-pr-review-trigger-comment") ||
+    scalar.has("--final-pr-max-iterations") ||
+    repeated.has("--final-pr-validation-command") ||
+    switches.has("--final-pr-draft");
+  if (finalPrBase === undefined && hasFinalPrOptions) {
     return undefined;
   }
 
@@ -772,6 +809,15 @@ function parseBeadsDagInvocation(
     includeMerge: !switches.has("--no-merge-nodes"),
     includeBeadsUpdate: !switches.has("--no-beads-update"),
     serializeMerges: !switches.has("--no-serialize-merges"),
+    finalPrBase,
+    finalPrReviewer,
+    finalPrReviewTriggerComment: scalar.get(
+      "--final-pr-review-trigger-comment",
+    ),
+    finalPrValidationCommands:
+      repeated.get("--final-pr-validation-command") ?? [],
+    finalPrMaxIterations,
+    finalPrDraft: switches.has("--final-pr-draft"),
   };
 }
 
@@ -1690,6 +1736,21 @@ export async function runCli(
           includeBeadsUpdate:
             invocation.includeMerge && invocation.includeBeadsUpdate,
           serializeMerges: invocation.serializeMerges,
+          ...(invocation.finalPrBase === undefined
+            ? {}
+            : {
+                finalPrBase: invocation.finalPrBase,
+                finalPrReviewer: invocation.finalPrReviewer,
+                ...(invocation.finalPrReviewTriggerComment === undefined
+                  ? {}
+                  : {
+                      finalPrReviewTriggerComment:
+                        invocation.finalPrReviewTriggerComment,
+                    }),
+                finalPrValidationCommands: invocation.finalPrValidationCommands,
+                finalPrMaxIterations: invocation.finalPrMaxIterations,
+                finalPrDraft: invocation.finalPrDraft,
+              }),
         });
         io.stdout(invocation.out);
         return EXIT_SUCCESS;

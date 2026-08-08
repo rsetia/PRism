@@ -47,6 +47,12 @@ export interface GenerateBeadsDagOptions {
   readonly includeMerge?: boolean;
   readonly includeBeadsUpdate?: boolean;
   readonly serializeMerges?: boolean;
+  readonly finalPrBase?: string;
+  readonly finalPrReviewer?: ReviewGate;
+  readonly finalPrReviewTriggerComment?: string;
+  readonly finalPrValidationCommands?: readonly string[];
+  readonly finalPrMaxIterations?: number;
+  readonly finalPrDraft?: boolean;
 }
 
 /**
@@ -145,6 +151,7 @@ export async function generateBeadsDag(
       : reviewer === "claude"
         ? "@claude review"
         : undefined);
+  const finalPrReviewer = options.finalPrReviewer ?? reviewer;
   const graphOptions: BeadsGraphOptions = {
     ...(spec === undefined ? {} : { spec }),
     targetBranch: options.targetBranch ?? "main",
@@ -174,6 +181,31 @@ export async function generateBeadsDag(
     serializeMerges: options.serializeMerges ?? true,
     includeBeadsUpdate: options.includeBeadsUpdate ?? true,
     beadsRepo: beadsRepoDir,
+    ...(options.finalPrBase === undefined
+      ? {}
+      : {
+          finalPullRequest: {
+            targetBranch: options.finalPrBase,
+            review: finalPrReviewer,
+            reviewConfig: {
+              ...(finalPrReviewer === "greptile" &&
+              options.greptileAppSlug !== undefined
+                ? { greptileAppSlug: options.greptileAppSlug }
+                : {}),
+              requireNoActionableFindings:
+                options.requireNoActionableFindings ?? true,
+              requireGreenChecks: options.requireGreenChecks ?? true,
+              ...(options.finalPrReviewTriggerComment === undefined
+                ? {}
+                : { triggerComment: options.finalPrReviewTriggerComment }),
+            },
+            validationCommands: options.finalPrValidationCommands ?? [],
+            ...(options.finalPrMaxIterations === undefined
+              ? {}
+              : { maxIterations: options.finalPrMaxIterations }),
+            draft: options.finalPrDraft ?? false,
+          },
+        }),
   };
   const graph = buildBeadsGraph(graphBeads, graphOptions);
   await writeGraph(options.outFile, graph);
