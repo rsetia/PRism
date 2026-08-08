@@ -13,6 +13,7 @@ import type {
 import type { CodexEngine, CodexExecutorContract } from "./codex-engine.js";
 import {
   codexContractForSpec,
+  parseFinalizePrConfig,
   parseImplementConfig,
   parseMergeResolveConfig,
 } from "./codex-contracts.js";
@@ -248,16 +249,20 @@ export function createCodexExecutor(
 
 function validateExecutorName(
   name: string,
-): asserts name is "implement" | "merge_resolve" {
-  if (name !== "implement" && name !== "merge_resolve") {
+): asserts name is "implement" | "merge_resolve" | "finalize_pr" {
+  if (
+    name !== "implement" &&
+    name !== "merge_resolve" &&
+    name !== "finalize_pr"
+  ) {
     throw new Error(
-      `Codex executor name must be "implement" or "merge_resolve"; received ${JSON.stringify(name)}`,
+      `Codex executor name must be "implement", "merge_resolve", or "finalize_pr"; received ${JSON.stringify(name)}`,
     );
   }
 }
 
 function validateCodexConfig(
-  name: "implement" | "merge_resolve",
+  name: "implement" | "merge_resolve" | "finalize_pr",
   config: JsonValue | undefined,
 ): void {
   switch (name) {
@@ -266,6 +271,9 @@ function validateCodexConfig(
       return;
     case "merge_resolve":
       parseMergeResolveConfig(config);
+      return;
+    case "finalize_pr":
+      parseFinalizePrConfig(config);
       return;
   }
 }

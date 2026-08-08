@@ -51,8 +51,12 @@ trigger `@greptile review` is the default:
 $ cd /path/to/code
 $ prism beads-dag \
     --out "$PRISM_HOME/store/myproject/work.prism.json" \
+    --target-branch prism/myproject-integration \
     --greptile-app-slug greptile-apps \
-    --validation-command "npm test"
+    --validation-command "npm test" \
+    --final-pr-base main \
+    --final-pr-reviewer claude \
+    --final-pr-validation-command "npm run verify"
 
 $ prism run "$PRISM_HOME/store/myproject/work.prism.json"
 $ prism watch
@@ -70,6 +74,13 @@ by default. It includes `open`, `in_progress`, and `blocked` work unless
 greptile|claude|none` to choose the gate, `--greptile-app-slug` to restrict
 Greptile feedback to one GitHub App identity, and `--no-merge-nodes`,
 `--no-beads-update`, or `--no-serialize-merges` to alter the generated DAG.
+Add `--final-pr-base <branch>` to append a terminal integration-PR node. It
+opens or reuses a pull request from `--target-branch` to that base, runs the
+selected reviewer and repeatable `--final-pr-validation-command` checks on the
+current head, fixes and pushes actionable findings, and leaves the approved PR
+open for a human to merge. Choose its gate with `--final-pr-reviewer
+claude|greptile|none`; use `--final-pr-draft` when the final PR should remain a
+draft.
 
 The same selector can be applied globally at execution time with
 `prism run <graph> --greptile-app-slug greptile-apps`. Prism rejects the flag

@@ -304,6 +304,49 @@ describe("buildBeadsGraph", () => {
     });
   });
 
+  test("can append a reviewed final integration PR gate", () => {
+    const graph = buildBeadsGraph([bead("A"), bead("B")], {
+      targetBranch: "prism/integration",
+      finalPullRequest: {
+        targetBranch: "main",
+        review: "claude",
+        reviewConfig: {
+          triggerComment: "@claude review",
+          requireNoActionableFindings: true,
+          requireGreenChecks: true,
+        },
+        validationCommands: ["npm run verify"],
+        draft: false,
+      },
+    });
+    expect(graph.finalNode).toBe("finalize-integration-pr");
+    expect(graph.nodes["finalize-integration-pr"]).toMatchObject({
+      executor: "finalize_pr",
+      dependsOn: ["beads-final"],
+      config: {
+        sourceBranch: "prism/integration",
+        targetBranch: "main",
+        review: {
+          by: "claude",
+          triggerComment: "@claude review",
+          requireGreenChecks: true,
+        },
+        validationCommands: ["npm run verify"],
+        draft: false,
+      },
+    });
+    expect(compileGraph(graph).ok).toBe(true);
+  });
+
+  test("rejects a final PR whose base is the integration branch", () => {
+    expect(() =>
+      buildBeadsGraph([bead("A")], {
+        targetBranch: "main",
+        finalPullRequest: { targetBranch: "main", review: "claude" },
+      }),
+    ).toThrow("must differ");
+  });
+
   test("the default generated graph runs with its documented executors", async () => {
     const implementInputs = new Map<string, readonly JsonValue[]>();
     const implement: ExecutorDefinition = {

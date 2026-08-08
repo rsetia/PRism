@@ -331,10 +331,21 @@ if (command === "export") {
         "--greptile-app-slug",
         "greptile-apps",
         "--no-beads-update",
+        "--target-branch",
+        "prism/integration",
+        "--final-pr-base",
+        "main",
+        "--final-pr-reviewer",
+        "claude",
+        "--final-pr-review-trigger-comment",
+        "@claude review",
+        "--final-pr-validation-command",
+        "npm run verify",
       );
-      expect(result.code).toBe(0);
+      expect(result.code, result.stderr).toBe(0);
       expect(result.stdout.trim()).toBe(out);
       const graph = JSON.parse(readFileSync(out, "utf8")) as {
+        finalNode?: string;
         nodes: Record<
           string,
           {
@@ -370,6 +381,17 @@ if (command === "export") {
           ?.allowConfidenceFourWithoutActionableFindings,
       ).toBeUndefined();
       expect(graph.nodes["merge-bd-a"]?.executor).toBe("merge_resolve");
+      expect(graph.nodes["finalize-integration-pr"]).toMatchObject({
+        executor: "finalize_pr",
+        config: {
+          sourceBranch: "prism/integration",
+          targetBranch: "main",
+          review: { by: "claude", triggerComment: "@claude review" },
+          validationCommands: ["npm run verify"],
+          draft: false,
+        },
+      });
+      expect(graph.finalNode).toBe("finalize-integration-pr");
       expect(graph.nodes["implement-bd-closed"]).toBeUndefined();
     } finally {
       rmSync(root, { recursive: true, force: true });
