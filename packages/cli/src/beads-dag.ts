@@ -141,8 +141,12 @@ export async function generateBeadsDag(
     ),
   }));
   const reviewer = options.reviewer ?? "greptile";
-  if (options.greptileAppSlug !== undefined && reviewer !== "greptile") {
-    throw new Error('greptileAppSlug requires reviewer to be "greptile"');
+  const finalPrReviewer = options.finalPrReviewer ?? reviewer;
+  const usesGreptile =
+    reviewer === "greptile" ||
+    (options.finalPrBase !== undefined && finalPrReviewer === "greptile");
+  if (options.greptileAppSlug !== undefined && !usesGreptile) {
+    throw new Error('greptileAppSlug requires a "greptile" reviewer');
   }
   const reviewTriggerComment =
     options.reviewTriggerComment ??
@@ -151,7 +155,12 @@ export async function generateBeadsDag(
       : reviewer === "claude"
         ? "@claude review"
         : undefined);
-  const finalPrReviewer = options.finalPrReviewer ?? reviewer;
+  // The final PR gate inherits the implement-gate review policy unless it is
+  // overridden per-flag; a custom trigger comment only carries over when both
+  // gates use the same reviewer.
+  const finalPrTriggerComment =
+    options.finalPrReviewTriggerComment ??
+    (finalPrReviewer === reviewer ? reviewTriggerComment : undefined);
   const graphOptions: BeadsGraphOptions = {
     ...(spec === undefined ? {} : { spec }),
     targetBranch: options.targetBranch ?? "main",
@@ -188,16 +197,20 @@ export async function generateBeadsDag(
             targetBranch: options.finalPrBase,
             review: finalPrReviewer,
             reviewConfig: {
-              ...(finalPrReviewer === "greptile" &&
-              options.greptileAppSlug !== undefined
-                ? { greptileAppSlug: options.greptileAppSlug }
+              ...(finalPrReviewer === "greptile"
+                ? {
+                    minConfidenceScore: options.minConfidenceScore ?? 5,
+                    ...(options.greptileAppSlug === undefined
+                      ? {}
+                      : { greptileAppSlug: options.greptileAppSlug }),
+                  }
                 : {}),
               requireNoActionableFindings:
                 options.requireNoActionableFindings ?? true,
               requireGreenChecks: options.requireGreenChecks ?? true,
-              ...(options.finalPrReviewTriggerComment === undefined
+              ...(finalPrTriggerComment === undefined
                 ? {}
-                : { triggerComment: options.finalPrReviewTriggerComment }),
+                : { triggerComment: finalPrTriggerComment }),
             },
             validationCommands: options.finalPrValidationCommands ?? [],
             ...(options.finalPrMaxIterations === undefined

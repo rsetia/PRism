@@ -393,6 +393,42 @@ if (command === "export") {
       });
       expect(graph.finalNode).toBe("finalize-integration-pr");
       expect(graph.nodes["implement-bd-closed"]).toBeUndefined();
+
+      const inheritedOut = join(root, "graph-inherited.json");
+      const inherited = await cliWith(
+        { prismHome },
+        "beads-dag",
+        "--repo",
+        repo,
+        "--out",
+        inheritedOut,
+        "--bd-bin",
+        bd,
+        "--greptile-app-slug",
+        "greptile-apps",
+        "--min-confidence-score",
+        "3",
+        "--review-trigger-comment",
+        "@greptile-dev review",
+        "--target-branch",
+        "prism/integration",
+        "--final-pr-base",
+        "main",
+      );
+      expect(inherited.code, inherited.stderr).toBe(0);
+      const inheritedGraph = JSON.parse(
+        readFileSync(inheritedOut, "utf8"),
+      ) as typeof graph;
+      // The final PR gate inherits the implement-gate review policy when the
+      // reviewers match.
+      expect(
+        inheritedGraph.nodes["finalize-integration-pr"]?.config?.review,
+      ).toMatchObject({
+        by: "greptile",
+        greptileAppSlug: "greptile-apps",
+        minConfidenceScore: 3,
+        triggerComment: "@greptile-dev review",
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -505,7 +541,7 @@ if (command === "export") {
       "greptile-apps",
     );
     expect(result.code).toBe(2);
-    expect(result.stderr).toContain("graph has no Greptile implement nodes");
+    expect(result.stderr).toContain("graph has no Greptile review nodes");
   });
 
   test("run rejects a selector that conflicts with a graph node", async () => {

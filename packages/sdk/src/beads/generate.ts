@@ -204,7 +204,7 @@ export function buildBeadsGraph(
   );
   const reviewConfig = {
     by: review,
-    ...(review === "greptile" ? { triggerComment: "@greptile review" } : {}),
+    ...defaultTriggerComment(review),
     ...options?.reviewConfig,
     ...(options?.reviewConfig?.greptileAppSlug === undefined
       ? {}
@@ -390,11 +390,7 @@ export function buildBeadsGraph(
       targetBranch: finalPullRequest.targetBranch,
       review: {
         by: finalPullRequest.review,
-        ...(finalPullRequest.review === "greptile"
-          ? { triggerComment: "@greptile review" }
-          : finalPullRequest.review === "claude"
-            ? { triggerComment: "@claude review" }
-            : {}),
+        ...defaultTriggerComment(finalPullRequest.review),
         ...finalPullRequest.reviewConfig,
       },
       ...(finalPullRequest.validationCommands === undefined
@@ -612,6 +608,16 @@ function topologicalPlans<
   return ordered;
 }
 
+function defaultTriggerComment(
+  review: ReviewGate,
+): Readonly<Record<string, string>> {
+  return review === "greptile"
+    ? { triggerComment: "@greptile review" }
+    : review === "claude"
+      ? { triggerComment: "@claude review" }
+      : {};
+}
+
 function slug(value: string): string {
   const normalized = value
     .toLowerCase()
@@ -665,6 +671,11 @@ function validateOptions(
     throw new Error("beadsRepo must be a string when provided");
   }
   if (finalPullRequest !== undefined) {
+    if (!includeMerge) {
+      throw new Error(
+        "finalPullRequest requires includeMerge: without merge nodes no work lands on targetBranch",
+      );
+    }
     if (
       finalPullRequest.review !== "greptile" &&
       finalPullRequest.review !== "claude" &&
@@ -678,7 +689,9 @@ function validateOptions(
     ) {
       throw new Error("finalPullRequest.targetBranch must be non-empty");
     }
-    if (finalPullRequest.targetBranch === targetBranch) {
+    // Trim before comparing: the finalize_pr executor compares trimmed
+    // branches, and this guard must fire at generation time, not run time.
+    if (finalPullRequest.targetBranch.trim() === targetBranch.trim()) {
       throw new Error(
         "finalPullRequest.targetBranch must differ from targetBranch",
       );

@@ -12,9 +12,10 @@ export interface AppliedGreptileAppSlug {
 }
 
 /**
- * Apply one Greptile GitHub App identity to every Greptile implement node.
- * Recompiling returns the same deeply frozen shape that graph loading does,
- * and lets the run store persist the effective policy for later resumes.
+ * Apply one Greptile GitHub App identity to every Greptile-gated node
+ * (implement and finalize_pr). Recompiling returns the same deeply frozen
+ * shape that graph loading does, and lets the run store persist the
+ * effective policy for later resumes.
  */
 export function applyGreptileAppSlug(
   graph: CompiledGraph,
@@ -40,7 +41,10 @@ export function applyGreptileAppSlug(
     }
 
     let config = node.config;
-    if (node.executor === "implement" && isJsonObject(config)) {
+    if (
+      (node.executor === "implement" || node.executor === "finalize_pr") &&
+      isJsonObject(config)
+    ) {
       const review = config["review"];
       if (isJsonObject(review) && review["by"] === "greptile") {
         const configuredSlug = review["greptileAppSlug"];
@@ -50,12 +54,12 @@ export function applyGreptileAppSlug(
             configuredSlug.trim().length === 0
           ) {
             throw new Error(
-              `Greptile implement node ${JSON.stringify(nodeId)} has an invalid review.greptileAppSlug`,
+              `Greptile ${node.executor} node ${JSON.stringify(nodeId)} has an invalid review.greptileAppSlug`,
             );
           }
           if (configuredSlug.trim() !== greptileAppSlug) {
             throw new Error(
-              `Greptile implement node ${JSON.stringify(nodeId)} already selects app slug ${JSON.stringify(configuredSlug.trim())}, which conflicts with ${JSON.stringify(greptileAppSlug)}`,
+              `Greptile ${node.executor} node ${JSON.stringify(nodeId)} already selects app slug ${JSON.stringify(configuredSlug.trim())}, which conflicts with ${JSON.stringify(greptileAppSlug)}`,
             );
           }
         }
@@ -80,7 +84,7 @@ export function applyGreptileAppSlug(
   }
 
   if (nodeIds.length === 0) {
-    throw new Error("graph has no Greptile implement nodes");
+    throw new Error("graph has no Greptile review nodes");
   }
 
   const definition: GraphDefinition = {

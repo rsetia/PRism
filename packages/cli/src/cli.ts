@@ -725,17 +725,6 @@ function parseBeadsDagInvocation(
   if (reviewer !== "greptile" && reviewer !== "claude" && reviewer !== "none") {
     return undefined;
   }
-  const greptileAppSlug = scalar.get("--greptile-app-slug")?.trim();
-  if (
-    (greptileAppSlug !== undefined && greptileAppSlug.length === 0) ||
-    (greptileAppSlug !== undefined && reviewer !== "greptile")
-  ) {
-    return undefined;
-  }
-  const maxIterations = Number(scalar.get("--max-iterations") ?? "8");
-  const minConfidenceScore = Number(
-    scalar.get("--min-confidence-score") ?? "5",
-  );
   const finalPrReviewer = scalar.get("--final-pr-reviewer") ?? reviewer;
   if (
     finalPrReviewer !== "greptile" &&
@@ -744,6 +733,19 @@ function parseBeadsDagInvocation(
   ) {
     return undefined;
   }
+  const greptileAppSlug = scalar.get("--greptile-app-slug")?.trim();
+  if (
+    (greptileAppSlug !== undefined && greptileAppSlug.length === 0) ||
+    (greptileAppSlug !== undefined &&
+      reviewer !== "greptile" &&
+      finalPrReviewer !== "greptile")
+  ) {
+    return undefined;
+  }
+  const maxIterations = Number(scalar.get("--max-iterations") ?? "8");
+  const minConfidenceScore = Number(
+    scalar.get("--min-confidence-score") ?? "5",
+  );
   const finalPrMaxIterations = Number(
     scalar.get("--final-pr-max-iterations") ?? String(maxIterations),
   );

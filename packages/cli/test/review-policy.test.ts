@@ -89,13 +89,44 @@ describe("applyGreptileAppSlug", () => {
     ).toThrow(/first.*invalid/u);
   });
 
-  test("rejects a graph without Greptile implement nodes", () => {
+  test("applies the slug to a Greptile finalize_pr node", () => {
+    const compiled = compileGraph({
+      version: 1,
+      nodes: {
+        work: {
+          executor: "implement",
+          dependsOn: [],
+          config: { review: { by: "claude" } },
+        },
+        "finalize-integration-pr": {
+          executor: "finalize_pr",
+          dependsOn: ["work"],
+          config: {
+            sourceBranch: "prism/integration",
+            targetBranch: "main",
+            review: { by: "greptile" },
+          },
+        },
+      },
+      finalNode: "finalize-integration-pr",
+    });
+    if (!compiled.ok) throw new Error("test graph did not compile");
+    const applied = applyGreptileAppSlug(compiled.graph, "greptile-apps");
+    expect(applied.nodeIds).toEqual(["finalize-integration-pr"]);
+    expect(
+      applied.graph.nodes["finalize-integration-pr"]?.config,
+    ).toMatchObject({
+      review: { by: "greptile", greptileAppSlug: "greptile-apps" },
+    });
+  });
+
+  test("rejects a graph without Greptile review nodes", () => {
     expect(() =>
       applyGreptileAppSlug(
         compiledGraph({ includeGreptile: false }),
         "greptile-apps",
       ),
-    ).toThrow("graph has no Greptile implement nodes");
+    ).toThrow("graph has no Greptile review nodes");
   });
 
   test("rejects a blank requested slug", () => {

@@ -303,13 +303,11 @@ export function buildImplementContract(
     config.branchName === undefined
       ? "Create a focused feature branch with a stable, descriptive name; record its exact name in the result metadata."
       : `Use the feature branch ${quote(config.branchName)}; record that exact branch name in the result metadata.`;
-  const validationInstruction =
-    config.validationCommands === undefined ||
-    config.validationCommands.length === 0
-      ? "Run the repository's relevant validation before every final push."
-      : `Run every configured validation command before every final push, in order: ${config.validationCommands
-          .map(quote)
-          .join(", ")}.`;
+  const validation = validationInstruction(
+    config.validationCommands,
+    "Run the repository's relevant validation before every final push.",
+    "Run every configured validation command before every final push, in order",
+  );
   const maxIterations = config.maxIterations ?? 8;
   const workItemDetails = [
     `provider=${quote(config.workItem.provider)}`,
@@ -334,7 +332,7 @@ Work item:
 Implementation and pull request:
 - Make only changes needed for this work item.
 - ${branchInstruction}
-- ${validationInstruction}
+- ${validation}
 - Commit the completed changes, push the feature branch, and create or update a pull request targeting ${quote(config.targetBranch)}.
 
 Review loop:
@@ -373,13 +371,11 @@ Result:
 export function buildMergeResolveContract(
   config: MergeResolveConfig,
 ): CodexExecutorContract {
-  const validationInstruction =
-    config.validationCommands === undefined ||
-    config.validationCommands.length === 0
-      ? "Run the repository's relevant validation after resolving any conflicts."
-      : `After resolving conflicts, run every validation command in order: ${config.validationCommands
-          .map(quote)
-          .join(", ")}.`;
+  const validation = validationInstruction(
+    config.validationCommands,
+    "Run the repository's relevant validation after resolving any conflicts.",
+    "After resolving conflicts, run every validation command in order",
+  );
   const instructions = `Make the configured feature branch mergeable and merge it through GitHub.
 
 Source and pull request:
@@ -390,7 +386,7 @@ Source and pull request:
 Conflict resolution:
 - If the PR conflicts, fetch origin, check out the feature branch, and rebase it onto ${quote(`origin/${config.targetBranch}`)}.
 - Resolve every conflict semantically: read both sides, preserve their compatible intent, edit the files, stage them, and continue the rebase.
-- ${validationInstruction}
+- ${validation}
 - Push only the rebased feature branch with --force-with-lease, then merge the PR through GitHub using the ${config.mergeMethod ?? "squash"} method.
 - Never direct-push ${quote(config.targetBranch)}. GitHub must perform the final merge so the pull request closes and branch state remains consistent.
 
@@ -416,13 +412,11 @@ Result:
 export function buildFinalizePrContract(
   config: FinalizePrConfig,
 ): CodexExecutorContract {
-  const validationInstruction =
-    config.validationCommands === undefined ||
-    config.validationCommands.length === 0
-      ? "Run the repository's complete relevant validation before every final push."
-      : `Run every configured validation command before every final push, in order: ${config.validationCommands
-          .map(quote)
-          .join(", ")}.`;
+  const validation = validationInstruction(
+    config.validationCommands,
+    "Run the repository's complete relevant validation before every final push.",
+    "Run every configured validation command before every final push, in order",
+  );
   const titleInstruction =
     config.title === undefined
       ? "Derive a concise title from the integration branch commits."
@@ -449,7 +443,7 @@ Branch and pull request:
 - Never merge or close the pull request and never push directly to ${quote(config.targetBranch)}.
 
 Validation and review loop:
-- ${validationInstruction}
+- ${validation}
 ${implementGateInstructions(config.review)}
 - After every push, capture the new head SHA and push time. Ignore stale reviews, comments, and checks from older heads.
 - Fix every current-head actionable integration finding on the temporary worktree branch, rerun validation, commit, and push with an explicit refspec from HEAD to ${quote(config.sourceBranch)}.
@@ -619,6 +613,16 @@ function parseMergeMethod(value: unknown): "squash" | "merge" | "rebase" {
     );
   }
   return value as "squash" | "merge" | "rebase";
+}
+
+function validationInstruction(
+  commands: readonly string[] | undefined,
+  fallback: string,
+  runConfigured: string,
+): string {
+  return commands === undefined || commands.length === 0
+    ? fallback
+    : `${runConfigured}: ${commands.map(quote).join(", ")}.`;
 }
 
 function implementGateInstructions(review: ReviewConfig): string {

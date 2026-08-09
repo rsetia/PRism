@@ -347,6 +347,25 @@ describe("buildBeadsGraph", () => {
     ).toThrow("must differ");
   });
 
+  test("rejects a final PR whose base matches the integration branch after trimming", () => {
+    expect(() =>
+      buildBeadsGraph([bead("A")], {
+        targetBranch: "main ",
+        finalPullRequest: { targetBranch: "main", review: "claude" },
+      }),
+    ).toThrow("must differ");
+  });
+
+  test("rejects a final PR without merge nodes", () => {
+    expect(() =>
+      buildBeadsGraph([bead("A")], {
+        targetBranch: "prism/integration",
+        includeMerge: false,
+        finalPullRequest: { targetBranch: "main", review: "claude" },
+      }),
+    ).toThrow("finalPullRequest requires includeMerge");
+  });
+
   test("the default generated graph runs with its documented executors", async () => {
     const implementInputs = new Map<string, readonly JsonValue[]>();
     const implement: ExecutorDefinition = {

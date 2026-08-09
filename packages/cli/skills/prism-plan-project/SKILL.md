@@ -335,12 +335,15 @@ for human merge. Use the reviewer selected in section 5 and repeat
 
 Pass `--greptile-app-slug <slug>` here when section 5 selected a particular
 Greptile GitHub App. As an execution-time alternative, `prism run` accepts the
-same flag and applies it to all Greptile implementation nodes. That effective
-graph is persisted, so do not repeat the flag on `prism resume`.
+same flag and applies it to every Greptile-gated node (implementation and the
+final integration PR). That effective graph is persisted, so do not repeat the
+flag on `prism resume`.
 
 Use `--no-beads-update`, `--no-merge-nodes`, or
 `--no-serialize-merges` only when the requested workflow requires that
-behavior.
+behavior. `--no-merge-nodes` cannot be combined with `--final-pr-base`:
+without merge nodes nothing lands on the integration branch, so there is
+nothing for the final pull request to promote.
 
 ## 8. Validate without executing
 
@@ -407,8 +410,15 @@ conversation. Make clear that `prism run` executes the work, `prism watch`
 monitors node state until completion, and `prism logs` shows durable worker
 output. Explain that the final integration pull request promotes the completed
 DAG from the target branch into the base branch. The terminal node creates or
-reuses it, reviews the current head, and never merges it. Do not run the DAG
-unless the user explicitly asks.
+reuses it, reviews the current head, and never merges it. When the graph was
+generated without `--final-pr-base`, no node opens that pull request — end the
+Next steps section with the manual fallback instead of `gh pr view`:
+
+```text
+  gh pr create --repo <owner/repo> --base <base-branch> --head <target-branch> --fill
+```
+
+Do not run the DAG unless the user explicitly asks.
 
 Prism generates the run id. `watch` selects the newest unfinished run and
 `logs` selects the newest run, so the default handoff does not require the
