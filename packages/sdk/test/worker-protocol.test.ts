@@ -62,4 +62,15 @@ describe("parseWorkerPhaseUpdate", () => {
     expect(() => parseWorkerPhaseUpdate(null)).toThrow();
     expect(() => parseWorkerPhaseUpdate({ phase: "thinking" })).toThrow();
   });
+
+  test("rejects orchestrator-only phases a worker must not claim", () => {
+    for (const phase of [
+      "execution",
+      "worktree_setup",
+      "tracker_update",
+      "workspace_cleanup",
+    ]) {
+      expect(() => parseWorkerPhaseUpdate({ phase })).toThrow();
+    }
+  });
 });

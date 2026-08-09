@@ -1,7 +1,7 @@
 import type { JsonValue, NodeKind } from "../graph/types.js";
 import { isJsonValue, isPlainObject } from "../internal/json.js";
 import type { FailureClass } from "../runtime/types.js";
-import { NODE_PHASES, type NodePhase } from "../runtime/events.js";
+import { WORKER_PHASES, type WorkerPhase } from "../runtime/events.js";
 
 /**
  * The file protocol between the orchestrator and a worker subprocess
@@ -57,10 +57,10 @@ export interface Heartbeat {
 
 /** A worker-authored transition to a more specific execution phase. */
 export interface WorkerPhaseUpdate {
-  readonly phase: NodePhase;
+  readonly phase: WorkerPhase;
 }
 
-const NODE_PHASE_SET: ReadonlySet<string> = new Set(NODE_PHASES);
+const WORKER_PHASE_SET: ReadonlySet<string> = new Set(WORKER_PHASES);
 
 const FAILURE_CLASSES: ReadonlySet<FailureClass> = new Set([
   "transient_infra",
@@ -130,9 +130,9 @@ export function parseWorkerPhaseUpdate(input: unknown): WorkerPhaseUpdate {
   if (
     !isPlainObject(input) ||
     typeof input["phase"] !== "string" ||
-    !NODE_PHASE_SET.has(input["phase"])
+    !WORKER_PHASE_SET.has(input["phase"])
   ) {
     throw new Error("Invalid worker phase update");
   }
-  return Object.freeze({ phase: input["phase"] as NodePhase });
+  return Object.freeze({ phase: input["phase"] as WorkerPhase });
 }

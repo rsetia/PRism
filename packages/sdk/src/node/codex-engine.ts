@@ -4,7 +4,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { WorkerResult, WorkerSpec } from "./worker-protocol.js";
-import type { NodePhase } from "../runtime/events.js";
+import { WORKER_PHASES, type NodePhase } from "../runtime/events.js";
 import {
   NODE_DIR_ENV_VAR,
   parseWorkerPhaseUpdate,
@@ -141,10 +141,10 @@ ${input.contract.instructions}
 Worker protocol:
 - Write heartbeat updates to ${input.heartbeatPath} as JSON: {"ts": <epoch-milliseconds>}.
 - Whenever work enters a distinguishable phase, atomically replace ${input.phasePath}
-  with JSON: {"phase":"<phase>"}. Supported worker phases are implementation,
-  validation, pull_request, ci_wait, review_wait, merge_lock_wait,
-  integration_update, conflict_resolution, merge_validation, merge, and
-  finalization. Report only real transitions; do not fabricate phase changes.
+  with JSON: {"phase":"<phase>"}. Supported worker phases are
+  ${WORKER_PHASES.slice(0, -1).join(", ")}, and
+  ${WORKER_PHASES[WORKER_PHASES.length - 1] ?? ""}. Report only real
+  transitions; do not fabricate phase changes.
 - On success, write ${input.resultPath} as JSON:
   {"status":"succeeded","output":<JSON-safe-value>}
 - On failure, write ${input.resultPath} as JSON:
@@ -246,38 +246,51 @@ export function createCodexEngine(
       let settlement: ProcessSettlement | undefined;
       let lastHeartbeat = Date.now();
       let lastPhase: NodePhase | undefined;
-      while (settlement === undefined) {
-        lastPhase = await observeWorkerPhase(
-          phasePath,
-          lastPhase,
-          input.onPhase,
-        );
-        const resultRead = await readWorkerResult(resultPath);
-        if (resultRead.kind === "valid") {
-          await terminateProcess(child, settled, killGraceMs);
-          await outputDrained;
-          return resultRead.result;
-        }
-
-        if (isAborted(input.signal)) {
-          await terminateProcess(child, settled, killGraceMs);
-          await outputDrained;
-          return persistInfrastructureFailure(
-            resultPath,
-            "codex execution was cancelled",
+      try {
+        while (settlement === undefined) {
+          lastPhase = await observeWorkerPhase(
+            phasePath,
+            lastPhase,
+            input.onPhase,
           );
-        }
+          const resultRead = await readWorkerResult(resultPath);
+          if (resultRead.kind === "valid") {
+            await terminateProcess(child, settled, killGraceMs);
+            await outputDrained;
+            return resultRead.result;
+          }
 
-        const now = Date.now();
-        if (now - lastHeartbeat >= heartbeatIntervalMs) {
-          await writeHeartbeat(heartbeatPath);
-          lastHeartbeat = now;
+          if (isAborted(input.signal)) {
+            await terminateProcess(child, settled, killGraceMs);
+            await outputDrained;
+            return persistInfrastructureFailure(
+              resultPath,
+              "codex execution was cancelled",
+            );
+          }
+
+          const now = Date.now();
+          if (now - lastHeartbeat >= heartbeatIntervalMs) {
+            await writeHeartbeat(heartbeatPath);
+            lastHeartbeat = now;
+          }
+          settlement = await waitForProcess(settled, pollIntervalMs);
         }
-        settlement = await waitForProcess(settled, pollIntervalMs);
+      } catch (error: unknown) {
+        // A throwing observation (phase read, phase persistence, heartbeat)
+        // must never leave the codex child running: a retry would launch a
+        // second worker against the same branch while this one keeps going.
+        await terminateProcess(child, settled, killGraceMs);
+        await outputDrained.catch(() => undefined);
+        throw error;
       }
 
       await outputDrained;
-      await observeWorkerPhase(phasePath, lastPhase, input.onPhase);
+      // Best-effort: a failed final phase report must not discard the
+      // worker's completed result.
+      await observeWorkerPhase(phasePath, lastPhase, input.onPhase).catch(
+        () => undefined,
+      );
       const finalResult = await readWorkerResult(resultPath);
       if (finalResult.kind === "valid") {
         return finalResult.result;

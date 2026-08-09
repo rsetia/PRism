@@ -23,6 +23,28 @@ export const NODE_PHASES = Object.freeze([
 export type NodePhase = (typeof NODE_PHASES)[number];
 
 /**
+ * The subset of NODE_PHASES a worker may report. The rest (execution,
+ * worktree_setup, tracker_update, workspace_cleanup) are orchestrator
+ * bookkeeping — accepting them from phase.json would let a confused worker
+ * reclassify its implementation time as orchestrator overhead.
+ */
+export const WORKER_PHASES = Object.freeze([
+  "implementation",
+  "validation",
+  "pull_request",
+  "ci_wait",
+  "review_wait",
+  "merge_lock_wait",
+  "integration_update",
+  "conflict_resolution",
+  "merge_validation",
+  "merge",
+  "finalization",
+] as const satisfies readonly NodePhase[]);
+
+export type WorkerPhase = (typeof WORKER_PHASES)[number];
+
+/**
  * Events are facts: the engine's only way of changing state, and later the
  * persistence format. Discriminated on `kind` so an exhaustive switch with
  * a `never` default catches unhandled kinds at compile time.
