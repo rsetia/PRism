@@ -11,6 +11,7 @@ function ctx(partial?: Partial<ExecutionContext>): ExecutionContext {
     inputs: [],
     signal: new AbortController().signal,
     ...partial,
+    reportPhase: partial?.reportPhase ?? (() => Promise.resolve()),
   };
 }
 

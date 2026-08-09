@@ -1,6 +1,24 @@
 import type { JsonValue } from "../graph/types.js";
 import type { NodeFailure } from "./types.js";
 
+/** Stable phase names used for per-node wall-time attribution. */
+export type NodePhase =
+  | "execution"
+  | "worktree_setup"
+  | "implementation"
+  | "validation"
+  | "pull_request"
+  | "ci_wait"
+  | "review_wait"
+  | "merge_lock_wait"
+  | "integration_update"
+  | "conflict_resolution"
+  | "merge_validation"
+  | "merge"
+  | "tracker_update"
+  | "finalization"
+  | "workspace_cleanup";
+
 /**
  * Events are facts: the engine's only way of changing state, and later the
  * persistence format. Discriminated on `kind` so an exhaustive switch with
@@ -13,6 +31,11 @@ import type { NodeFailure } from "./types.js";
 export type RunEvent =
   | { readonly kind: "node_ready"; readonly nodeId: string }
   | { readonly kind: "node_started"; readonly nodeId: string }
+  | {
+      readonly kind: "node_phase_changed";
+      readonly nodeId: string;
+      readonly phase: NodePhase;
+    }
   | {
       readonly kind: "node_succeeded";
       readonly nodeId: string;

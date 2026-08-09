@@ -153,6 +153,7 @@ export function createCodexExecutor(
       let pendingLogWrites = Promise.resolve();
       let outcome: NodeExecutionOutcome;
       try {
+        await context.reportPhase("worktree_setup");
         workspace = await options.provisioner?.provision({
           runId: context.runId,
           nodeId: context.nodeId,
@@ -178,6 +179,7 @@ export function createCodexExecutor(
           attempt: context.attempt,
         });
 
+        await context.reportPhase(codexExecutionPhase(name));
         const result = await options.engine.execute({
           spec,
           nodeDir,
@@ -226,6 +228,12 @@ export function createCodexExecutor(
         }
       }
 
+      try {
+        await context.reportPhase("workspace_cleanup");
+      } catch (error: unknown) {
+        outcome = infrastructureFailure("PHASE_PERSISTENCE_FAILED", error);
+      }
+
       if (nodeDir !== undefined && explicitNodeDirBase === undefined) {
         await rm(nodeDir, { recursive: true, force: true }).catch(
           () => undefined,
@@ -245,6 +253,19 @@ export function createCodexExecutor(
       return outcome;
     },
   });
+}
+
+function codexExecutionPhase(
+  name: "implement" | "merge_resolve" | "finalize_pr",
+): "implementation" | "integration_update" | "finalization" {
+  switch (name) {
+    case "implement":
+      return "implementation";
+    case "merge_resolve":
+      return "integration_update";
+    case "finalize_pr":
+      return "finalization";
+  }
 }
 
 function validateExecutorName(

@@ -244,6 +244,7 @@ async function invokeExecutor(
   outputs: ReadonlyMap<string, JsonValue>,
   signal: AbortSignal,
   attempt: number,
+  reportPhase: ExecutionContext["reportPhase"],
 ): Promise<SchedulerEvent> {
   const inputs = Object.freeze(
     node.dependsOn.map((dependencyId) => {
@@ -257,7 +258,15 @@ async function invokeExecutor(
   );
   const context: ExecutionContext = Object.freeze(
     node.config === undefined
-      ? { runId, nodeId: node.id, kind: node.kind, attempt, inputs, signal }
+      ? {
+          runId,
+          nodeId: node.id,
+          kind: node.kind,
+          attempt,
+          inputs,
+          signal,
+          reportPhase,
+        }
       : {
           runId,
           nodeId: node.id,
@@ -266,6 +275,7 @@ async function invokeExecutor(
           inputs,
           config: node.config,
           signal,
+          reportPhase,
         },
   );
 
@@ -409,6 +419,8 @@ function replayExecutionState(
           (initial.attempts.get(event.nodeId) ?? 0) + 1,
         );
         break;
+      case "node_phase_changed":
+        break;
       case "node_succeeded":
         initial.outputs.set(event.nodeId, event.output);
         break;
@@ -538,35 +550,40 @@ async function executeRun(
   let cancellationAccepted = execution.hasCancelledNodes;
   let cancellationReason: JsonValue = null;
   let revision = initialRevision;
+  let appendTail = Promise.resolve();
 
-  async function applyEvents(events: readonly RunEvent[]): Promise<void> {
+  function applyEvents(events: readonly RunEvent[]): Promise<void> {
     if (events.length === 0) {
-      return;
+      return Promise.resolve();
     }
 
-    const stagedStates = new Map<string, NodeState>();
-    for (const event of events) {
-      const previous =
-        stagedStates.get(event.nodeId) ?? states.get(event.nodeId);
-      if (previous === undefined) {
-        throw new Error(`event targets unknown node "${event.nodeId}"`);
+    const append = appendTail.then(async () => {
+      const stagedStates = new Map<string, NodeState>();
+      for (const event of events) {
+        const previous =
+          stagedStates.get(event.nodeId) ?? states.get(event.nodeId);
+        if (previous === undefined) {
+          throw new Error(`event targets unknown node "${event.nodeId}"`);
+        }
+        stagedStates.set(event.nodeId, reduceNodeState(previous, event));
       }
-      stagedStates.set(event.nodeId, reduceNodeState(previous, event));
-    }
 
-    const persisted = await store.appendEvents(runId, events, revision);
-    if (persisted.length !== events.length) {
-      throw new Error("store persisted a different number of events");
-    }
-    for (let index = 0; index < persisted.length; index += 1) {
-      if (persisted[index]?.seq !== revision + index) {
-        throw new Error("store returned a non-gapless event sequence");
+      const persisted = await store.appendEvents(runId, events, revision);
+      if (persisted.length !== events.length) {
+        throw new Error("store persisted a different number of events");
       }
-    }
-    revision += persisted.length;
-    for (const [nodeId, state] of stagedStates) {
-      states.set(nodeId, state);
-    }
+      for (let index = 0; index < persisted.length; index += 1) {
+        if (persisted[index]?.seq !== revision + index) {
+          throw new Error("store returned a non-gapless event sequence");
+        }
+      }
+      revision += persisted.length;
+      for (const [nodeId, state] of stagedStates) {
+        states.set(nodeId, state);
+      }
+    });
+    appendTail = append;
+    return append;
   }
 
   async function promoteReadyNodes(): Promise<void> {
@@ -704,6 +721,8 @@ async function executeRun(
           outputs,
           controller.signal,
           attempt,
+          (phase) =>
+            applyEvents([{ kind: "node_phase_changed", nodeId, phase }]),
         ),
       );
     }

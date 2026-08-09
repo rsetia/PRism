@@ -165,6 +165,32 @@ describe("createEngine", () => {
     ]);
   });
 
+  test("persists executor-reported phases before node completion", async () => {
+    const phased: ExecutorDefinition = {
+      name: "phased",
+      async execute(context) {
+        await context.reportPhase("validation");
+        return { status: "succeeded", output: null };
+      },
+    };
+    const graph = buildGraph({
+      version: 1,
+      nodes: { work: { executor: "phased" } },
+      finalNode: "work",
+    });
+    const handle = engineWith([phased]).run(graph);
+    const phases: string[] = [];
+    for await (const event of handle.events) {
+      if (event.kind === "node_phase_changed") phases.push(event.phase);
+    }
+
+    expect(phases).toEqual(["validation"]);
+    await expect(handle.result).resolves.toEqual({
+      status: "succeeded",
+      output: null,
+    });
+  });
+
   test("a failed node fails the run with originating failures only", async () => {
     const graph = buildGraph({
       version: 1,

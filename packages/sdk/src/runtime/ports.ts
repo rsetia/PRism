@@ -1,5 +1,6 @@
 import type { CompiledGraph, JsonValue, NodeKind } from "../graph/types.js";
 import type { PersistedRunEvent, RunEvent } from "./events.js";
+import type { NodePhase } from "./events.js";
 import type { FailureClass } from "./types.js";
 import type { RunOutcome } from "./types.js";
 
@@ -44,6 +45,8 @@ export interface ExecutionContext {
    * EngineOptions.cancelGracePeriodMs.
    */
   readonly signal: AbortSignal;
+  /** Persist a transition to a named execution phase for timing attribution. */
+  readonly reportPhase: (phase: NodePhase) => Promise<void>;
 }
 
 /**

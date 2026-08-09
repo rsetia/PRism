@@ -10,7 +10,7 @@ import type {
   CommandRunner,
   RunCommandOptions,
 } from "../src/node/index.js";
-import type { ExecutionContext, JsonValue } from "../src/index.js";
+import type { ExecutionContext, JsonValue, NodePhase } from "../src/index.js";
 
 interface Recorded {
   readonly command: string;
@@ -49,6 +49,7 @@ function fakeRunner(stubs: readonly Stub[]): {
 function ctx(
   config: JsonValue,
   inputs: readonly JsonValue[] = [],
+  phases?: NodePhase[],
 ): ExecutionContext {
   return {
     runId: "r",
@@ -58,6 +59,10 @@ function ctx(
     inputs,
     config,
     signal: new AbortController().signal,
+    reportPhase(phase) {
+      phases?.push(phase);
+      return Promise.resolve();
+    },
   };
 }
 
@@ -232,15 +237,20 @@ describe("createMergePrExecutor", () => {
         result: { exitCode: 2, stdout: "", stderr: "tests failed" },
       },
     ]);
+    const phases: NodePhase[] = [];
     const outcome = await createMergePrExecutor({
       runner,
       cwd: "/repo",
     }).execute(
-      ctx({
-        targetBranch: "main",
-        sourceBranch: "feature-x",
-        validationCommands: ['npm run "test unit"'],
-      }),
+      ctx(
+        {
+          targetBranch: "main",
+          sourceBranch: "feature-x",
+          validationCommands: ['npm run "test unit"'],
+        },
+        [],
+        phases,
+      ),
     );
     expect(outcome.status).toBe("failed");
     if (outcome.status === "failed") {
@@ -252,6 +262,7 @@ describe("createMergePrExecutor", () => {
       options: { cwd: "/repo" },
     });
     expect(calls.some((call) => call.args[1] === "merge")).toBe(false);
+    expect(phases).toEqual(["pull_request", "validation"]);
   });
 
   test("classifies gh lookup and launch failures as transient infrastructure", async () => {
@@ -288,14 +299,16 @@ describe("createBeadsUpdateExecutor", () => {
   test("runs bd update and succeeds", async () => {
     const { runner, calls } = fakeRunner([]);
     const executor = createBeadsUpdateExecutor({ runner });
+    const phases: NodePhase[] = [];
     const outcome = await executor.execute(
-      ctx({ beadId: "MC-1", status: "closed" }),
+      ctx({ beadId: "MC-1", status: "closed" }, [], phases),
     );
     expect(outcome).toEqual({
       status: "succeeded",
       output: { beadId: "MC-1", status: "closed" },
     });
     expect(calls[0]?.args).toEqual(["update", "MC-1", "--status", "closed"]);
+    expect(phases).toEqual(["tracker_update"]);
   });
 
   test("a bd failure is retryable transient_infra", async () => {

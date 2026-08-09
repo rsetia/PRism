@@ -47,7 +47,14 @@ async function createStoredRun(
   runId: string,
   events: readonly RunEvent[],
 ): Promise<RunStore> {
-  const store = createMemoryStore();
+  let timestampMs = 0;
+  const store = createMemoryStore({
+    now: () => {
+      const current = timestampMs;
+      timestampMs += 10;
+      return current;
+    },
+  });
   await store.createRun({ runId, graph });
   await store.appendEvents(runId, events);
   return store;
@@ -104,7 +111,9 @@ describe("inspectRun", () => {
 
     const inspection = await inspectRun(store, "preflight");
     expect(inspection.finished).toBe(true);
-    expect(inspection.nodes).toEqual([{ nodeId: "ghost", state: "pending" }]);
+    expect(inspection.nodes).toEqual([
+      { nodeId: "ghost", state: "pending", timing: null },
+    ]);
     expect(inspection.failures).toEqual([
       {
         nodeId: "ghost",
@@ -214,6 +223,66 @@ describe("inspectRun", () => {
     expect(Object.isFrozen(inspection.nodes)).toBe(true);
     expect(Object.isFrozen(inspection.nodes[0])).toBe(true);
     expect(Object.isFrozen(inspection.failures)).toBe(true);
+  });
+
+  test("attributes node wall time across queue and reported phases", async () => {
+    const graph = buildGraph({
+      version: 1,
+      nodes: { work: { executor: "constant", config: { value: null } } },
+      finalNode: "work",
+    });
+    const store = await createStoredRun(graph, "timed", [
+      { kind: "node_ready", nodeId: "work" },
+      { kind: "node_started", nodeId: "work" },
+      {
+        kind: "node_phase_changed",
+        nodeId: "work",
+        phase: "validation",
+      },
+      { kind: "node_succeeded", nodeId: "work", output: null },
+    ]);
+
+    const inspection = await inspectRun(store, "timed");
+    expect(inspection.nodes[0]?.timing).toEqual({
+      startedAtMs: 0,
+      completedAtMs: 30,
+      totalDurationMs: 30,
+      attributedDurationMs: 30,
+      unattributedDurationMs: 0,
+      phases: [
+        { phase: "dependency_wait", durationMs: 0 },
+        { phase: "scheduler_queue", durationMs: 10 },
+        { phase: "execution", durationMs: 10 },
+        { phase: "validation", durationMs: 10 },
+      ],
+    });
+  });
+
+  test("reports timing as unavailable for legacy timestamp-free logs", async () => {
+    const graph = buildGraph({
+      version: 1,
+      nodes: { work: { executor: "constant", config: { value: null } } },
+      finalNode: "work",
+    });
+    const base = await createStoredRun(graph, "legacy-timing", [
+      { kind: "node_ready", nodeId: "work" },
+      { kind: "node_started", nodeId: "work" },
+      { kind: "node_succeeded", nodeId: "work", output: null },
+    ]);
+    const legacy: RunStore = {
+      ...base,
+      readEvents(runId, fromSeq) {
+        const source = base.readEvents(runId, fromSeq);
+        return (async function* withoutTimestamps() {
+          for await (const event of source) {
+            yield { ...event, timestampMs: null };
+          }
+        })();
+      },
+    };
+
+    const inspection = await inspectRun(legacy, "legacy-timing");
+    expect(inspection.nodes[0]?.timing).toBeNull();
   });
 
   test("surfaces an event targeting an unknown node", async () => {

@@ -29,9 +29,9 @@ function inspection(): RunInspection {
     runId: "run-dashboard",
     finished: false,
     nodes: [
-      { nodeId: "context", state: "succeeded" },
-      { nodeId: "implement", state: "running" },
-      { nodeId: "review", state: "pending" },
+      { nodeId: "context", state: "succeeded", timing: null },
+      { nodeId: "implement", state: "running", timing: null },
+      { nodeId: "review", state: "pending", timing: null },
     ],
     failures: [],
   };
@@ -73,9 +73,9 @@ describe("watch dashboard", () => {
       runId: "failed-run",
       finished: true,
       nodes: [
-        { nodeId: "context", state: "succeeded" },
-        { nodeId: "implement", state: "failed" },
-        { nodeId: "review", state: "blocked" },
+        { nodeId: "context", state: "succeeded", timing: null },
+        { nodeId: "implement", state: "failed", timing: null },
+        { nodeId: "review", state: "blocked", timing: null },
       ],
       failures: [
         {
@@ -123,6 +123,7 @@ describe("watch dashboard", () => {
       nodes: compiled.graph.order.map((nodeId) => ({
         nodeId,
         state: states.get(nodeId) ?? "pending",
+        timing: null,
       })),
       failures: [],
     };
@@ -166,6 +167,7 @@ describe("watch dashboard", () => {
       nodes: compiled.graph.order.map((nodeId) => ({
         nodeId,
         state: states.get(nodeId) ?? "pending",
+        timing: null,
       })),
       failures: [],
     };
