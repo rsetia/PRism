@@ -51,8 +51,12 @@ trigger `@greptile review` is the default:
 $ cd /path/to/code
 $ prism beads-dag \
     --out "$PRISM_HOME/store/myproject/work.prism.json" \
+    --target-branch prism/myproject-integration \
     --greptile-app-slug greptile-apps \
-    --validation-command "npm test"
+    --validation-command "npm test" \
+    --final-pr-base main \
+    --final-pr-reviewer claude \
+    --final-pr-validation-command "npm run verify"
 
 $ prism run "$PRISM_HOME/store/myproject/work.prism.json"
 $ prism watch
@@ -70,10 +74,22 @@ by default. It includes `open`, `in_progress`, and `blocked` work unless
 greptile|claude|none` to choose the gate, `--greptile-app-slug` to restrict
 Greptile feedback to one GitHub App identity, and `--no-merge-nodes`,
 `--no-beads-update`, or `--no-serialize-merges` to alter the generated DAG.
+Add `--final-pr-base <branch>` to append a terminal integration-PR node. It
+opens or reuses a pull request from `--target-branch` to that base, runs the
+selected reviewer and repeatable `--final-pr-validation-command` checks on the
+current head, fixes and pushes actionable findings, and leaves the approved PR
+open for a human to merge. Choose its gate with `--final-pr-reviewer
+claude|greptile|none`; use `--final-pr-draft` when the final PR should remain a
+draft. `--final-pr-base` cannot be combined with `--no-merge-nodes`: without
+merge nodes nothing lands on the integration branch to promote. The final PR
+gate inherits `--min-confidence-score` and `--review-trigger-comment` when its
+reviewer matches `--reviewer`; override the trigger with
+`--final-pr-review-trigger-comment`.
 
 The same selector can be applied globally at execution time with
-`prism run <graph> --greptile-app-slug greptile-apps`. Prism rejects the flag
-when the graph has no Greptile implementation nodes or a node selects a
+`prism run <graph> --greptile-app-slug greptile-apps`. It covers every
+Greptile-gated node, including the final integration PR. Prism rejects the
+flag when the graph has no Greptile review nodes or a node selects a
 different app. The effective graph is saved in the run store, so `resume`
 does not accept or need the flag. Without a selector, existing broad Greptile
 review behavior is unchanged. App filtering is enforced by the Codex worker's

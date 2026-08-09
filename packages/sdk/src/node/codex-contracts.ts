@@ -57,6 +57,17 @@ export interface MergeResolveConfig {
   readonly validationCommands?: readonly string[];
 }
 
+export interface FinalizePrConfig {
+  readonly sourceBranch: string;
+  readonly targetBranch: string;
+  readonly review: ReviewConfig;
+  readonly draft?: boolean;
+  readonly title?: string;
+  readonly body?: string;
+  readonly maxIterations?: number;
+  readonly validationCommands?: readonly string[];
+}
+
 /**
  * Validate and extract a node's config for `implement`. Doubles as the
  * executor's preflight `validateConfig` (throws on anything invalid).
@@ -210,6 +221,52 @@ export function parseMergeResolveConfig(
   });
 }
 
+/** Validate the final integration-PR review loop configuration. */
+export function parseFinalizePrConfig(
+  config: JsonValue | undefined,
+): FinalizePrConfig {
+  const value = expectObject(config, "config");
+  const sourceBranch = expectNonEmptyString(
+    value["sourceBranch"],
+    "config.sourceBranch",
+  );
+  const targetBranch = expectNonEmptyString(
+    value["targetBranch"],
+    "config.targetBranch",
+  );
+  if (sourceBranch === targetBranch) {
+    throw new Error("config.sourceBranch must differ from config.targetBranch");
+  }
+  const shared = parseImplementConfig({
+    workItem: { provider: "prism", id: "final-integration-pr" },
+    targetBranch,
+    review: value["review"] as JsonValue,
+    ...(value["maxIterations"] === undefined
+      ? {}
+      : { maxIterations: value["maxIterations"] as JsonValue }),
+    ...(value["validationCommands"] === undefined
+      ? {}
+      : { validationCommands: value["validationCommands"] as JsonValue }),
+  });
+  const draft = optionalBoolean(value["draft"], "config.draft");
+  const title = optionalNonEmptyString(value["title"], "config.title");
+  const body = optionalNonEmptyString(value["body"], "config.body");
+  return Object.freeze({
+    sourceBranch,
+    targetBranch,
+    review: shared.review,
+    ...(draft === undefined ? {} : { draft }),
+    ...(title === undefined ? {} : { title }),
+    ...(body === undefined ? {} : { body }),
+    ...(shared.maxIterations === undefined
+      ? {}
+      : { maxIterations: shared.maxIterations }),
+    ...(shared.validationCommands === undefined
+      ? {}
+      : { validationCommands: shared.validationCommands }),
+  });
+}
+
 /**
  * Build the `implement` contract (plan §15, ported from PRism-py
  * executors.py `task/implement`).
@@ -246,13 +303,11 @@ export function buildImplementContract(
     config.branchName === undefined
       ? "Create a focused feature branch with a stable, descriptive name; record its exact name in the result metadata."
       : `Use the feature branch ${quote(config.branchName)}; record that exact branch name in the result metadata.`;
-  const validationInstruction =
-    config.validationCommands === undefined ||
-    config.validationCommands.length === 0
-      ? "Run the repository's relevant validation before every final push."
-      : `Run every configured validation command before every final push, in order: ${config.validationCommands
-          .map(quote)
-          .join(", ")}.`;
+  const validation = validationInstruction(
+    config.validationCommands,
+    "Run the repository's relevant validation before every final push.",
+    "Run every configured validation command before every final push, in order",
+  );
   const maxIterations = config.maxIterations ?? 8;
   const workItemDetails = [
     `provider=${quote(config.workItem.provider)}`,
@@ -277,7 +332,7 @@ Work item:
 Implementation and pull request:
 - Make only changes needed for this work item.
 - ${branchInstruction}
-- ${validationInstruction}
+- ${validation}
 - Commit the completed changes, push the feature branch, and create or update a pull request targeting ${quote(config.targetBranch)}.
 
 Review loop:
@@ -316,13 +371,11 @@ Result:
 export function buildMergeResolveContract(
   config: MergeResolveConfig,
 ): CodexExecutorContract {
-  const validationInstruction =
-    config.validationCommands === undefined ||
-    config.validationCommands.length === 0
-      ? "Run the repository's relevant validation after resolving any conflicts."
-      : `After resolving conflicts, run every validation command in order: ${config.validationCommands
-          .map(quote)
-          .join(", ")}.`;
+  const validation = validationInstruction(
+    config.validationCommands,
+    "Run the repository's relevant validation after resolving any conflicts.",
+    "After resolving conflicts, run every validation command in order",
+  );
   const instructions = `Make the configured feature branch mergeable and merge it through GitHub.
 
 Source and pull request:
@@ -333,7 +386,7 @@ Source and pull request:
 Conflict resolution:
 - If the PR conflicts, fetch origin, check out the feature branch, and rebase it onto ${quote(`origin/${config.targetBranch}`)}.
 - Resolve every conflict semantically: read both sides, preserve their compatible intent, edit the files, stage them, and continue the rebase.
-- ${validationInstruction}
+- ${validation}
 - Push only the rebased feature branch with --force-with-lease, then merge the PR through GitHub using the ${config.mergeMethod ?? "squash"} method.
 - Never direct-push ${quote(config.targetBranch)}. GitHub must perform the final merge so the pull request closes and branch state remains consistent.
 
@@ -355,6 +408,65 @@ Result:
   });
 }
 
+/** Build the current-head review/fix loop for the final integration PR. */
+export function buildFinalizePrContract(
+  config: FinalizePrConfig,
+): CodexExecutorContract {
+  const validation = validationInstruction(
+    config.validationCommands,
+    "Run the repository's complete relevant validation before every final push.",
+    "Run every configured validation command before every final push, in order",
+  );
+  const titleInstruction =
+    config.title === undefined
+      ? "Derive a concise title from the integration branch commits."
+      : `Use ${quote(config.title)} as the pull request title.`;
+  const bodyInstruction =
+    config.body === undefined
+      ? "Create a structured body summarizing the integrated work, motivation, user impact, and validation."
+      : `Use this configured pull request body: ${quote(config.body)}.`;
+  const draftInstruction =
+    config.draft === true
+      ? "Keep the pull request in draft state."
+      : "Ensure the pull request is ready for review, not a draft.";
+  const maxIterations = config.maxIterations ?? 8;
+
+  const instructions = `Finalize the completed integration branch through a reviewed pull request without merging it.
+
+Branch and pull request:
+- The completed integration branch is ${quote(config.sourceBranch)} and the base branch is ${quote(config.targetBranch)}.
+- Fetch both remote branches. In the provided isolated worktree, make the current temporary branch exactly match ${quote(`origin/${config.sourceBranch}`)}. Do not create a parallel feature branch.
+- Open or reuse the pull request whose head is ${quote(config.sourceBranch)} and whose base is ${quote(config.targetBranch)}.
+- ${titleInstruction}
+- ${bodyInstruction}
+- ${draftInstruction}
+- Never merge or close the pull request and never push directly to ${quote(config.targetBranch)}.
+
+Validation and review loop:
+- ${validation}
+${implementGateInstructions(config.review)}
+- After every push, capture the new head SHA and push time. Ignore stale reviews, comments, and checks from older heads.
+- Fix every current-head actionable integration finding on the temporary worktree branch, rerun validation, commit, and push with an explicit refspec from HEAD to ${quote(config.sourceBranch)}.
+- Re-request review after each fix push because approval for an older head is stale.
+- Perform at most ${String(maxIterations)} fix/review iterations. If the limit is reached, fail with failureClass "manual_review_required".
+- Succeed only when the current head has the configured review verdict and required green checks. Leave the reviewed pull request open for human merge.
+
+Result:
+- On success, write result.json through the worker protocol as {"status":"succeeded","output":{"summary":"<concise finalization summary>","metadata":{"branch":${quote(config.sourceBranch)},"pr_number":<number>,"head_sha":"<final head SHA>","review_state":"<approved|pending|null>","ready_for_human_merge":true}}}.`;
+
+  return freezeContract({
+    instructions,
+    dangerouslyBypassApprovalsAndSandbox: true,
+    allowsGitMutation: true,
+    allowsGitHubIo: true,
+    extraRules: Object.freeze([
+      ...implementExtraRules(config.review),
+      `Operate only on integration branch ${config.sourceBranch} and base branch ${config.targetBranch}.`,
+      "Never merge the final integration pull request; success means reviewed and ready for a human merge.",
+    ]),
+  });
+}
+
 /**
  * Dispatch a worker spec to its codex contract, parsing config along the
  * way. This is what a codex worker entry calls to turn spec.executor into
@@ -372,6 +484,8 @@ export function codexContractForSpec(spec: WorkerSpec): CodexExecutorContract {
       return buildImplementContract(parseImplementConfig(spec.config));
     case "merge_resolve":
       return buildMergeResolveContract(parseMergeResolveConfig(spec.config));
+    case "finalize_pr":
+      return buildFinalizePrContract(parseFinalizePrConfig(spec.config));
     default:
       throw new Error(
         `Unsupported Codex executor ${quote(spec.executor)} for node ${quote(spec.nodeId)}`,
@@ -499,6 +613,16 @@ function parseMergeMethod(value: unknown): "squash" | "merge" | "rebase" {
     );
   }
   return value as "squash" | "merge" | "rebase";
+}
+
+function validationInstruction(
+  commands: readonly string[] | undefined,
+  fallback: string,
+  runConfigured: string,
+): string {
+  return commands === undefined || commands.length === 0
+    ? fallback
+    : `${runConfigured}: ${commands.map(quote).join(", ")}.`;
 }
 
 function implementGateInstructions(review: ReviewConfig): string {

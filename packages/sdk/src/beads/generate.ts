@@ -58,6 +58,20 @@ export interface BeadsSpecDocument {
   readonly content: string;
 }
 
+export interface FinalPullRequestOptions {
+  /** Base branch for the final integration PR (for example, "main"). */
+  readonly targetBranch: string;
+  /** Review gate for the final current-head review/fix loop. */
+  readonly review: ReviewGate;
+  readonly reviewConfig?: Omit<BeadsReviewConfig, "by">;
+  readonly validationCommands?: readonly string[];
+  readonly maxIterations?: number;
+  /** Create or retain the final PR as a draft. Default false. */
+  readonly draft?: boolean;
+  readonly title?: string;
+  readonly body?: string;
+}
+
 export interface BeadsGraphOptions {
   /** Spec document embedded into every context node as `specDocument`. */
   readonly spec?: BeadsSpecDocument;
@@ -83,6 +97,8 @@ export interface BeadsGraphOptions {
   readonly includeBeadsUpdate?: boolean;
   /** Passed to beads_update nodes so they know where to run `bd`. */
   readonly beadsRepo?: string;
+  /** Append a reviewed integration PR from targetBranch into this base. */
+  readonly finalPullRequest?: FinalPullRequestOptions;
 }
 
 /**
@@ -184,10 +200,11 @@ export function buildBeadsGraph(
     serializeMerges,
     includeBeadsUpdate,
     options?.beadsRepo,
+    options?.finalPullRequest,
   );
   const reviewConfig = {
     by: review,
-    ...(review === "greptile" ? { triggerComment: "@greptile review" } : {}),
+    ...defaultTriggerComment(review),
     ...options?.reviewConfig,
     ...(options?.reviewConfig?.greptileAppSlug === undefined
       ? {}
@@ -335,26 +352,62 @@ export function buildBeadsGraph(
     terminalNodeIds.push(terminalNodeId);
   }
 
+  let completionNode: string;
   if (terminalNodeIds.length === 1) {
-    const finalNode = terminalNodeIds[0];
-    if (finalNode === undefined) {
+    const onlyTerminal = terminalNodeIds[0];
+    if (onlyTerminal === undefined) {
       throw new Error("Beads graph lost its final node");
     }
-    return { version: 1, nodes, finalNode };
+    completionNode = onlyTerminal;
+  } else {
+    completionNode = "beads-final";
+    nodes[completionNode] = {
+      // A constant node is a barrier here: the scheduler still waits for
+      // every terminal, while the output remains structured JSON regardless
+      // of the shapes returned by implement/merge/update executors.
+      executor: "constant",
+      kind: "merge",
+      dependsOn: terminalNodeIds,
+      config: {
+        value: {
+          completedBeads: orderedPlans.map((plan) => plan.bead.id),
+        },
+      },
+    };
   }
 
-  const finalNode = "beads-final";
+  const finalPullRequest = options?.finalPullRequest;
+  if (finalPullRequest === undefined) {
+    return { version: 1, nodes, finalNode: completionNode };
+  }
+  const finalNode = "finalize-integration-pr";
   nodes[finalNode] = {
-    // A constant node is a barrier here: the scheduler still waits for
-    // every terminal, while the output remains structured JSON regardless
-    // of the shapes returned by implement/merge/update executors.
-    executor: "constant",
-    kind: "merge",
-    dependsOn: terminalNodeIds,
+    executor: "finalize_pr",
+    kind: "task",
+    dependsOn: [completionNode],
     config: {
-      value: {
-        completedBeads: orderedPlans.map((plan) => plan.bead.id),
+      sourceBranch: targetBranch,
+      targetBranch: finalPullRequest.targetBranch,
+      review: {
+        by: finalPullRequest.review,
+        ...defaultTriggerComment(finalPullRequest.review),
+        ...finalPullRequest.reviewConfig,
       },
+      ...(finalPullRequest.validationCommands === undefined
+        ? {}
+        : { validationCommands: finalPullRequest.validationCommands }),
+      ...(finalPullRequest.maxIterations === undefined
+        ? {}
+        : { maxIterations: finalPullRequest.maxIterations }),
+      ...(finalPullRequest.draft === undefined
+        ? {}
+        : { draft: finalPullRequest.draft }),
+      ...(finalPullRequest.title === undefined
+        ? {}
+        : { title: finalPullRequest.title }),
+      ...(finalPullRequest.body === undefined
+        ? {}
+        : { body: finalPullRequest.body }),
     },
   };
   return { version: 1, nodes, finalNode };
@@ -555,6 +608,16 @@ function topologicalPlans<
   return ordered;
 }
 
+function defaultTriggerComment(
+  review: ReviewGate,
+): Readonly<Record<string, string>> {
+  return review === "greptile"
+    ? { triggerComment: "@greptile review" }
+    : review === "claude"
+      ? { triggerComment: "@claude review" }
+      : {};
+}
+
 function slug(value: string): string {
   const normalized = value
     .toLowerCase()
@@ -575,6 +638,7 @@ function validateOptions(
   serializeMerges: boolean,
   includeBeadsUpdate: boolean,
   beadsRepo: string | undefined,
+  finalPullRequest: FinalPullRequestOptions | undefined,
 ): void {
   if (typeof targetBranch !== "string" || targetBranch.trim().length === 0) {
     throw new Error("targetBranch must be a non-empty string");
@@ -605,6 +669,62 @@ function validateOptions(
   }
   if (beadsRepo !== undefined && typeof beadsRepo !== "string") {
     throw new Error("beadsRepo must be a string when provided");
+  }
+  if (finalPullRequest !== undefined) {
+    if (!includeMerge) {
+      throw new Error(
+        "finalPullRequest requires includeMerge: without merge nodes no work lands on targetBranch",
+      );
+    }
+    if (
+      finalPullRequest.review !== "greptile" &&
+      finalPullRequest.review !== "claude" &&
+      finalPullRequest.review !== "none"
+    ) {
+      throw new Error("finalPullRequest.review is unknown");
+    }
+    if (
+      typeof finalPullRequest.targetBranch !== "string" ||
+      finalPullRequest.targetBranch.trim().length === 0
+    ) {
+      throw new Error("finalPullRequest.targetBranch must be non-empty");
+    }
+    // Trim before comparing: the finalize_pr executor compares trimmed
+    // branches, and this guard must fire at generation time, not run time.
+    if (finalPullRequest.targetBranch.trim() === targetBranch.trim()) {
+      throw new Error(
+        "finalPullRequest.targetBranch must differ from targetBranch",
+      );
+    }
+    validateReviewConfig(
+      finalPullRequest.review,
+      finalPullRequest.reviewConfig,
+    );
+    validateCommands(
+      finalPullRequest.validationCommands,
+      "finalPullRequest.validationCommands",
+    );
+    if (
+      finalPullRequest.maxIterations !== undefined &&
+      (!Number.isInteger(finalPullRequest.maxIterations) ||
+        finalPullRequest.maxIterations < 1)
+    ) {
+      throw new Error("finalPullRequest.maxIterations must be positive");
+    }
+    if (
+      finalPullRequest.draft !== undefined &&
+      typeof finalPullRequest.draft !== "boolean"
+    ) {
+      throw new Error("finalPullRequest.draft must be boolean");
+    }
+    for (const [field, value] of [
+      ["title", finalPullRequest.title],
+      ["body", finalPullRequest.body],
+    ] as const) {
+      if (value !== undefined && value.trim().length === 0) {
+        throw new Error(`finalPullRequest.${field} must be non-empty`);
+      }
+    }
   }
 }
 

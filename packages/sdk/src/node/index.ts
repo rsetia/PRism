@@ -59,15 +59,18 @@ export type {
 } from "./codex-engine.js";
 export { buildCodexPrompt, createCodexEngine } from "./codex-engine.js";
 export type {
+  FinalizePrConfig,
   ImplementConfig,
   MergeResolveConfig,
   ReviewConfig,
   WorkItem,
 } from "./codex-contracts.js";
 export {
+  buildFinalizePrContract,
   buildImplementContract,
   buildMergeResolveContract,
   codexContractForSpec,
+  parseFinalizePrConfig,
   parseImplementConfig,
   parseMergeResolveConfig,
 } from "./codex-contracts.js";

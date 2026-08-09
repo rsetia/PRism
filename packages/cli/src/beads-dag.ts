@@ -47,6 +47,12 @@ export interface GenerateBeadsDagOptions {
   readonly includeMerge?: boolean;
   readonly includeBeadsUpdate?: boolean;
   readonly serializeMerges?: boolean;
+  readonly finalPrBase?: string;
+  readonly finalPrReviewer?: ReviewGate;
+  readonly finalPrReviewTriggerComment?: string;
+  readonly finalPrValidationCommands?: readonly string[];
+  readonly finalPrMaxIterations?: number;
+  readonly finalPrDraft?: boolean;
 }
 
 /**
@@ -135,8 +141,12 @@ export async function generateBeadsDag(
     ),
   }));
   const reviewer = options.reviewer ?? "greptile";
-  if (options.greptileAppSlug !== undefined && reviewer !== "greptile") {
-    throw new Error('greptileAppSlug requires reviewer to be "greptile"');
+  const finalPrReviewer = options.finalPrReviewer ?? reviewer;
+  const usesGreptile =
+    reviewer === "greptile" ||
+    (options.finalPrBase !== undefined && finalPrReviewer === "greptile");
+  if (options.greptileAppSlug !== undefined && !usesGreptile) {
+    throw new Error('greptileAppSlug requires a "greptile" reviewer');
   }
   const reviewTriggerComment =
     options.reviewTriggerComment ??
@@ -145,6 +155,12 @@ export async function generateBeadsDag(
       : reviewer === "claude"
         ? "@claude review"
         : undefined);
+  // The final PR gate inherits the implement-gate review policy unless it is
+  // overridden per-flag; a custom trigger comment only carries over when both
+  // gates use the same reviewer.
+  const finalPrTriggerComment =
+    options.finalPrReviewTriggerComment ??
+    (finalPrReviewer === reviewer ? reviewTriggerComment : undefined);
   const graphOptions: BeadsGraphOptions = {
     ...(spec === undefined ? {} : { spec }),
     targetBranch: options.targetBranch ?? "main",
@@ -174,6 +190,35 @@ export async function generateBeadsDag(
     serializeMerges: options.serializeMerges ?? true,
     includeBeadsUpdate: options.includeBeadsUpdate ?? true,
     beadsRepo: beadsRepoDir,
+    ...(options.finalPrBase === undefined
+      ? {}
+      : {
+          finalPullRequest: {
+            targetBranch: options.finalPrBase,
+            review: finalPrReviewer,
+            reviewConfig: {
+              ...(finalPrReviewer === "greptile"
+                ? {
+                    minConfidenceScore: options.minConfidenceScore ?? 5,
+                    ...(options.greptileAppSlug === undefined
+                      ? {}
+                      : { greptileAppSlug: options.greptileAppSlug }),
+                  }
+                : {}),
+              requireNoActionableFindings:
+                options.requireNoActionableFindings ?? true,
+              requireGreenChecks: options.requireGreenChecks ?? true,
+              ...(finalPrTriggerComment === undefined
+                ? {}
+                : { triggerComment: finalPrTriggerComment }),
+            },
+            validationCommands: options.finalPrValidationCommands ?? [],
+            ...(options.finalPrMaxIterations === undefined
+              ? {}
+              : { maxIterations: options.finalPrMaxIterations }),
+            draft: options.finalPrDraft ?? false,
+          },
+        }),
   };
   const graph = buildBeadsGraph(graphBeads, graphOptions);
   await writeGraph(options.outFile, graph);

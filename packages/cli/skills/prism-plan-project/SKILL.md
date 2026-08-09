@@ -313,7 +313,10 @@ mkdir -p "$PRISM_HOME/store/<project-slug>"
   --id <bead-id> \
   --target-branch "<target-branch>" \
   --validation-command "<implementation validation>" \
-  --merge-validation-command "<merge validation>")
+  --merge-validation-command "<merge validation>" \
+  --final-pr-base "<base-branch>" \
+  --final-pr-reviewer "<reviewer>" \
+  --final-pr-validation-command "<final integration validation>")
 ```
 
 Repeat `--id`, `--label`, and validation flags as needed. Prefer explicit IDs
@@ -323,14 +326,24 @@ Git repository and `$PRISM_HOME/beads/<project-slug>` resolve implicitly, but
 always give `--out` an absolute path outside the working tree. Pass `--repo` or
 `--beads-repo` only to override those auto-resolved locations.
 
+Include `--final-pr-base` for the normal integration-branch workflow. This
+adds a terminal node that opens or reuses the integration pull request, runs
+the final validation and reviewer loop against its current head, pushes any
+required fixes back to the integration branch, and leaves the ready PR open
+for human merge. Use the reviewer selected in section 5 and repeat
+`--final-pr-validation-command` for every broad check chosen in section 6.
+
 Pass `--greptile-app-slug <slug>` here when section 5 selected a particular
 Greptile GitHub App. As an execution-time alternative, `prism run` accepts the
-same flag and applies it to all Greptile implementation nodes. That effective
-graph is persisted, so do not repeat the flag on `prism resume`.
+same flag and applies it to every Greptile-gated node (implementation and the
+final integration PR). That effective graph is persisted, so do not repeat the
+flag on `prism resume`.
 
 Use `--no-beads-update`, `--no-merge-nodes`, or
 `--no-serialize-merges` only when the requested workflow requires that
-behavior.
+behavior. `--no-merge-nodes` cannot be combined with `--final-pr-base`:
+without merge nodes nothing lands on the integration branch, so there is
+nothing for the final pull request to promote.
 
 ## 8. Validate without executing
 
@@ -387,17 +400,25 @@ While it runs, open another terminal in the same repository:
   prism watch
   prism logs
 
-After the DAG succeeds, inspect or open the integration pull request:
-  gh pr create --base <base-branch> --head <target-branch> --fill
+After the DAG succeeds, inspect the integration pull request that its final
+node left ready for human merge:
+  gh pr view <target-branch> --repo <owner/repo> --web
 ```
 
 Do not omit this section merely because the commands appeared earlier in the
 conversation. Make clear that `prism run` executes the work, `prism watch`
 monitors node state until completion, and `prism logs` shows durable worker
 output. Explain that the final integration pull request promotes the completed
-DAG from the target branch into the base branch; reuse an existing PR instead
-of creating a duplicate. Do not run the DAG or open the final pull request
-unless the user explicitly asks.
+DAG from the target branch into the base branch. The terminal node creates or
+reuses it, reviews the current head, and never merges it. When the graph was
+generated without `--final-pr-base`, no node opens that pull request — end the
+Next steps section with the manual fallback instead of `gh pr view`:
+
+```text
+  gh pr create --repo <owner/repo> --base <base-branch> --head <target-branch> --fill
+```
+
+Do not run the DAG unless the user explicitly asks.
 
 Prism generates the run id. `watch` selects the newest unfinished run and
 `logs` selects the newest run, so the default handoff does not require the

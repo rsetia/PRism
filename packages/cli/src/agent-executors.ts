@@ -74,6 +74,12 @@ export function createAgentExecutorRegistry(
       provisioner,
       logBackend,
     }),
+    createCodexExecutor({
+      name: "finalize_pr",
+      engine: codexEngine,
+      provisioner,
+      logBackend,
+    }),
     // Kept for hand-authored graphs that only need deterministic PR merging.
     createMergePrExecutor({ cwd: repoDir }),
     createBeadsUpdateExecutor({ cwd: repoDir }),

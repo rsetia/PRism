@@ -270,6 +270,29 @@ describe("createCodexExecutor", () => {
     expect(inputs[0]?.contract.allowsGitMutation).toBe(true);
   });
 
+  test("dispatches finalize_pr to its own contract", async () => {
+    const { engine, inputs } = fakeEngine({
+      status: "succeeded",
+      output: { ready_for_human_merge: true },
+    });
+    const executor = createCodexExecutor({
+      name: "finalize_pr",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+    });
+    await run(
+      graphWith("finalize_pr", {
+        sourceBranch: "prism/integration",
+        targetBranch: "main",
+        review: { by: "claude" },
+      }),
+      executor,
+    ).result;
+    expect(inputs[0]?.spec.executor).toBe("finalize_pr");
+    expect(inputs[0]?.contract.instructions).toContain("human merge");
+  });
+
   test("shapes zero, one, and many upstream outputs into the worker spec", async () => {
     const { engine, inputs } = fakeEngine({
       status: "succeeded",

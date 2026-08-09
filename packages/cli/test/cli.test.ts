@@ -331,10 +331,21 @@ if (command === "export") {
         "--greptile-app-slug",
         "greptile-apps",
         "--no-beads-update",
+        "--target-branch",
+        "prism/integration",
+        "--final-pr-base",
+        "main",
+        "--final-pr-reviewer",
+        "claude",
+        "--final-pr-review-trigger-comment",
+        "@claude review",
+        "--final-pr-validation-command",
+        "npm run verify",
       );
-      expect(result.code).toBe(0);
+      expect(result.code, result.stderr).toBe(0);
       expect(result.stdout.trim()).toBe(out);
       const graph = JSON.parse(readFileSync(out, "utf8")) as {
+        finalNode?: string;
         nodes: Record<
           string,
           {
@@ -370,7 +381,54 @@ if (command === "export") {
           ?.allowConfidenceFourWithoutActionableFindings,
       ).toBeUndefined();
       expect(graph.nodes["merge-bd-a"]?.executor).toBe("merge_resolve");
+      expect(graph.nodes["finalize-integration-pr"]).toMatchObject({
+        executor: "finalize_pr",
+        config: {
+          sourceBranch: "prism/integration",
+          targetBranch: "main",
+          review: { by: "claude", triggerComment: "@claude review" },
+          validationCommands: ["npm run verify"],
+          draft: false,
+        },
+      });
+      expect(graph.finalNode).toBe("finalize-integration-pr");
       expect(graph.nodes["implement-bd-closed"]).toBeUndefined();
+
+      const inheritedOut = join(root, "graph-inherited.json");
+      const inherited = await cliWith(
+        { prismHome },
+        "beads-dag",
+        "--repo",
+        repo,
+        "--out",
+        inheritedOut,
+        "--bd-bin",
+        bd,
+        "--greptile-app-slug",
+        "greptile-apps",
+        "--min-confidence-score",
+        "3",
+        "--review-trigger-comment",
+        "@greptile-dev review",
+        "--target-branch",
+        "prism/integration",
+        "--final-pr-base",
+        "main",
+      );
+      expect(inherited.code, inherited.stderr).toBe(0);
+      const inheritedGraph = JSON.parse(
+        readFileSync(inheritedOut, "utf8"),
+      ) as typeof graph;
+      // The final PR gate inherits the implement-gate review policy when the
+      // reviewers match.
+      expect(
+        inheritedGraph.nodes["finalize-integration-pr"]?.config?.review,
+      ).toMatchObject({
+        by: "greptile",
+        greptileAppSlug: "greptile-apps",
+        minConfidenceScore: 3,
+        triggerComment: "@greptile-dev review",
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
@@ -483,7 +541,7 @@ if (command === "export") {
       "greptile-apps",
     );
     expect(result.code).toBe(2);
-    expect(result.stderr).toContain("graph has no Greptile implement nodes");
+    expect(result.stderr).toContain("graph has no Greptile review nodes");
   });
 
   test("run rejects a selector that conflicts with a graph node", async () => {

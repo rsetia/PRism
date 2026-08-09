@@ -1,8 +1,10 @@
 import { describe, expect, test } from "vitest";
 import {
+  buildFinalizePrContract,
   buildImplementContract,
   buildMergeResolveContract,
   codexContractForSpec,
+  parseFinalizePrConfig,
   parseImplementConfig,
   parseMergeResolveConfig,
 } from "../src/node/index.js";
@@ -324,6 +326,56 @@ describe("buildMergeResolveContract", () => {
   });
 });
 
+describe("finalize_pr contract", () => {
+  test("parses a reviewed integration PR configuration", () => {
+    const parsed = parseFinalizePrConfig({
+      sourceBranch: "prism/integration",
+      targetBranch: "main",
+      review: {
+        by: "claude",
+        triggerComment: "@claude review",
+        requireGreenChecks: true,
+      },
+      draft: false,
+      maxIterations: 4,
+      validationCommands: ["npm run verify"],
+    });
+    expect(parsed).toMatchObject({
+      sourceBranch: "prism/integration",
+      targetBranch: "main",
+      review: { by: "claude", triggerComment: "@claude review" },
+      draft: false,
+      maxIterations: 4,
+    });
+    expect(Object.isFrozen(parsed)).toBe(true);
+  });
+
+  test("rejects identical source and target branches", () => {
+    expect(() =>
+      parseFinalizePrConfig({
+        sourceBranch: "main",
+        targetBranch: "main",
+        review: { by: "none" },
+      }),
+    ).toThrow("must differ");
+  });
+
+  test("leaves the reviewed pull request open for a human merge", () => {
+    const contract = buildFinalizePrContract({
+      sourceBranch: "prism/integration",
+      targetBranch: "main",
+      review: { by: "claude", requireGreenChecks: true },
+      validationCommands: ["npm run verify"],
+    });
+    expect(contract.instructions).toContain("@claude review");
+    expect(contract.instructions).toContain("npm run verify");
+    expect(contract.instructions).toContain("Never merge or close");
+    expect(contract.instructions).toContain("ready_for_human_merge");
+    expect(contract.allowsGitMutation).toBe(true);
+    expect(contract.allowsGitHubIo).toBe(true);
+  });
+});
+
 describe("codexContractForSpec", () => {
   test("dispatches implement specs to the implement contract", () => {
     const contract = codexContractForSpec(spec());
@@ -342,6 +394,20 @@ describe("codexContractForSpec", () => {
       }),
     );
     expect(contract.allowsGitMutation).toBe(true);
+  });
+
+  test("dispatches finalize_pr specs", () => {
+    const contract = codexContractForSpec(
+      spec({
+        executor: "finalize_pr",
+        config: {
+          sourceBranch: "prism/integration",
+          targetBranch: "main",
+          review: { by: "claude" },
+        },
+      }),
+    );
+    expect(contract.instructions).toContain("without merging it");
   });
 
   test("rejects a non-codex executor", () => {
