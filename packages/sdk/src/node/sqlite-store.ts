@@ -56,7 +56,10 @@ function openDatabase(path: string): Database {
  * Set `PRAGMA journal_mode = WAL` and `PRAGMA foreign_keys = ON`.
  * Schema version 2 adds stable event timestamps inside event_json. Version 1
  * events remain readable with timestampMs: null, making unavailable timing
- * data explicit instead of inventing a migration time.
+ * data explicit instead of inventing a migration time. The version stamp
+ * (user_version + runs.schema_version) is applied on the first write, never
+ * on open, so a read-only open cannot strand the file above what an older
+ * release accepts.
  *
  * Behavior parity with the memory store:
  * - createRun: INSERT the run; a duplicate run_id violates the primary
@@ -129,7 +132,15 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
       `run schema version ${String(newestRunVersion)} is newer than supported version ${String(schemaVersion)}`,
     );
   }
-  if (storedVersion < schemaVersion) {
+  // The version stamp is deferred to the first write: opening a store for
+  // reading (inspect, watch) must leave the database byte-identical so the
+  // previous release can still open it after a rollback.
+  let stampedVersion = storedVersion >= schemaVersion;
+
+  function ensureSchemaCurrent(): void {
+    if (stampedVersion) {
+      return;
+    }
     db.exec("BEGIN IMMEDIATE");
     try {
       db.prepare(
@@ -141,9 +152,9 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
       if (db.isTransaction) {
         db.exec("ROLLBACK");
       }
-      db.close();
       throw error;
     }
+    stampedVersion = true;
   }
 
   const insertRun = db.prepare(
@@ -208,6 +219,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   }): Promise<void> {
     return capture(() => {
       assertOpen();
+      ensureSchemaCurrent();
       insertRun.run(input.runId, JSON.stringify(input.graph), schemaVersion);
     });
   }
@@ -219,6 +231,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   ): Promise<readonly PersistedRunEvent[]> {
     return capture(() => {
       assertOpen();
+      ensureSchemaCurrent();
       db.exec("BEGIN IMMEDIATE");
       try {
         const run = selectRun.get(runId);
@@ -337,6 +350,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   function finishRun(runId: string, outcome: RunOutcome): Promise<void> {
     return capture(() => {
       assertOpen();
+      ensureSchemaCurrent();
       const run = selectRun.get(runId);
       if (run === undefined) {
         throw new Error(`unknown run: "${runId}"`);
@@ -353,6 +367,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   function reopenRun(runId: string): Promise<void> {
     return capture(() => {
       assertOpen();
+      ensureSchemaCurrent();
       const result = reopenRunStatement.run(runId);
       if (result.changes === 0) {
         throw new Error(`unknown run: "${runId}"`);
