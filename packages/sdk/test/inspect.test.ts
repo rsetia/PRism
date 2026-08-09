@@ -258,6 +258,40 @@ describe("inspectRun", () => {
     });
   });
 
+  test("charges an in-progress phase up to the run's latest observed event", async () => {
+    const graph = buildGraph({
+      version: 1,
+      nodes: {
+        slow: { executor: "constant", config: { value: null } },
+        ticker: { executor: "constant", config: { value: null } },
+      },
+      finalNode: "ticker",
+    });
+    // slow enters execution at t=10 and then goes silent; ticker keeps the
+    // run's clock moving to t=30.
+    const store = await createStoredRun(graph, "in-progress", [
+      { kind: "node_ready", nodeId: "slow" },
+      { kind: "node_started", nodeId: "slow" },
+      { kind: "node_ready", nodeId: "ticker" },
+      { kind: "node_started", nodeId: "ticker" },
+    ]);
+
+    const inspection = await inspectRun(store, "in-progress");
+    const slow = inspection.nodes.find((node) => node.nodeId === "slow");
+    expect(slow?.timing).toEqual({
+      startedAtMs: 0,
+      completedAtMs: null,
+      totalDurationMs: 30,
+      attributedDurationMs: 30,
+      unattributedDurationMs: 0,
+      phases: [
+        { phase: "dependency_wait", durationMs: 0 },
+        { phase: "scheduler_queue", durationMs: 10 },
+        { phase: "execution", durationMs: 20 },
+      ],
+    });
+  });
+
   test("reports timing as unavailable for legacy timestamp-free logs", async () => {
     const graph = buildGraph({
       version: 1,

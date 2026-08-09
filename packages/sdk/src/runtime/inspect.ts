@@ -267,11 +267,20 @@ function calculateNodeTimings(
     }
   }
 
+  // The run's latest observed timestamp, not the node's own: an in-progress
+  // node may have been silent for hours, and its active phase owns all of
+  // that time.
+  const observedAtMs = events.reduce(
+    (max, event) => Math.max(max, event.timestampMs ?? max),
+    firstTimestampMs,
+  );
+
   const result = new Map<string, NodeTiming>();
   for (const [nodeId, timing] of mutable) {
     if (!timing.available || !timing.hasEvents) continue;
     if (timing.completedAtMs === null) {
-      closeActivePhase(timing, timing.lastTimestampMs);
+      closeActivePhase(timing, observedAtMs);
+      timing.lastTimestampMs = observedAtMs;
     }
     const completedAtMs = timing.completedAtMs;
     const totalDurationMs = Math.max(

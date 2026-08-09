@@ -231,7 +231,12 @@ export function createCodexExecutor(
       try {
         await context.reportPhase("workspace_cleanup");
       } catch (error: unknown) {
-        outcome = infrastructureFailure("PHASE_PERSISTENCE_FAILED", error);
+        // Never let a timing-observability write overturn completed work: a
+        // retry of a succeeded node would re-run an implementation whose PR
+        // already landed.
+        if (outcome.status !== "succeeded") {
+          outcome = infrastructureFailure("PHASE_PERSISTENCE_FAILED", error);
+        }
       }
 
       if (nodeDir !== undefined && explicitNodeDirBase === undefined) {

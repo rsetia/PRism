@@ -223,6 +223,29 @@ describe("createCodexExecutor", () => {
     ]);
   });
 
+  test("a failed cleanup phase report never overturns a succeeded outcome", async () => {
+    const { engine } = fakeEngine({ status: "succeeded", output: null });
+    const { provisioner } = fakeProvisioner();
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      provisioner,
+      nodeDirBase: tempDir,
+    });
+
+    const outcome = await executor.execute(
+      context([], {
+        reportPhase(phase) {
+          return phase === "workspace_cleanup"
+            ? Promise.reject(new Error("store append failed"))
+            : Promise.resolve();
+        },
+      }),
+    );
+
+    expect(outcome).toEqual({ status: "succeeded", output: null });
+  });
+
   test("persists combined Codex worker output", async () => {
     const engine: CodexEngine = {
       execute(input) {

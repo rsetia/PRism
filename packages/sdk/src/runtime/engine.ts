@@ -559,17 +559,33 @@ async function executeRun(
 
     const append = appendTail.then(async () => {
       const stagedStates = new Map<string, NodeState>();
+      const persistable: RunEvent[] = [];
       for (const event of events) {
         const previous =
           stagedStates.get(event.nodeId) ?? states.get(event.nodeId);
         if (previous === undefined) {
           throw new Error(`event targets unknown node "${event.nodeId}"`);
         }
+        // A phase report can arrive from an executor the engine has already
+        // abandoned (cancellation grace timeout) — by then the node is
+        // terminal. Dropping it here, inside the serialized append chain,
+        // is the only race-free place to make that call.
+        if (
+          event.kind === "node_phase_changed" &&
+          previous !== "running" &&
+          previous !== "cancelling"
+        ) {
+          continue;
+        }
         stagedStates.set(event.nodeId, reduceNodeState(previous, event));
+        persistable.push(event);
+      }
+      if (persistable.length === 0) {
+        return;
       }
 
-      const persisted = await store.appendEvents(runId, events, revision);
-      if (persisted.length !== events.length) {
+      const persisted = await store.appendEvents(runId, persistable, revision);
+      if (persisted.length !== persistable.length) {
         throw new Error("store persisted a different number of events");
       }
       for (let index = 0; index < persisted.length; index += 1) {
@@ -582,7 +598,12 @@ async function executeRun(
         states.set(nodeId, state);
       }
     });
-    appendTail = append;
+    // The chain must survive a rejected append: the failure belongs to this
+    // caller alone, not to every append that comes after it.
+    appendTail = append.then(
+      () => undefined,
+      () => undefined,
+    );
     return append;
   }
 

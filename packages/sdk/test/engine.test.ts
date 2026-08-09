@@ -191,6 +191,46 @@ describe("createEngine", () => {
     });
   });
 
+  test("one rejected append fails its node, not every append after it", async () => {
+    const base = createMemoryStore();
+    let failOnce = true;
+    const flaky: RunStore = {
+      ...base,
+      appendEvents(runId, events, expectedRevision) {
+        if (
+          failOnce &&
+          events.some((event) => event.kind === "node_phase_changed")
+        ) {
+          failOnce = false;
+          return Promise.reject(new Error("transient store failure"));
+        }
+        return base.appendEvents(runId, events, expectedRevision);
+      },
+    };
+    const phased: ExecutorDefinition = {
+      name: "phased",
+      async execute(context) {
+        await context.reportPhase("validation");
+        return { status: "succeeded", output: null };
+      },
+    };
+    const engine = createEngine({
+      store: flaky,
+      registry: createExecutorRegistry([...builtinExecutors, phased]),
+    });
+    const graph = buildGraph({
+      version: 1,
+      nodes: { work: { executor: "phased" } },
+      finalNode: "work",
+    });
+
+    // The phase append rejects, so its node fails — but the follow-up
+    // node_failed append must not inherit the rejection: the run itself
+    // still resolves with an ordinary failed outcome.
+    const outcome = await engine.run(graph).result;
+    expect(outcome.status).toBe("failed");
+  });
+
   test("a failed node fails the run with originating failures only", async () => {
     const graph = buildGraph({
       version: 1,
