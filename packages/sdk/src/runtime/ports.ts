@@ -129,8 +129,10 @@ export interface RunSummary {
 /**
  * Persistence port. Contract (plan §4, decided):
  * - createRun rejects a duplicate runId.
- * - appendEvents assigns `seq` — monotonic per run, gapless, from 0 —
- *   atomically for the whole batch, and returns the persisted events.
+ * - appendEvents assigns `seq` — monotonic per run, gapless, from 0 — and a
+ *   stable Unix-epoch `timestampMs` atomically for the whole batch, and
+ *   returns the persisted events. Stores may return timestampMs null only
+ *   when reading legacy events that predate timestamp persistence.
  *   When expectedRevision is supplied, it rejects unless that is the
  *   run's next sequence. Rejects for an unknown or finished run.
  * - readEvents is a cursor over the persisted log starting at `fromSeq`

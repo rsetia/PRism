@@ -40,8 +40,14 @@ function wakeReaders(run: MemoryRun): void {
  * - finishRun: mark finished and wake waiters so draining iterators
  *   can complete. Idempotent.
  */
-export function createMemoryStore(): RunStore {
+export interface MemoryStoreOptions {
+  /** Time source used when an event is durably appended. */
+  readonly now?: () => number;
+}
+
+export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
   const runs = new Map<string, MemoryRun>();
+  const now = options.now ?? Date.now;
 
   function createRun(input: {
     readonly runId: string;
@@ -89,7 +95,7 @@ export function createMemoryStore(): RunStore {
     let persisted: readonly PersistedRunEvent[];
     try {
       persisted = events.map((event, index) =>
-        snapshotRunEvent(event, firstSequence + index),
+        snapshotRunEvent(event, firstSequence + index, now()),
       );
     } catch (error: unknown) {
       return Promise.reject(

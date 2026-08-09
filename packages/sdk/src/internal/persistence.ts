@@ -86,21 +86,33 @@ export function snapshotRunOutcome(value: unknown): RunOutcome {
 export function snapshotRunEvent(
   event: RunEvent,
   seq: number,
+  timestampMs: number | null,
 ): PersistedRunEvent {
+  if (
+    timestampMs !== null &&
+    (!Number.isSafeInteger(timestampMs) || timestampMs < 0)
+  ) {
+    throw new Error("event timestampMs must be a non-negative safe integer");
+  }
+  const persisted = { seq, timestampMs } as const;
   switch (event.kind) {
     case "node_ready":
     case "node_started":
     case "node_cancelling":
     case "node_cancelled":
     case "node_reset":
-      return Object.freeze({ kind: event.kind, nodeId: event.nodeId, seq });
+      return Object.freeze({
+        kind: event.kind,
+        nodeId: event.nodeId,
+        ...persisted,
+      });
 
     case "node_succeeded":
       return Object.freeze({
         kind: event.kind,
         nodeId: event.nodeId,
         output: snapshotJsonValue(event.output, "node output"),
-        seq,
+        ...persisted,
       });
 
     case "node_failed":
@@ -108,7 +120,7 @@ export function snapshotRunEvent(
         kind: event.kind,
         nodeId: event.nodeId,
         failure: snapshotNodeFailure(event.failure),
-        seq,
+        ...persisted,
       });
 
     case "node_retry_wait":
@@ -118,7 +130,7 @@ export function snapshotRunEvent(
         attempt: event.attempt,
         delayMs: event.delayMs,
         failure: snapshotNodeFailure(event.failure),
-        seq,
+        ...persisted,
       });
 
     case "node_blocked":
@@ -126,7 +138,7 @@ export function snapshotRunEvent(
         kind: event.kind,
         nodeId: event.nodeId,
         blockedBy: Object.freeze([...event.blockedBy]),
-        seq,
+        ...persisted,
       });
 
     default: {

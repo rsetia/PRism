@@ -17,6 +17,8 @@ export interface SqliteStoreOptions {
    * for the contract suite, not for reopen tests).
    */
   readonly path: string;
+  /** Time source used when an event is durably appended. */
+  readonly now?: () => number;
 }
 
 const loadBuiltin = createRequire(import.meta.url);
@@ -52,8 +54,9 @@ function openDatabase(path: string): Database {
  *     PRIMARY KEY (run_id, seq)
  *   )
  * Set `PRAGMA journal_mode = WAL` and `PRAGMA foreign_keys = ON`.
- * This unreleased package starts with schema version 1. Store that version
- * and refuse to open a newer one.
+ * Schema version 2 adds stable event timestamps inside event_json. Version 1
+ * events remain readable with timestampMs: null, making unavailable timing
+ * data explicit instead of inventing a migration time.
  *
  * Behavior parity with the memory store:
  * - createRun: INSERT the run; a duplicate run_id violates the primary
@@ -77,8 +80,9 @@ function openDatabase(path: string): Database {
  * persisted runs and events unchanged — that is what makes resume work.
  */
 export function createSqliteStore(options: SqliteStoreOptions): RunStore {
-  const schemaVersion = 1;
+  const schemaVersion = 2;
   const db = openDatabase(options.path);
+  const now = options.now ?? Date.now;
   let closed = false;
   const waiters = new Map<string, Set<() => void>>();
 
@@ -233,7 +237,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
           );
         }
         const persisted = events.map((event) => {
-          const saved = snapshotRunEvent(event, sequence);
+          const saved = snapshotRunEvent(event, sequence, now());
           insertEvent.run(runId, sequence, JSON.stringify(saved));
           sequence += 1;
           return saved;
@@ -469,7 +473,20 @@ function decodeEvent(json: string, seq: number): PersistedRunEvent {
   ) {
     throw new Error(`stored event at sequence ${String(seq)} is invalid`);
   }
-  const persisted = { ...value, seq };
+  const timestampMs = value["timestampMs"];
+  if (
+    timestampMs !== undefined &&
+    (!Number.isSafeInteger(timestampMs) || (timestampMs as number) < 0)
+  ) {
+    throw new Error(
+      `stored event at sequence ${String(seq)} has an invalid timestampMs`,
+    );
+  }
+  const persisted = {
+    ...value,
+    seq,
+    timestampMs: timestampMs === undefined ? null : (timestampMs as number),
+  };
   deepFreeze(persisted);
   return persisted as unknown as PersistedRunEvent;
 }
