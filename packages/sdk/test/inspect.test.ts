@@ -256,6 +256,56 @@ describe("inspectRun", () => {
         { phase: "validation", durationMs: 10 },
       ],
     });
+    expect(inspection.timing).toMatchObject({
+      startedAtMs: 0,
+      completedAtMs: null,
+      totalDurationMs: 30,
+      attributionCoverage: 1,
+      criticalPath: {
+        nodeIds: ["work"],
+        durationMs: 30,
+      },
+    });
+  });
+
+  test("identifies the longest weighted dependency path", async () => {
+    const graph = buildGraph({
+      version: 1,
+      nodes: {
+        long: { executor: "constant" },
+        short: { executor: "constant" },
+        final: {
+          executor: "constant",
+          dependsOn: ["long", "short"],
+        },
+      },
+      finalNode: "final",
+    });
+    const store = await createStoredRun(graph, "critical", [
+      { kind: "node_ready", nodeId: "long" },
+      { kind: "node_started", nodeId: "long" },
+      {
+        kind: "node_phase_changed",
+        nodeId: "long",
+        phase: "implementation",
+      },
+      { kind: "node_succeeded", nodeId: "long", output: null },
+      { kind: "node_ready", nodeId: "short" },
+      { kind: "node_started", nodeId: "short" },
+      { kind: "node_succeeded", nodeId: "short", output: null },
+      { kind: "node_ready", nodeId: "final" },
+      { kind: "node_started", nodeId: "final" },
+      { kind: "node_succeeded", nodeId: "final", output: null },
+    ]);
+
+    const inspection = await inspectRun(store, "critical");
+    expect(inspection.timing?.criticalPath).toMatchObject({
+      nodeIds: ["long", "final"],
+      durationMs: 50,
+    });
+    expect(inspection.timing?.waitingPhases[0]).toMatchObject({
+      phase: "dependency_wait",
+    });
   });
 
   test("charges an in-progress phase up to the run's latest observed event", async () => {
@@ -317,6 +367,7 @@ describe("inspectRun", () => {
 
     const inspection = await inspectRun(legacy, "legacy-timing");
     expect(inspection.nodes[0]?.timing).toBeNull();
+    expect(inspection.timing).toBeNull();
   });
 
   test("surfaces an event targeting an unknown node", async () => {

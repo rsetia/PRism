@@ -34,6 +34,7 @@ function inspection(): RunInspection {
       { nodeId: "review", state: "pending", timing: null },
     ],
     failures: [],
+    timing: null,
   };
 }
 
@@ -84,6 +85,7 @@ describe("watch dashboard", () => {
           failureClass: "validation_failed",
         },
       ],
+      timing: null,
     };
     const output = renderWatchDashboard(graph(), failed, {
       color: false,
@@ -126,6 +128,7 @@ describe("watch dashboard", () => {
         timing: null,
       })),
       failures: [],
+      timing: null,
     };
 
     const output = renderWatchDashboard(compiled.graph, beadsInspection, {
@@ -170,6 +173,7 @@ describe("watch dashboard", () => {
         timing: null,
       })),
       failures: [],
+      timing: null,
     };
 
     const output = renderWatchDashboard(compiled.graph, beadsInspection, {

@@ -845,6 +845,10 @@ describe("prism CLI: persisted runs", () => {
     expect(inspected.code).toBe(0);
     expect(inspected.stdout).toContain("first: succeeded");
     expect(inspected.stdout).toContain("second: succeeded");
+    expect(inspected.stdout).toContain("elapsed:");
+    expect(inspected.stdout).toContain("critical path: first -> second");
+    expect(inspected.stdout).toContain("largest waits:");
+    expect(inspected.stdout).toContain("attribution: 100.0%");
     expect(inspected.stdout).toContain("finished: true");
   });
 
@@ -1086,6 +1090,11 @@ describe("prism CLI: persisted runs", () => {
       runId: string;
       finished: boolean;
       nodes: { nodeId: string; state: string; timing: unknown }[];
+      timing: {
+        totalDurationMs: number;
+        attributionCoverage: number;
+        criticalPath: { nodeIds: string[] };
+      } | null;
     };
     expect(parsed.version).toBe(1);
     expect(parsed.runId).toBe("r2");
@@ -1095,6 +1104,10 @@ describe("prism CLI: persisted runs", () => {
       "succeeded",
     ]);
     expect(parsed.nodes.every((node) => node.timing !== null)).toBe(true);
+    expect(parsed.timing).toMatchObject({
+      attributionCoverage: 1,
+      criticalPath: { nodeIds: ["first", "second"] },
+    });
   });
 
   test("events lists the persisted event log in order", async () => {

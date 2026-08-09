@@ -48,11 +48,13 @@ export { createManualClock, createSystemClock } from "./adapters/clock.js";
 export type { ManualClock } from "./adapters/clock.js";
 export { inspectRun, watchRun } from "./runtime/inspect.js";
 export type {
+  CriticalPathTiming,
   NodeInspection,
   NodeTiming,
   NodeTimingPhase,
   PhaseDuration,
   RunInspection,
+  RunTiming,
   WatchRunOptions,
 } from "./runtime/inspect.js";
 export { abortRun, resetRun } from "./runtime/admin.js";

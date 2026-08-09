@@ -26,6 +26,7 @@ import type {
   GraphCompileError,
   GraphParseError,
   NodeFailure,
+  PhaseDuration,
   PersistedRunEvent,
   LogBackend,
   RunInspection,
@@ -1178,14 +1179,37 @@ async function inspectCommand(
           finished: inspection.finished,
           nodes: inspection.nodes,
           failures: inspection.failures,
+          timing: inspection.timing,
         }),
       );
     } else {
       for (const node of inspection.nodes) {
-        io.stdout(`${node.nodeId}: ${node.state}`);
+        io.stdout(
+          `${node.nodeId}: ${node.state}${
+            node.timing === null
+              ? ""
+              : ` · ${formatDuration(node.timing.totalDurationMs)} · ${formatPhaseSummary(node.timing.phases)}`
+          }`,
+        );
       }
       for (const failure of inspection.failures) {
         io.stdout(`failure ${failure.nodeId}: ${stringifyJson(failure.cause)}`);
+      }
+      if (inspection.timing === null) {
+        io.stdout("timing: unavailable (empty or legacy event log)");
+      } else {
+        io.stdout(
+          `elapsed: ${formatDuration(inspection.timing.totalDurationMs)}`,
+        );
+        io.stdout(
+          `critical path: ${inspection.timing.criticalPath.nodeIds.join(" -> ")} · ${formatDuration(inspection.timing.criticalPath.durationMs)}`,
+        );
+        io.stdout(
+          `largest waits: ${formatPhaseSummary(inspection.timing.waitingPhases)}`,
+        );
+        io.stdout(
+          `attribution: ${(inspection.timing.attributionCoverage * 100).toFixed(1)}%`,
+        );
       }
       io.stdout(`finished: ${String(inspection.finished)}`);
     }
@@ -1196,6 +1220,25 @@ async function inspectCommand(
   } finally {
     await store?.close?.();
   }
+}
+
+function formatPhaseSummary(phases: readonly PhaseDuration[]): string {
+  const visible = phases.filter((phase) => phase.durationMs > 0).slice(0, 3);
+  return visible.length === 0
+    ? "none"
+    : visible
+        .map((phase) => `${phase.phase} ${formatDuration(phase.durationMs)}`)
+        .join(", ");
+}
+
+function formatDuration(durationMs: number): string {
+  if (durationMs < 1_000) return `${String(durationMs)}ms`;
+  if (durationMs < 60_000) {
+    return `${(durationMs / 1_000).toFixed(durationMs < 10_000 ? 2 : 1)}s`;
+  }
+  const minutes = Math.floor(durationMs / 60_000);
+  const seconds = ((durationMs % 60_000) / 1_000).toFixed(1);
+  return `${String(minutes)}m ${seconds}s`;
 }
 
 function isDuplicateRunError(error: unknown): boolean {

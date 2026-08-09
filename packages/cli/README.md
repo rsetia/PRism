@@ -100,6 +100,8 @@ Commands: `skills` (install the planning skill); `validate`, `graph`,
 `beads-dag`, `run` (author and execute);
 `status`, `inspect`, `events`, `watch`, `logs` (observe); `resume`, `abort`,
 `signal`, `rerun-node` (recover). Graphs may be JSON or YAML.
+`inspect` includes phase durations, elapsed time, the weighted critical path,
+and largest waits; `inspect --json` exposes the same timing data for tools.
 
 Prism executors run real commands (`codex`, `gh`, `bd`, your validation
 commands) with no sandbox — see
