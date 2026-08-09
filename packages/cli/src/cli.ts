@@ -1184,13 +1184,14 @@ async function inspectCommand(
       );
     } else {
       for (const node of inspection.nodes) {
-        io.stdout(
-          `${node.nodeId}: ${node.state}${
-            node.timing === null
-              ? ""
-              : ` · ${formatDuration(node.timing.totalDurationMs)} · ${formatPhaseSummary(node.timing.phases)}`
-          }`,
-        );
+        // The bare `nodeId: state` line is parsed by scripts — keep it
+        // byte-stable and put timing on its own indented detail line.
+        io.stdout(`${node.nodeId}: ${node.state}`);
+        if (node.timing !== null) {
+          io.stdout(
+            `  time: ${formatDuration(node.timing.totalDurationMs)} · ${formatPhaseSummary(node.timing.phases)}`,
+          );
+        }
       }
       for (const failure of inspection.failures) {
         io.stdout(`failure ${failure.nodeId}: ${stringifyJson(failure.cause)}`);

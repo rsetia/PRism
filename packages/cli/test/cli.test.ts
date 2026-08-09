@@ -843,8 +843,11 @@ describe("prism CLI: persisted runs", () => {
 
     const inspected = await cli("inspect", "r1", "--store", store);
     expect(inspected.code).toBe(0);
-    expect(inspected.stdout).toContain("first: succeeded");
-    expect(inspected.stdout).toContain("second: succeeded");
+    // Line-anchored: the `nodeId: state` line is a stable format that
+    // scripts parse — timing must live on its own indented line.
+    expect(inspected.stdout).toMatch(/^first: succeeded$/mu);
+    expect(inspected.stdout).toMatch(/^second: succeeded$/mu);
+    expect(inspected.stdout).toMatch(/^ {2}time: /mu);
     expect(inspected.stdout).toContain("elapsed:");
     expect(inspected.stdout).toContain("critical path: first -> second");
     expect(inspected.stdout).toContain("largest waits:");

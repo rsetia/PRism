@@ -226,9 +226,15 @@ function calculateRunTiming(
   ) {
     return null;
   }
-  const timestamps = events.map((event) => event.timestampMs as number);
-  const startedAtMs = Math.min(...timestamps);
-  const observedAtMs = Math.max(...timestamps);
+  // A loop, not Math.min(...spread): a long run's event log can exceed the
+  // engine's argument-count limit and throw RangeError.
+  let startedAtMs = events[0]?.timestampMs as number;
+  let observedAtMs = startedAtMs;
+  for (const event of events) {
+    const timestampMs = event.timestampMs as number;
+    if (timestampMs < startedAtMs) startedAtMs = timestampMs;
+    if (timestampMs > observedAtMs) observedAtMs = timestampMs;
+  }
   const totalDurationMs = Math.max(0, observedAtMs - startedAtMs);
   const cumulativePhases = sumPhases([...nodeTimings.values()]);
   const cumulativeNodeDurationMs = [...nodeTimings.values()].reduce(
