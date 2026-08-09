@@ -2,22 +2,25 @@ import type { JsonValue } from "../graph/types.js";
 import type { NodeFailure } from "./types.js";
 
 /** Stable phase names used for per-node wall-time attribution. */
-export type NodePhase =
-  | "execution"
-  | "worktree_setup"
-  | "implementation"
-  | "validation"
-  | "pull_request"
-  | "ci_wait"
-  | "review_wait"
-  | "merge_lock_wait"
-  | "integration_update"
-  | "conflict_resolution"
-  | "merge_validation"
-  | "merge"
-  | "tracker_update"
-  | "finalization"
-  | "workspace_cleanup";
+export const NODE_PHASES = Object.freeze([
+  "execution",
+  "worktree_setup",
+  "implementation",
+  "validation",
+  "pull_request",
+  "ci_wait",
+  "review_wait",
+  "merge_lock_wait",
+  "integration_update",
+  "conflict_resolution",
+  "merge_validation",
+  "merge",
+  "tracker_update",
+  "finalization",
+  "workspace_cleanup",
+] as const);
+
+export type NodePhase = (typeof NODE_PHASES)[number];
 
 /**
  * Events are facts: the engine's only way of changing state, and later the

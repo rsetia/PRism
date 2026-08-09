@@ -5,11 +5,18 @@
  */
 export type { SqliteStoreOptions } from "./sqlite-store.js";
 export { createSqliteStore } from "./sqlite-store.js";
-export type { Heartbeat, WorkerResult, WorkerSpec } from "./worker-protocol.js";
+export type {
+  Heartbeat,
+  WorkerPhaseUpdate,
+  WorkerResult,
+  WorkerSpec,
+} from "./worker-protocol.js";
 export {
   NODE_DIR_ENV_VAR,
+  parseWorkerPhaseUpdate,
   parseWorkerResult,
   WORKER_HEARTBEAT_FILE,
+  WORKER_PHASE_FILE,
   WORKER_RESULT_FILE,
   WORKER_SPEC_FILE,
 } from "./worker-protocol.js";

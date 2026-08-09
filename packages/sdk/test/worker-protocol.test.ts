@@ -1,5 +1,8 @@
 import { describe, expect, test } from "vitest";
-import { parseWorkerResult } from "../src/node/index.js";
+import {
+  parseWorkerPhaseUpdate,
+  parseWorkerResult,
+} from "../src/node/index.js";
 
 describe("parseWorkerResult", () => {
   test("accepts a succeeded result with JSON output", () => {
@@ -45,5 +48,18 @@ describe("parseWorkerResult", () => {
   test("rejects a non-object", () => {
     expect(() => parseWorkerResult(null)).toThrow();
     expect(() => parseWorkerResult("succeeded")).toThrow();
+  });
+});
+
+describe("parseWorkerPhaseUpdate", () => {
+  test("accepts a supported named phase", () => {
+    expect(parseWorkerPhaseUpdate({ phase: "review_wait" })).toEqual({
+      phase: "review_wait",
+    });
+  });
+
+  test("rejects malformed and unknown phases", () => {
+    expect(() => parseWorkerPhaseUpdate(null)).toThrow();
+    expect(() => parseWorkerPhaseUpdate({ phase: "thinking" })).toThrow();
   });
 });

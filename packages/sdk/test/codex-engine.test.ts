@@ -72,12 +72,15 @@ describe("buildCodexPrompt", () => {
       specPath: "/tmp/node/spec.json",
       resultPath: "/tmp/node/result.json",
       heartbeatPath: "/tmp/node/heartbeat.json",
+      phasePath: "/tmp/node/phase.json",
       contract,
     });
     expect(prompt).toContain("exactly one prism node");
     expect(prompt).toContain(contract.instructions);
     expect(prompt).toContain("Do not touch unrelated files.");
     expect(prompt).toContain("/tmp/node/result.json");
+    expect(prompt).toContain("/tmp/node/phase.json");
+    expect(prompt).toContain("review_wait");
     expect(prompt).toContain('"status":"succeeded"');
   });
 });
@@ -144,6 +147,21 @@ describe("createCodexEngine", () => {
     expect(result.status).toBe("succeeded");
     expect(output.join("")).toContain("fake codex stdout");
     expect(output.join("")).toContain("fake codex stderr");
+  });
+
+  test("observes worker-reported phase transitions", async () => {
+    const phases: string[] = [];
+    const result = await engine().execute({
+      ...paths(),
+      spec: spec("phases"),
+      contract,
+      onPhase: (phase) => {
+        phases.push(phase);
+      },
+    });
+
+    expect(result.status).toBe("succeeded");
+    expect(phases).toEqual(["implementation", "validation"]);
   });
 
   test("accepts a result before Codex exits and terminates the child", async () => {

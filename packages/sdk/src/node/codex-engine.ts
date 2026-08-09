@@ -4,10 +4,13 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { WorkerResult, WorkerSpec } from "./worker-protocol.js";
+import type { NodePhase } from "../runtime/events.js";
 import {
   NODE_DIR_ENV_VAR,
+  parseWorkerPhaseUpdate,
   parseWorkerResult,
   WORKER_HEARTBEAT_FILE,
+  WORKER_PHASE_FILE,
   WORKER_RESULT_FILE,
   WORKER_SPEC_FILE,
 } from "./worker-protocol.js";
@@ -44,12 +47,15 @@ export interface CodexExecutionInput {
   readonly signal?: AbortSignal;
   /** Receives combined stdout/stderr text when worker output is captured. */
   readonly onOutput?: (chunk: string) => void;
+  /** Receives worker-reported phase transitions in observation order. */
+  readonly onPhase?: (phase: NodePhase) => void | Promise<void>;
 }
 
 export interface CodexPromptInput extends CodexExecutionInput {
   readonly specPath: string;
   readonly resultPath: string;
   readonly heartbeatPath: string;
+  readonly phasePath: string;
 }
 
 export interface CodexEngine {
@@ -134,6 +140,11 @@ ${input.contract.instructions}
 
 Worker protocol:
 - Write heartbeat updates to ${input.heartbeatPath} as JSON: {"ts": <epoch-milliseconds>}.
+- Whenever work enters a distinguishable phase, atomically replace ${input.phasePath}
+  with JSON: {"phase":"<phase>"}. Supported worker phases are implementation,
+  validation, pull_request, ci_wait, review_wait, merge_lock_wait,
+  integration_update, conflict_resolution, merge_validation, merge, and
+  finalization. Report only real transitions; do not fabricate phase changes.
 - On success, write ${input.resultPath} as JSON:
   {"status":"succeeded","output":<JSON-safe-value>}
 - On failure, write ${input.resultPath} as JSON:
@@ -172,12 +183,14 @@ export function createCodexEngine(
       const specPath = join(nodeDir, WORKER_SPEC_FILE);
       const resultPath = join(nodeDir, WORKER_RESULT_FILE);
       const heartbeatPath = join(nodeDir, WORKER_HEARTBEAT_FILE);
+      const phasePath = join(nodeDir, WORKER_PHASE_FILE);
       const lastMessagePath = join(nodeDir, LAST_MESSAGE_FILE);
 
       await mkdir(nodeDir, { recursive: true });
       await Promise.all([
         rm(resultPath, { force: true }),
         rm(lastMessagePath, { force: true }),
+        rm(phasePath, { force: true }),
       ]);
       await writeFile(specPath, JSON.stringify(input.spec), "utf8");
       await writeHeartbeat(heartbeatPath);
@@ -226,12 +239,19 @@ export function createCodexEngine(
           specPath,
           resultPath,
           heartbeatPath,
+          phasePath,
         }),
       );
 
       let settlement: ProcessSettlement | undefined;
       let lastHeartbeat = Date.now();
+      let lastPhase: NodePhase | undefined;
       while (settlement === undefined) {
+        lastPhase = await observeWorkerPhase(
+          phasePath,
+          lastPhase,
+          input.onPhase,
+        );
         const resultRead = await readWorkerResult(resultPath);
         if (resultRead.kind === "valid") {
           await terminateProcess(child, settled, killGraceMs);
@@ -257,6 +277,7 @@ export function createCodexEngine(
       }
 
       await outputDrained;
+      await observeWorkerPhase(phasePath, lastPhase, input.onPhase);
       const finalResult = await readWorkerResult(resultPath);
       if (finalResult.kind === "valid") {
         return finalResult.result;
@@ -285,6 +306,30 @@ export function createCodexEngine(
       );
     },
   });
+}
+
+async function observeWorkerPhase(
+  path: string,
+  previous: NodePhase | undefined,
+  onPhase: ((phase: NodePhase) => void | Promise<void>) | undefined,
+): Promise<NodePhase | undefined> {
+  let source: string;
+  try {
+    source = await readFile(path, "utf8");
+  } catch (error: unknown) {
+    if (isErrnoException(error, "ENOENT")) return previous;
+    throw error;
+  }
+  let phase: NodePhase;
+  try {
+    phase = parseWorkerPhaseUpdate(JSON.parse(source) as unknown).phase;
+  } catch {
+    // Workers replace this file atomically by contract, but tolerate a partial
+    // or unsupported update so observability never destroys completed work.
+    return previous;
+  }
+  if (phase !== previous) await onPhase?.(phase);
+  return phase;
 }
 
 function captureChildOutput(

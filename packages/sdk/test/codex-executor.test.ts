@@ -246,6 +246,40 @@ describe("createCodexExecutor", () => {
     expect(outcome).toEqual({ status: "succeeded", output: null });
   });
 
+  test("forwards worker-reported phases into the run event channel", async () => {
+    const engine: CodexEngine = {
+      async execute(input) {
+        await input.onPhase?.("validation");
+        await input.onPhase?.("ci_wait");
+        return { status: "succeeded", output: null };
+      },
+    };
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+    });
+    const phases: NodePhase[] = [];
+
+    await executor.execute(
+      context([], {
+        reportPhase(phase) {
+          phases.push(phase);
+          return Promise.resolve();
+        },
+      }),
+    );
+
+    expect(phases).toEqual([
+      "worktree_setup",
+      "implementation",
+      "validation",
+      "ci_wait",
+      "workspace_cleanup",
+    ]);
+  });
+
   test("persists combined Codex worker output", async () => {
     const engine: CodexEngine = {
       execute(input) {

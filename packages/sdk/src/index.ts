@@ -64,6 +64,7 @@ export type {
   PersistedRunEvent,
   RunEvent,
 } from "./runtime/events.js";
+export { NODE_PHASES } from "./runtime/events.js";
 export type {
   Clock,
   CreateRunInput,
