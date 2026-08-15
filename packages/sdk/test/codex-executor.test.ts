@@ -16,6 +16,7 @@ import type {
   NodePhase,
 } from "../src/index.js";
 import {
+  createCodexEngine,
   createCodexExecutor,
   createFileLogBackend,
 } from "../src/node/index.js";
@@ -122,6 +123,18 @@ function context(
 }
 
 describe("createCodexExecutor", () => {
+  test("rejects an incompatible engine policy during graph preflight", () => {
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine: createCodexEngine(),
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+    });
+    expect(() => executor.validateConfig?.(implementConfig)).toThrow(
+      /requires trusted-local execution/,
+    );
+  });
+
   test("runs an implement node and maps a succeeded result", async () => {
     const { engine, inputs } = fakeEngine({
       status: "succeeded",

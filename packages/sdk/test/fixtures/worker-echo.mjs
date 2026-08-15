@@ -16,6 +16,13 @@ const spec = JSON.parse(readFileSync(join(nodeDir, "spec.json"), "utf8"));
 const config = spec.config ?? {};
 const mode = config.mode ?? "echo";
 
+if (config.captureEnvironment === true) {
+  writeFileSync(
+    join(nodeDir, "captured-env.json"),
+    JSON.stringify(process.env),
+  );
+}
+
 function beat() {
   writeFileSync(
     join(nodeDir, "heartbeat.json"),

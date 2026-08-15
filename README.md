@@ -117,7 +117,9 @@ for the versioned machine-readable timing summary.
 ## Trust
 
 Prism runs Codex, Git, GitHub CLI, Beads, and validation commands as you, with
-your network and credentials and without a sandbox. Only run DAGs you trust.
+your network and credentials in its explicit trusted-local compatibility mode.
+The SDK also provides an isolated environment policy for production adapters.
+Only run trusted-local DAGs you trust.
 Greptile app selection is enforced through the Codex worker instructions; it
 is not a separate deterministic GitHub review adapter.
 See [SECURITY.md](SECURITY.md) for details.

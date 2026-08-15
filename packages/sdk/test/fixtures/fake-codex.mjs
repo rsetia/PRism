@@ -16,6 +16,10 @@ await writeFile(
   JSON.stringify(process.argv.slice(2)),
   "utf8",
 );
+await writeFile(
+  join(nodeDir, "captured-env.json"),
+  JSON.stringify(process.env),
+);
 
 const spec = JSON.parse(await readFile(join(nodeDir, "spec.json"), "utf8"));
 const mode = spec.config?.mode ?? "success";
@@ -24,8 +28,25 @@ const phasePath = join(nodeDir, "phase.json");
 
 process.stdout.write("fake codex stdout\n");
 process.stderr.write("fake codex stderr\n");
-
-if (mode === "success" || mode === "result-then-stall" || mode === "phases") {
+if (mode === "secret-output") {
+  const exposed = `secret=${process.env.TEST_AGENT_SECRET}\n`;
+  const split = Math.floor(exposed.length / 2);
+  process.stdout.write(exposed.slice(0, split));
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  process.stdout.write(exposed.slice(split));
+  await writeFile(
+    resultPath,
+    JSON.stringify({
+      status: "failed",
+      error: `failed with ${process.env.TEST_AGENT_SECRET}`,
+      failureClass: "semantic_failed",
+    }),
+  );
+} else if (
+  mode === "success" ||
+  mode === "result-then-stall" ||
+  mode === "phases"
+) {
   if (mode === "phases") {
     await writeFile(phasePath, JSON.stringify({ phase: "implementation" }));
     await new Promise((resolve) => setTimeout(resolve, 25));

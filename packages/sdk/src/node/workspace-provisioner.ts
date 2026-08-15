@@ -32,6 +32,8 @@ export interface WorkspaceReleaseOptions {
 }
 
 export interface WorkspaceProvisioner {
+  /** Whether commands in the workspace cross a container/VM boundary. */
+  readonly isolation?: "host" | "isolated";
   provision(input: ProvisionInput): Promise<WorkspaceHandle>;
   /**
    * Tears down the workspace. Idempotent; after this resolves, handle.dir no
@@ -70,6 +72,7 @@ export function createGitWorktreeProvisioner(
   const branchPrefix = sanitizeBranchName(options.branchPrefix ?? "prism/");
 
   return Object.freeze({
+    isolation: "host" as const,
     async provision(input: ProvisionInput): Promise<WorkspaceHandle> {
       if (!Number.isInteger(input.attempt) || input.attempt < 1) {
         throw new Error("workspace attempt must be an integer greater than 0");

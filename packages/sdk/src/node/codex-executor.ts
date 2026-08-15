@@ -111,6 +111,16 @@ export function createCodexExecutor(
     name,
     validateConfig(config: JsonValue | undefined): void {
       validateCodexConfig(name, config);
+      const contract = buildContract({
+        runId: "preflight",
+        nodeId: "preflight",
+        kind: "task",
+        executor: name,
+        input: null,
+        config: config ?? null,
+        attempt: 1,
+      });
+      options.engine.validateContract?.(contract);
     },
     async execute(context: ExecutionContext): Promise<NodeExecutionOutcome> {
       let input: unknown;
