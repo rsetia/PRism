@@ -103,12 +103,30 @@ describe("deterministic production orchestration evaluations", () => {
     const effects: string[] = [];
     const durations: number[] = [];
     const costs: number[] = [];
+    const history: PersistedRunEvent[] = [];
+    const terminals = new Map<string, string>();
     const record = (name: string, events: readonly PersistedRunEvent[]) => {
       assertHistory(events);
+      history.push(...events);
       completed.push(name);
       validated.push(name);
-      durations.push(0);
-      costs.push(0);
+      const timestamps = events.flatMap((event) =>
+        event.timestampMs === null ? [] : [event.timestampMs],
+      );
+      durations.push(Math.max(...timestamps) - Math.min(...timestamps));
+      costs.push(
+        events
+          .filter((event) => event.kind === "node_usage_reported")
+          .reduce((total, event) => total + (event.usage.costUsd ?? 0), 0),
+      );
+      const terminal = [...events]
+        .reverse()
+        .find((event) =>
+          ["node_succeeded", "node_failed", "node_cancelled"].includes(
+            event.kind,
+          ),
+        );
+      terminals.set(name, terminal?.kind ?? "missing");
     };
 
     // Parallel independent work: each work item runs once and persists timing.
@@ -347,10 +365,31 @@ describe("deterministic production orchestration evaluations", () => {
       const events = await recordedEvents(handle);
       expect(events.some((event) => event.kind === "node_skipped")).toBe(true);
       record("conditional skip", events);
-      completed.push("malformed proof");
-      validated.push("malformed proof");
-      durations.push(0);
-      costs.push(0);
+      const malformed = subject.run(
+        graph({
+          version: 2,
+          nodes: {
+            proof: {
+              executor: "constant",
+              config: { value: { malformed: true } },
+            },
+            gated: {
+              executor: "fake-worker",
+              dependsOn: ["proof"],
+              when: { predicate: "diff_present", equals: true },
+            },
+          },
+          finalNode: "gated",
+        }),
+      );
+      await expect(malformed.result).resolves.toMatchObject({
+        status: "succeeded",
+      });
+      const malformedEvents = await recordedEvents(malformed);
+      expect(
+        malformedEvents.some((event) => event.kind === "node_skipped"),
+      ).toBe(true);
+      record("malformed proof", malformedEvents);
     }
 
     // Stalls and restricted execution are explicit, non-success policy outcomes.
@@ -384,12 +423,26 @@ describe("deterministic production orchestration evaluations", () => {
 
     expect(completed).toHaveLength(baseline.scenarios);
     expect(new Set(effects).size).toBe(effects.length); // no duplicate fake side effects
+    const expectedFailures = new Set([
+      "cancellation",
+      "crash/resume",
+      "stalled agent",
+      "restricted execution policy",
+    ]);
     const metrics = {
       completionRate: completed.length / baseline.scenarios,
       reviewAndValidationPassRate: validated.length / completed.length,
-      incorrectSuccessRate: 0,
-      humanInterventionRate: 0,
-      duplicateSideEffectRate: 0,
+      incorrectSuccessRate:
+        [...expectedFailures].filter(
+          (name) => terminals.get(name) === "node_succeeded",
+        ).length / expectedFailures.size,
+      humanInterventionRate:
+        history.filter((event) => event.kind === "node_reset").length /
+        completed.length,
+      duplicateSideEffectRate:
+        effects.length === 0
+          ? 0
+          : (effects.length - new Set(effects).size) / effects.length,
       maxDurationMs: Math.max(...durations),
       maxEstimatedCostUsd: Math.max(...costs),
     };
