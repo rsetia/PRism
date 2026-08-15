@@ -1,6 +1,7 @@
 import type { JsonValue, NodeKind } from "../graph/types.js";
 import { isJsonValue, isPlainObject } from "../internal/json.js";
 import type { FailureClass } from "../runtime/types.js";
+import { WORKER_PHASES, type WorkerPhase } from "../runtime/events.js";
 
 /**
  * The file protocol between the orchestrator and a worker subprocess
@@ -11,6 +12,7 @@ import type { FailureClass } from "../runtime/types.js";
 export const WORKER_SPEC_FILE = "spec.json";
 export const WORKER_RESULT_FILE = "result.json";
 export const WORKER_HEARTBEAT_FILE = "heartbeat.json";
+export const WORKER_PHASE_FILE = "phase.json";
 
 /** Env var telling the worker which directory holds its protocol files. */
 export const NODE_DIR_ENV_VAR = "PRISM_NODE_DIR";
@@ -52,6 +54,13 @@ export interface Heartbeat {
   /** Epoch milliseconds of the most recent beat. */
   readonly ts: number;
 }
+
+/** A worker-authored transition to a more specific execution phase. */
+export interface WorkerPhaseUpdate {
+  readonly phase: WorkerPhase;
+}
+
+const WORKER_PHASE_SET: ReadonlySet<string> = new Set(WORKER_PHASES);
 
 const FAILURE_CLASSES: ReadonlySet<FailureClass> = new Set([
   "transient_infra",
@@ -114,4 +123,16 @@ export function parseWorkerResult(input: unknown): WorkerResult {
   }
 
   return invalidWorkerResult('status must be "succeeded" or "failed"');
+}
+
+/** Validate the untrusted contents of phase.json. */
+export function parseWorkerPhaseUpdate(input: unknown): WorkerPhaseUpdate {
+  if (
+    !isPlainObject(input) ||
+    typeof input["phase"] !== "string" ||
+    !WORKER_PHASE_SET.has(input["phase"])
+  ) {
+    throw new Error("Invalid worker phase update");
+  }
+  return Object.freeze({ phase: input["phase"] as WorkerPhase });
 }

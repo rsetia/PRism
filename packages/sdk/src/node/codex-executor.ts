@@ -195,6 +195,7 @@ export function createCodexExecutor(
                   );
                 },
               }),
+          onPhase: context.reportPhase,
         });
         await pendingLogWrites;
         outcome =

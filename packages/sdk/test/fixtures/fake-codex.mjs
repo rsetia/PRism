@@ -20,11 +20,18 @@ await writeFile(
 const spec = JSON.parse(await readFile(join(nodeDir, "spec.json"), "utf8"));
 const mode = spec.config?.mode ?? "success";
 const resultPath = join(nodeDir, "result.json");
+const phasePath = join(nodeDir, "phase.json");
 
 process.stdout.write("fake codex stdout\n");
 process.stderr.write("fake codex stderr\n");
 
-if (mode === "success" || mode === "result-then-stall") {
+if (mode === "success" || mode === "result-then-stall" || mode === "phases") {
+  if (mode === "phases") {
+    await writeFile(phasePath, JSON.stringify({ phase: "implementation" }));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    await writeFile(phasePath, JSON.stringify({ phase: "validation" }));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
   await writeFile(
     resultPath,
     JSON.stringify({ status: "succeeded", output: spec.input }),
