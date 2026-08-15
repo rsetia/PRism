@@ -761,26 +761,29 @@ async function executeRun(
   }
 
   async function skipUnmatchedNodes(): Promise<void> {
-    const events: RunEvent[] = [];
-    for (const nodeId of graph.order) {
-      if (states.get(nodeId) !== "pending") continue;
-      const node = getNode(graph, nodeId);
-      if (
-        node.when !== undefined &&
-        node.dependsOn.every((dependencyId) => {
-          const state = states.get(dependencyId);
-          return state === "succeeded" || state === "skipped";
-        }) &&
-        !evaluateCondition(
-          node.when,
-          node.dependsOn.map((id) => outputs.get(id)),
-        )
-      ) {
-        events.push({ kind: "node_skipped", nodeId });
+    while (true) {
+      const events: RunEvent[] = [];
+      for (const nodeId of graph.order) {
+        if (states.get(nodeId) !== "pending") continue;
+        const node = getNode(graph, nodeId);
+        if (
+          node.when !== undefined &&
+          node.dependsOn.every((dependencyId) => {
+            const state = states.get(dependencyId);
+            return state === "succeeded" || state === "skipped";
+          }) &&
+          !evaluateCondition(
+            node.when,
+            node.dependsOn.map((id) => outputs.get(id)),
+          )
+        ) {
+          events.push({ kind: "node_skipped", nodeId });
+        }
       }
+      if (events.length === 0) return;
+      await applyEvents(events);
+      for (const event of events) outputs.set(event.nodeId, null);
     }
-    await applyEvents(events);
-    for (const event of events) outputs.set(event.nodeId, null);
   }
 
   function startRetryTimer(nodeId: string, delayMs: number): void {

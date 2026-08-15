@@ -260,7 +260,7 @@ export function compileGraph(graph: GraphDefinition): CompileResult {
   return {
     ok: true,
     graph: deepFreeze({
-      version: 1,
+      version: graph.version,
       nodes: compiledNodes,
       order,
       finalNode,
