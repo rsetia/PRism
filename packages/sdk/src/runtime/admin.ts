@@ -121,12 +121,6 @@ export async function resetRun(
   nodeIds: readonly string[],
   options: ResetRunOptions = {},
 ): Promise<void> {
-  const leases = await store.getRunLeases(runId);
-  if (leases.some((lease) => lease.kind === "coordinator")) {
-    throw new Error(
-      `run ownership conflict: "${runId}" has an active coordinator lease`,
-    );
-  }
   const stored = await store.getRun(runId);
   if (stored === undefined) {
     throw new Error(`unknown run: "${runId}"`);
