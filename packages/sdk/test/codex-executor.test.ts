@@ -16,6 +16,7 @@ import type {
   NodePhase,
 } from "../src/index.js";
 import {
+  createCodexEngine,
   createCodexExecutor,
   createFileLogBackend,
 } from "../src/node/index.js";
@@ -34,16 +35,41 @@ afterAll(() => {
   rmSync(tempDir, { recursive: true, force: true });
 });
 
+function proof(summary = "implemented"): JsonValue {
+  return {
+    version: 1,
+    summary,
+    commits: [{ sha: "abc123" }],
+    pullRequests: [
+      {
+        url: "https://github.com/example/repo/pull/5",
+        number: 5,
+        branch: "prism/mc-1",
+        headSha: "abc123",
+      },
+    ],
+    validations: [{ command: "npm test", status: "passed" }],
+    reviewVerdicts: [],
+    screenshots: [],
+    artifacts: [],
+    unresolvedRisks: [],
+  };
+}
+
 /** A CodexEngine that records its input and returns a canned result. */
 function fakeEngine(result: WorkerResult): {
   engine: CodexEngine;
   inputs: CodexExecutionInput[];
 } {
   const inputs: CodexExecutionInput[] = [];
+  const normalized =
+    result.status === "succeeded" && result.output === null
+      ? { ...result, output: proof() }
+      : result;
   const engine: CodexEngine = {
     execute(input) {
       inputs.push(input);
-      return Promise.resolve(result);
+      return Promise.resolve(normalized);
     },
   };
   return { engine, inputs };
@@ -149,7 +175,7 @@ describe("createCodexExecutor", () => {
         yield { kind: "phase", phase: "validation" } as const;
         yield {
           kind: "result",
-          result: { status: "succeeded", output: { session: true } },
+          result: { status: "succeeded", output: proof("resumable session") },
         } as const;
       },
     };
@@ -168,15 +194,30 @@ describe("createCodexExecutor", () => {
           },
         }),
       ),
-    ).resolves.toEqual({ status: "succeeded", output: { session: true } });
+    ).resolves.toEqual({
+      status: "succeeded",
+      output: proof("resumable session"),
+    });
     expect(calls).toEqual(["start:direct-run:direct-node:1"]);
     expect(phases).toContain("validation");
+  });
+
+  test("rejects an incompatible engine policy during graph preflight", () => {
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine: createCodexEngine(),
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+    });
+    expect(() => executor.validateConfig?.(implementConfig)).toThrow(
+      /requires trusted-local execution/,
+    );
   });
 
   test("runs an implement node and maps a succeeded result", async () => {
     const { engine, inputs } = fakeEngine({
       status: "succeeded",
-      output: { branch: "prism/mc-1", pr_number: 5 },
+      output: proof(),
     });
     const executor = createCodexExecutor({
       name: "implement",
@@ -188,7 +229,7 @@ describe("createCodexExecutor", () => {
       .result;
     expect(outcome).toEqual({
       status: "succeeded",
-      output: { branch: "prism/mc-1", pr_number: 5 },
+      output: proof(),
     });
 
     // The engine received the implement contract (git + GitHub permissions).
@@ -221,6 +262,25 @@ describe("createCodexExecutor", () => {
     if (outcome.status === "failed") {
       expect(outcome.failures[0]?.failureClass).toBe("semantic_failed");
     }
+  });
+
+  test("malformed agent evidence fails with validation_failed", async () => {
+    const { engine } = fakeEngine({
+      status: "succeeded",
+      output: { summary: "prose is not durable evidence" },
+    });
+    const outcome = await createCodexExecutor({
+      name: "implement",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+    }).execute(context());
+
+    expect(outcome).toMatchObject({
+      status: "failed",
+      failureClass: "validation_failed",
+      cause: { code: "MALFORMED_PROOF_OF_WORK" },
+    });
   });
 
   test("provisions a worktree and releases it", async () => {
@@ -294,7 +354,7 @@ describe("createCodexExecutor", () => {
       }),
     );
 
-    expect(outcome).toEqual({ status: "succeeded", output: null });
+    expect(outcome).toEqual({ status: "succeeded", output: proof() });
   });
 
   test("forwards worker-reported phases into the run event channel", async () => {
@@ -302,7 +362,7 @@ describe("createCodexExecutor", () => {
       async execute(input) {
         await input.onPhase?.("validation");
         await input.onPhase?.("ci_wait");
-        return { status: "succeeded", output: null };
+        return { status: "succeeded", output: proof() };
       },
     };
     const executor = createCodexExecutor({
@@ -336,7 +396,7 @@ describe("createCodexExecutor", () => {
       execute(input) {
         input.onOutput?.("planning\n");
         input.onOutput?.("implemented\n");
-        return Promise.resolve({ status: "succeeded", output: null });
+        return Promise.resolve({ status: "succeeded", output: proof() });
       },
     };
     const logBackend = createFileLogBackend({
@@ -410,7 +470,7 @@ describe("createCodexExecutor", () => {
   test("dispatches finalize_pr to its own contract", async () => {
     const { engine, inputs } = fakeEngine({
       status: "succeeded",
-      output: { ready_for_human_merge: true },
+      output: proof("ready for human merge"),
     });
     const executor = createCodexExecutor({
       name: "finalize_pr",

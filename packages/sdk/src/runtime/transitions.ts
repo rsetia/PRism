@@ -29,7 +29,11 @@ export class IllegalTransitionError extends Error {
  * Legal transitions (everything else throws IllegalTransitionError):
  *   pending  + node_ready     -> ready
  *   pending  + node_blocked   -> blocked
+ *   pending  + node_skipped   -> skipped
  *   ready    + node_started   -> running
+ *   ready    + node_resource_wait -> resource_wait
+ *   ready | resource_wait + node_resource_wait -> resource_wait
+ *   ready | resource_wait + node_started -> running
  *   running | cancelling + node_phase_changed -> unchanged
  *   running  + node_succeeded -> succeeded
  *   running  + node_failed    -> failed
@@ -39,7 +43,7 @@ export class IllegalTransitionError extends Error {
  *   cancelling + node_failed | node_retry_wait -> failed | retry_wait
  *     (resume recovery after an interrupted executor)
  *   retry_wait + node_ready | node_cancelled -> ready | cancelled
- *   pending | ready + node_cancelled -> cancelled
+ *   pending | ready | resource_wait + node_cancelled -> cancelled
  *
  * Implementation notes: switch on event.kind with a `never` default arm,
  * so adding an event kind refuses to compile until it's handled here.
@@ -56,8 +60,14 @@ export function reduceNodeState(
       break;
 
     case "node_started":
-      if (previous === "ready") {
+      if (previous === "ready" || previous === "resource_wait") {
         return "running";
+      }
+      break;
+
+    case "node_resource_wait":
+      if (previous === "ready" || previous === "resource_wait") {
+        return "resource_wait";
       }
       break;
 
@@ -85,6 +95,12 @@ export function reduceNodeState(
       }
       break;
 
+    case "node_skipped":
+      if (previous === "pending") {
+        return "skipped";
+      }
+      break;
+
     case "node_cancelling":
       if (previous === "running") {
         return "cancelling";
@@ -101,6 +117,7 @@ export function reduceNodeState(
       if (
         previous === "pending" ||
         previous === "ready" ||
+        previous === "resource_wait" ||
         previous === "cancelling" ||
         previous === "retry_wait"
       ) {

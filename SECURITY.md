@@ -2,11 +2,20 @@
 
 ## Trust model — read this before running a graph you didn't write
 
-Prism executes real commands on your machine. Its Node-only executors spawn
-subprocesses — `codex`, `gh`, `bd`, and any `validationCommands` you configure
-— **as the current user, with no sandbox and no privilege drop.** A coding
-agent (`createCodexExecutor`) is given git-mutation and GitHub permissions and
-runs `codex exec` inside a worktree of your repository.
+Prism executes real commands. Agent-backed process boundaries have two explicit
+host-selected modes; graph data cannot select or weaken them:
+
+- **Isolated (SDK default):** a child receives only `PATH`, Prism's worker
+  protocol variable, and variables explicitly allowlisted or supplied by the
+  host. Codex must use a sandbox and cannot request `danger-full-access`.
+  Production deployments should combine this mode with an `ExecutionBackend`
+  or `WorkspaceProvisioner` whose `isolation` capability is `"isolated"`
+  (for example a container or pod) to enforce filesystem and network policy.
+- **Trusted local (CLI compatibility mode):** the child inherits the host
+  environment and Codex contracts may bypass its sandbox. The bundled CLI
+  selects this mode explicitly because its implementation/review workers need
+  local Git metadata, host credentials, and GitHub network access. Use it only
+  for graphs and repositories you trust as fully as a shell script.
 
 The boundary Prism enforces is narrow and specific:
 
@@ -16,8 +25,8 @@ The boundary Prism enforces is narrow and specific:
   crash the engine or reach an executor.
 - **Configured executor names and commands are trusted _code_.** A graph that
   names the `implement` executor, or sets `validationCommands: ["rm -rf …"]`,
-  is asking Prism to run that. Prism does **not** sandbox, allow-list, or
-  otherwise contain what a configured executor does.
+  is asking Prism to run that. Environment filtering does not make arbitrary
+  configured commands safe.
 
 **Consequence: do not run a graph, or point `buildBeadsGraph` at a backlog,
 from a source you do not fully trust.** Treat a `.json`/`.yaml` graph the way
@@ -32,20 +41,24 @@ you'd treat a shell script someone handed you.
   refuses paths that escape it (including via symlinks).
 - Git arguments and external commands are passed via `execFile` (no shell), so
   a branch or path with a space cannot become command injection.
+- Isolated execution rejects unrestricted environment inheritance and unsafe
+  Codex sandbox combinations before a child process starts.
+- Values named by `secretNames`, plus literal `redactValues`, are removed from
+  captured agent logs and persisted worker errors. Keep credentials host-side
+  where possible; redaction limits accidental disclosure but is not a vault.
 
 ## What Prism does NOT do
 
-- **No sandboxing** of executors or the subprocesses they spawn.
-- **No secret redaction** — a worker inherits the parent environment, so API
-  tokens and credentials in `process.env` are visible to it. Do not put
-  secrets in graph `config`; pass them via the environment, and be aware the
-  worker sees them.
-- **No network or filesystem policy** — a codex/subprocess node can read and
-  write anywhere the user can, and reach the network.
+- The SDK's environment policy is not itself a container, privilege drop,
+  filesystem allowlist, or network firewall. Use an isolated backend/workspace
+  implementation for those controls.
+- Trusted-local children can read anything the current user can read and can
+  reach the host network.
+- Secrets deliberately sent to an agent remain visible to that agent and any
+  command it invokes. Prefer scoped host-side operations over raw credentials.
 
-The absence of sandboxing is by design at this stage (single-machine,
-single-user, trusted-repo operation), and is called out here rather than
-implied.
+Cancellation terminates the supervised child, but external operations already
+performed by that child may not be reversible.
 
 ## Supported versions
 

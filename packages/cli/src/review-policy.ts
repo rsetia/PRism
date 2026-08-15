@@ -79,6 +79,7 @@ export function applyGreptileAppSlug(
       executor: node.executor,
       kind: node.kind,
       dependsOn: node.dependsOn,
+      ...(node.resources.length === 0 ? {} : { resources: node.resources }),
       ...(config === undefined ? {} : { config }),
     };
   }
@@ -89,6 +90,7 @@ export function applyGreptileAppSlug(
 
   const definition: GraphDefinition = {
     version: 1,
+    resources: graph.resources,
     nodes,
     finalNode: graph.finalNode,
   };

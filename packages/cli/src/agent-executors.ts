@@ -16,6 +16,7 @@ import {
   createGitWorktreeProvisioner,
   createMergePrExecutor,
   type AgentSessionBackend,
+  TRUSTED_LOCAL_AGENT_EXECUTION_POLICY,
 } from "@rsetia/prism/node";
 import { resolvePrismProjectPaths } from "./prism-home.js";
 
@@ -63,6 +64,7 @@ export function createAgentExecutorRegistry(
   );
   const logBackend = createFileLogBackend({ baseDir: logBaseDir });
   const codexEngine = createCodexEngine({
+    executionPolicy: TRUSTED_LOCAL_AGENT_EXECUTION_POLICY,
     ...(options.codexCommand === undefined
       ? {}
       : { command: options.codexCommand }),

@@ -9,6 +9,7 @@ import type { JsonValue } from "../graph/types.js";
  * Legal moves:
  *   pending -> ready -> running -> succeeded | failed
  *   pending -> blocked      (a dependency failed or was blocked; terminal)
+ *   pending -> skipped      (its declarative condition evaluated false; terminal)
  *   pending | ready -> cancelled            (cancellation accepted directly)
  *   running -> cancelling -> cancelled      (waits for the executor to settle)
  *   running -> retry_wait -> ready          (retryable failure; backoff then re-run)
@@ -17,10 +18,12 @@ import type { JsonValue } from "../graph/types.js";
 export type NodeState =
   | "pending"
   | "ready"
+  | "resource_wait"
   | "running"
   | "succeeded"
   | "failed"
   | "blocked"
+  | "skipped"
   | "cancelling"
   | "cancelled"
   | "retry_wait";
@@ -30,6 +33,7 @@ export const TERMINAL_NODE_STATES: ReadonlySet<NodeState> = new Set([
   "succeeded",
   "failed",
   "blocked",
+  "skipped",
   "cancelled",
 ]);
 

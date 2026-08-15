@@ -3,3 +3,5 @@ coverage/
 package-lock.json
 docs/
 packages/cli/test/fixtures/
+.prism-*/
+.prism-run-*/

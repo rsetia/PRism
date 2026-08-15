@@ -159,10 +159,11 @@ describe("buildImplementContract", () => {
     expect(contract.allowsGitMutation).toBe(true);
     expect(contract.allowsGitHubIo).toBe(true);
     expect(contract.dangerouslyBypassApprovalsAndSandbox).toBe(true);
+    expect(contract.requiredExecutionMode).toBe("trusted-local");
     expect(contract.sandbox).toBeUndefined();
     expect(contract.instructions.length).toBeGreaterThan(0);
     expect(contract.instructions).toContain('"status":"succeeded"');
-    expect(contract.instructions).toContain('"metadata"');
+    expect(contract.instructions).toContain('"version":1');
     expect(contract.instructions).toContain('"branch"');
     expect(contract.instructions).toContain(
       "start the iteration count at zero",
@@ -306,11 +307,12 @@ describe("buildMergeResolveContract", () => {
     expect(contract.allowsGitMutation).toBe(true);
     expect(contract.allowsGitHubIo).toBe(true);
     expect(contract.dangerouslyBypassApprovalsAndSandbox).toBe(true);
+    expect(contract.requiredExecutionMode).toBe("trusted-local");
     expect(contract.sandbox).toBeUndefined();
     expect(contract.instructions).toContain("implement-mc-1");
     expect(contract.instructions).toContain("--force-with-lease");
     expect(contract.instructions).toContain("Never direct-push");
-    expect(contract.instructions).toContain('"merge_commit"');
+    expect(contract.instructions).toContain('"commits"');
   });
 
   test("includes the configured merge method and validation commands", () => {
@@ -370,7 +372,7 @@ describe("finalize_pr contract", () => {
     expect(contract.instructions).toContain("@claude review");
     expect(contract.instructions).toContain("npm run verify");
     expect(contract.instructions).toContain("Never merge or close");
-    expect(contract.instructions).toContain("ready_for_human_merge");
+    expect(contract.instructions).toContain("ready for human merge");
     expect(contract.allowsGitMutation).toBe(true);
     expect(contract.allowsGitHubIo).toBe(true);
   });

@@ -1159,6 +1159,45 @@ describe("prism CLI: persisted runs", () => {
     });
   });
 
+  test("inspect renders a concise proof-of-work summary", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "prism-evidence-cli-"));
+    const graphPath = join(directory, "graph.json");
+    const store = join(directory, "run.db");
+    writeFileSync(
+      graphPath,
+      JSON.stringify({
+        version: 1,
+        nodes: {
+          work: {
+            executor: "constant",
+            config: {
+              value: {
+                version: 1,
+                summary: "Durable proof captured",
+                commits: [{ sha: "abc123" }],
+                pullRequests: [],
+                validations: [{ command: "npm test", status: "passed" }],
+                reviewVerdicts: [],
+                screenshots: [],
+                artifacts: [],
+                unresolvedRisks: [],
+              },
+            },
+          },
+        },
+        finalNode: "work",
+      }),
+    );
+    await cli("run", graphPath, "--store", store, "--run-id", "proof-run");
+
+    const inspected = await cli("inspect", "proof-run", "--store", store);
+    expect(inspected.code).toBe(0);
+    expect(inspected.stdout).toContain(
+      "evidence: Durable proof captured · 1 commit(s) · 0 PR(s) · 1/1 validation(s) passed · 0 unresolved risk(s)",
+    );
+    rmSync(directory, { recursive: true, force: true });
+  });
+
   test("events lists the persisted event log in order", async () => {
     const store = db();
     await cli("run", fixture("valid.json"), "--store", store, "--run-id", "r3");

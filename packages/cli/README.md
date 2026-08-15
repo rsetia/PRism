@@ -74,6 +74,10 @@ by default. It includes `open`, `in_progress`, and `blocked` work unless
 greptile|claude|none` to choose the gate, `--greptile-app-slug` to restrict
 Greptile feedback to one GitHub App identity, and `--no-merge-nodes`,
 `--no-beads-update`, or `--no-serialize-merges` to alter the generated DAG.
+By default, merge nodes share a capacity-one `integration-branch` scheduler
+resource, so unrelated Beads remain parallel in the dependency DAG while
+integration-branch updates run one at a time. `--no-serialize-merges` omits
+that resource request.
 Add `--final-pr-base <branch>` to append a terminal integration-PR node. It
 opens or reuses a pull request from `--target-branch` to that base, runs the
 selected reviewer and repeatable `--final-pr-validation-command` checks on the
@@ -100,7 +104,8 @@ Commands: `skills` (install the planning skill); `validate`, `graph`,
 `beads-dag`, `run` (author and execute);
 `status`, `inspect`, `events`, `watch`, `logs` (observe); `resume`, `abort`,
 `signal`, `rerun-node` (recover). Graphs may be JSON or YAML.
-`inspect` includes phase durations, elapsed time, the weighted critical path,
+`inspect` includes phase durations, elapsed time, resource-contention waits,
+the weighted critical path,
 and largest waits; `inspect --json` exposes the same timing data for tools.
 
 Codex-backed nodes default to `gpt-5.6-terra` with `medium` reasoning. Both

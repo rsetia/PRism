@@ -4,3 +4,5 @@ dist/
 coverage/
 *.tsbuildinfo
 *.tgz
+.prism-*/
+.prism-run-*/

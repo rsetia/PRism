@@ -9,10 +9,12 @@ export type { CompileResult } from "./graph/compile.js";
 export type {
   CompiledGraph,
   CompiledNode,
+  ExecutionCondition,
   GraphDefinition,
   JsonValue,
   NodeDefinition,
   NodeKind,
+  ResourceDefinition,
 } from "./graph/types.js";
 export type { GraphCompileError, GraphParseError } from "./graph/errors.js";
 export { buildBeadsGraph, parseBeadsJsonl } from "./beads/generate.js";
@@ -29,6 +31,18 @@ export {
   reduceNodeState,
 } from "./runtime/transitions.js";
 export { TERMINAL_NODE_STATES } from "./runtime/types.js";
+export {
+  parseProofOfWork,
+  PROOF_OF_WORK_VERSION,
+  tryParseProofOfWork,
+} from "./runtime/proof-of-work.js";
+export type {
+  CommitEvidence,
+  ProofOfWorkV1,
+  PullRequestEvidence,
+  ReviewVerdictEvidence,
+  ValidationEvidence,
+} from "./runtime/proof-of-work.js";
 export type {
   FailureClass,
   NodeFailure,

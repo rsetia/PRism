@@ -1,4 +1,9 @@
-import type { CompiledGraph, CompiledNode, JsonValue } from "../graph/types.js";
+import type {
+  CompiledGraph,
+  CompiledNode,
+  ExecutionCondition,
+  JsonValue,
+} from "../graph/types.js";
 import {
   snapshotJsonValue,
   snapshotNodeFailure,
@@ -378,7 +383,110 @@ interface RunExecutionState {
   readonly outputs: Map<string, JsonValue>;
   readonly originatingFailures: Map<string, NodeFailure>;
   readonly retryDelays: Map<string, number>;
+  /** Most recently persisted contention reason for each parked node. */
+  readonly resourceWaitResourceIds: Map<string, readonly string[]>;
   readonly hasCancelledNodes: boolean;
+}
+
+interface Proof {
+  readonly changedPaths: readonly string[];
+  readonly hasDiff: boolean | undefined;
+  readonly validationStatuses: readonly ("passed" | "failed")[];
+  readonly reviewStatuses: readonly ("approved" | "changes_requested")[];
+  readonly hasUnresolvedRisk: boolean;
+}
+
+/**
+ * Conditions deliberately recognize only the v1 proof envelope. Arbitrary
+ * executor output is not introspected, so a graph cannot turn this into an
+ * implicit file, environment, or command-reading capability.
+ */
+function evaluateCondition(
+  condition: ExecutionCondition,
+  inputs: readonly (JsonValue | undefined)[],
+): boolean {
+  const proof = collectProof(inputs);
+  if ("all" in condition)
+    return condition.all.every((child) => evaluateCondition(child, inputs));
+  if ("any" in condition)
+    return condition.any.some((child) => evaluateCondition(child, inputs));
+  if ("not" in condition) return !evaluateCondition(condition.not, inputs);
+  switch (condition.predicate) {
+    case "changed_path":
+      return proof.changedPaths.some((path) =>
+        globMatches(condition.matches, path),
+      );
+    case "diff_present":
+      return proof.hasDiff === condition.equals;
+    case "validation_status":
+      return proof.validationStatuses.includes(condition.equals);
+    case "review_status":
+      return proof.reviewStatuses.includes(condition.equals);
+    case "unresolved_risk":
+      return proof.hasUnresolvedRisk === condition.equals;
+  }
+}
+
+function collectProof(inputs: readonly (JsonValue | undefined)[]): Proof {
+  const changedPaths: string[] = [];
+  const validationStatuses: ("passed" | "failed")[] = [];
+  const reviewStatuses: ("approved" | "changes_requested")[] = [];
+  let hasDiff: boolean | undefined;
+  let hasUnresolvedRisk = false;
+  for (const input of inputs) {
+    if (
+      !isRecord(input) ||
+      !isRecord(input["proof"]) ||
+      input["proof"]["version"] !== 1
+    )
+      continue;
+    const proof = input["proof"];
+    if (Array.isArray(proof["changedPaths"]))
+      changedPaths.push(
+        ...proof["changedPaths"].filter(
+          (value): value is string => typeof value === "string",
+        ),
+      );
+    if (typeof proof["hasDiff"] === "boolean")
+      hasDiff = hasDiff === true || proof["hasDiff"];
+    if (
+      proof["validationStatus"] === "passed" ||
+      proof["validationStatus"] === "failed"
+    )
+      validationStatuses.push(proof["validationStatus"]);
+    if (
+      proof["reviewStatus"] === "approved" ||
+      proof["reviewStatus"] === "changes_requested"
+    )
+      reviewStatuses.push(proof["reviewStatus"]);
+    if (proof["unresolvedRisk"] === true) hasUnresolvedRisk = true;
+  }
+  return {
+    changedPaths,
+    hasDiff,
+    validationStatuses,
+    reviewStatuses,
+    hasUnresolvedRisk,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function globMatches(pattern: string, value: string): boolean {
+  const expression =
+    "^" +
+    pattern
+      .split("**")
+      .map((part) => part.split("*").map(escapeRegex).join("[^/]*"))
+      .join(".*") +
+    "$";
+  return new RegExp(expression).test(value);
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
 }
 
 function createInitialExecutionState(graph: CompiledGraph): RunExecutionState {
@@ -394,6 +502,7 @@ function createInitialExecutionState(graph: CompiledGraph): RunExecutionState {
     outputs: new Map(),
     originatingFailures: new Map(),
     retryDelays: new Map(),
+    resourceWaitResourceIds: new Map(),
     hasCancelledNodes: false,
   };
 }
@@ -418,6 +527,10 @@ function replayExecutionState(
           event.nodeId,
           (initial.attempts.get(event.nodeId) ?? 0) + 1,
         );
+        initial.resourceWaitResourceIds.delete(event.nodeId);
+        break;
+      case "node_resource_wait":
+        initial.resourceWaitResourceIds.set(event.nodeId, event.resourceIds);
         break;
       case "node_phase_changed":
         break;
@@ -441,11 +554,13 @@ function replayExecutionState(
         initial.outputs.delete(event.nodeId);
         initial.originatingFailures.delete(event.nodeId);
         initial.retryDelays.delete(event.nodeId);
+        initial.resourceWaitResourceIds.delete(event.nodeId);
         cancelledNodes.delete(event.nodeId);
         break;
       case "node_ready":
       case "node_blocked":
       case "node_cancelling":
+      case "node_skipped":
         break;
       default: {
         const unhandledEvent: never = event;
@@ -510,6 +625,7 @@ async function executeRun(
       resumedState === "succeeded" ||
       resumedState === "failed" ||
       resumedState === "blocked" ||
+      resumedState === "skipped" ||
       resumedState === "cancelled"
     ) {
       continue;
@@ -543,8 +659,14 @@ async function executeRun(
   }
 
   const execution = initialState ?? createInitialExecutionState(graph);
-  const { states, attempts, outputs, originatingFailures, retryDelays } =
-    execution;
+  const {
+    states,
+    attempts,
+    outputs,
+    originatingFailures,
+    retryDelays,
+    resourceWaitResourceIds,
+  } = execution;
   const inFlight = new Map<string, Promise<SchedulerEvent>>();
   let cancellationObserved = false;
   let cancellationAccepted = execution.hasCancelledNodes;
@@ -616,9 +738,10 @@ async function executeRun(
 
       const node = getNode(graph, nodeId);
       if (
-        node.dependsOn.every(
-          (dependencyId) => states.get(dependencyId) === "succeeded",
-        )
+        node.dependsOn.every((dependencyId) => {
+          const state = states.get(dependencyId);
+          return state === "succeeded" || state === "skipped";
+        })
       ) {
         events.push({ kind: "node_ready", nodeId });
       }
@@ -648,6 +771,32 @@ async function executeRun(
         return;
       }
       await applyEvents(events);
+    }
+  }
+
+  async function skipUnmatchedNodes(): Promise<void> {
+    while (true) {
+      const events: RunEvent[] = [];
+      for (const nodeId of graph.order) {
+        if (states.get(nodeId) !== "pending") continue;
+        const node = getNode(graph, nodeId);
+        if (
+          node.when !== undefined &&
+          node.dependsOn.every((dependencyId) => {
+            const state = states.get(dependencyId);
+            return state === "succeeded" || state === "skipped";
+          }) &&
+          !evaluateCondition(
+            node.when,
+            node.dependsOn.map((id) => outputs.get(id)),
+          )
+        ) {
+          events.push({ kind: "node_skipped", nodeId });
+        }
+      }
+      if (events.length === 0) return;
+      await applyEvents(events);
+      for (const event of events) outputs.set(event.nodeId, null);
     }
   }
 
@@ -714,14 +863,60 @@ async function executeRun(
       [...states.values()].filter((state) => state === "running").length;
 
     while (runningCount() < maxConcurrency && !cancellation.isRequested()) {
-      const nodeId = graph.order.find(
-        (candidateId) => states.get(candidateId) === "ready",
-      );
+      const held = new Map<string, number>();
+      for (const runningNodeId of graph.order) {
+        const state = states.get(runningNodeId);
+        if (state !== "running" && state !== "cancelling") continue;
+        for (const resourceId of getNode(graph, runningNodeId).resources) {
+          held.set(resourceId, (held.get(resourceId) ?? 0) + 1);
+        }
+      }
+      const waits: RunEvent[] = [];
+      for (const candidateId of graph.order) {
+        const state = states.get(candidateId);
+        if (state !== "ready" && state !== "resource_wait") continue;
+        const saturated = getNode(graph, candidateId).resources.filter(
+          (resourceId) =>
+            (held.get(resourceId) ?? 0) >=
+            (graph.resources[resourceId]?.capacity ?? 0),
+        );
+        if (
+          saturated.length > 0 &&
+          (state === "ready" ||
+            !sameResourceIds(
+              resourceWaitResourceIds.get(candidateId) ?? [],
+              saturated,
+            ))
+        ) {
+          waits.push({
+            kind: "node_resource_wait",
+            nodeId: candidateId,
+            resourceIds: saturated,
+          });
+          resourceWaitResourceIds.set(candidateId, saturated);
+        }
+      }
+      await applyEvents(waits);
+
+      const nodeId = graph.order.find((candidateId) => {
+        const state = states.get(candidateId);
+        if (state !== "ready" && state !== "resource_wait") return false;
+        return getNode(graph, candidateId).resources.every((resourceId) => {
+          const capacity = graph.resources[resourceId]?.capacity;
+          if (capacity === undefined) {
+            throw new Error(
+              `compiled graph is missing resource "${resourceId}"`,
+            );
+          }
+          return (held.get(resourceId) ?? 0) < capacity;
+        });
+      });
       if (nodeId === undefined) {
         return;
       }
 
       await applyEvents([{ kind: "node_started", nodeId }]);
+      resourceWaitResourceIds.delete(nodeId);
       const attempt = (attempts.get(nodeId) ?? 0) + 1;
       attempts.set(nodeId, attempt);
       if (cancellation.isRequested()) {
@@ -758,7 +953,12 @@ async function executeRun(
 
     for (const nodeId of graph.order) {
       const state = states.get(nodeId);
-      if (state === "pending" || state === "ready" || state === "retry_wait") {
+      if (
+        state === "pending" ||
+        state === "ready" ||
+        state === "resource_wait" ||
+        state === "retry_wait"
+      ) {
         events.push({ kind: "node_cancelled", nodeId });
         if (state === "retry_wait") {
           retryWaitingNodeIds.push(nodeId);
@@ -828,6 +1028,7 @@ async function executeRun(
   }
 
   await propagateBlockedNodes();
+  await skipUnmatchedNodes();
   await promoteReadyNodes();
 
   while (true) {
@@ -926,6 +1127,7 @@ async function executeRun(
           },
         ]);
         outputs.set(schedulerEvent.nodeId, schedulerEvent.outcome.output);
+        await skipUnmatchedNodes();
         await promoteReadyNodes();
         break;
       }
@@ -950,6 +1152,7 @@ async function executeRun(
       state !== "succeeded" &&
       state !== "failed" &&
       state !== "blocked" &&
+      state !== "skipped" &&
       state !== "cancelled"
     ) {
       throw new Error(`run stopped with node "${nodeId}" in state "${state}"`);
@@ -978,6 +1181,16 @@ async function executeRun(
     status: "succeeded",
     output: outputs.get(graph.finalNode) as JsonValue,
   };
+}
+
+function sameResourceIds(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((id, index) => id === right[index])
+  );
 }
 
 /**

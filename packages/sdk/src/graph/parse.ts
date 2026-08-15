@@ -3,7 +3,9 @@ import type {
   GraphDefinition,
   JsonValue,
   NodeDefinition,
+  ExecutionCondition,
   NodeKind,
+  ResourceDefinition,
 } from "./types.js";
 import { isJsonValue, isPlainObject } from "../internal/json.js";
 
@@ -11,8 +13,15 @@ export type ParseResult =
   | { readonly ok: true; readonly graph: GraphDefinition }
   | { readonly ok: false; readonly errors: readonly GraphParseError[] };
 
-const ROOT_PROPERTIES = new Set(["version", "nodes", "finalNode"]);
-const NODE_PROPERTIES = new Set(["executor", "dependsOn", "kind", "config"]);
+const ROOT_PROPERTIES = new Set(["version", "resources", "nodes", "finalNode"]);
+const NODE_PROPERTIES = new Set([
+  "executor",
+  "dependsOn",
+  "kind",
+  "resources",
+  "config",
+  "when",
+]);
 
 /**
  * The trust boundary: unknown in, typed graph (or structured errors) out.
@@ -39,7 +48,7 @@ export function parseGraph(input: unknown): ParseResult {
 
   const errors: GraphParseError[] = [];
 
-  if (input["version"] !== 1) {
+  if (input["version"] !== 1 && input["version"] !== 2) {
     errors.push({
       code: "UNSUPPORTED_VERSION",
       found: input["version"],
@@ -56,6 +65,42 @@ export function parseGraph(input: unknown): ParseResult {
     null,
   ) as Record<string, NodeDefinition>;
   const nodes = input["nodes"];
+
+  const parsedResources: Record<string, ResourceDefinition> = Object.create(
+    null,
+  ) as Record<string, ResourceDefinition>;
+  const resources = input["resources"];
+  let resourcesAreValid = true;
+  if (Object.hasOwn(input, "resources")) {
+    if (!isPlainObject(resources)) {
+      errors.push({ code: "INVALID_RESOURCES", path: "resources" });
+      resourcesAreValid = false;
+    } else {
+      for (const [resourceId, candidate] of Object.entries(resources)) {
+        if (resourceId.length === 0) {
+          errors.push({ code: "INVALID_RESOURCES", path: "resources." });
+          resourcesAreValid = false;
+          continue;
+        }
+        if (
+          !isPlainObject(candidate) ||
+          Object.keys(candidate).some((key) => key !== "capacity") ||
+          !Number.isSafeInteger(candidate["capacity"]) ||
+          (candidate["capacity"] as number) < 1
+        ) {
+          errors.push({
+            code: "INVALID_RESOURCES",
+            path: `resources.${resourceId}`,
+          });
+          resourcesAreValid = false;
+          continue;
+        }
+        parsedResources[resourceId] = {
+          capacity: candidate["capacity"] as number,
+        };
+      }
+    }
+  }
 
   if (!isPlainObject(nodes) || Object.keys(nodes).length === 0) {
     errors.push({ code: "EMPTY_GRAPH" });
@@ -153,12 +198,60 @@ export function parseGraph(input: unknown): ParseResult {
         errors.push({ code: "INVALID_KIND", nodeId, found: kind });
       }
 
-      if (executorIsValid && dependsOnIsValid && configIsValid && kindIsValid) {
+      const hasWhen = Object.hasOwn(candidate, "when");
+      const parsedWhen = hasWhen
+        ? parseCondition(candidate["when"], nodeId, "when", errors)
+        : undefined;
+      if (hasWhen && input["version"] === 1) {
+        errors.push({ code: "CONDITION_REQUIRES_VERSION_2", nodeId });
+      }
+
+      const requestedResources: string[] = [];
+      let requestedResourcesAreValid = true;
+      if (Object.hasOwn(candidate, "resources")) {
+        const requests = candidate["resources"];
+        if (!Array.isArray(requests)) {
+          requestedResourcesAreValid = false;
+        } else {
+          const seen = new Set<string>();
+          for (const resourceId of requests) {
+            if (typeof resourceId !== "string" || resourceId.length === 0) {
+              requestedResourcesAreValid = false;
+              continue;
+            }
+            requestedResources.push(resourceId);
+            if (seen.has(resourceId)) {
+              errors.push({
+                code: "DUPLICATE_RESOURCE",
+                nodeId,
+                resourceId,
+              });
+            }
+            seen.add(resourceId);
+          }
+        }
+      }
+      if (!requestedResourcesAreValid) {
+        errors.push({ code: "INVALID_NODE", nodeId, property: "resources" });
+      }
+
+      if (
+        executorIsValid &&
+        dependsOnIsValid &&
+        configIsValid &&
+        kindIsValid &&
+        requestedResourcesAreValid &&
+        (!hasWhen || parsedWhen !== undefined)
+      ) {
         parsedNodes[nodeId] = {
           executor,
           dependsOn,
           ...(hasKind ? { kind: kind as NodeKind } : {}),
+          ...(Object.hasOwn(candidate, "resources")
+            ? { resources: requestedResources }
+            : {}),
           ...(hasConfig ? { config: config as JsonValue } : {}),
+          ...(parsedWhen === undefined ? {} : { when: parsedWhen }),
         };
       }
     }
@@ -178,8 +271,91 @@ export function parseGraph(input: unknown): ParseResult {
 
   return {
     ok: true,
-    graph: hasFinalNode
-      ? { version: 1, nodes: parsedNodes, finalNode: finalNode as string }
-      : { version: 1, nodes: parsedNodes },
+    graph: {
+      version: input["version"] as 1 | 2,
+      ...(Object.hasOwn(input, "resources") && resourcesAreValid
+        ? { resources: parsedResources }
+        : {}),
+      nodes: parsedNodes,
+      ...(hasFinalNode ? { finalNode: finalNode as string } : {}),
+    },
   };
+}
+
+function parseCondition(
+  value: unknown,
+  nodeId: string,
+  path: string,
+  errors: GraphParseError[],
+): ExecutionCondition | undefined {
+  const invalid = (): undefined => {
+    errors.push({ code: "INVALID_CONDITION", nodeId, path });
+    return undefined;
+  };
+  if (!isPlainObject(value)) return invalid();
+  const keys = Object.keys(value);
+  const combinator = keys.find(
+    (key) => key === "all" || key === "any" || key === "not",
+  );
+  if (combinator !== undefined) {
+    if (keys.length !== 1) return invalid();
+    if (combinator === "not") {
+      const nested = parseCondition(
+        value["not"],
+        nodeId,
+        `${path}.not`,
+        errors,
+      );
+      return nested === undefined ? undefined : { not: nested };
+    }
+    const children = value[combinator];
+    if (!Array.isArray(children) || children.length === 0) return invalid();
+    const parsed = children.map((child, index) =>
+      parseCondition(
+        child,
+        nodeId,
+        `${path}.${combinator}[${String(index)}]`,
+        errors,
+      ),
+    );
+    return parsed.some((child) => child === undefined)
+      ? undefined
+      : combinator === "all"
+        ? { all: parsed as ExecutionCondition[] }
+        : { any: parsed as ExecutionCondition[] };
+  }
+  const predicate = value["predicate"];
+  if (
+    typeof predicate !== "string" ||
+    keys.some(
+      (key) => key !== "predicate" && key !== "matches" && key !== "equals",
+    )
+  )
+    return invalid();
+  if (predicate === "changed_path") {
+    return typeof value["matches"] === "string" &&
+      value["matches"].length > 0 &&
+      keys.length === 2
+      ? { predicate, matches: value["matches"] }
+      : invalid();
+  }
+  if (predicate === "diff_present" || predicate === "unresolved_risk") {
+    return typeof value["equals"] === "boolean" && keys.length === 2
+      ? { predicate, equals: value["equals"] }
+      : invalid();
+  }
+  if (predicate === "validation_status") {
+    return (value["equals"] === "passed" || value["equals"] === "failed") &&
+      keys.length === 2
+      ? { predicate, equals: value["equals"] }
+      : invalid();
+  }
+  if (predicate === "review_status") {
+    return (value["equals"] === "approved" ||
+      value["equals"] === "changes_requested") &&
+      keys.length === 2
+      ? { predicate, equals: value["equals"] }
+      : invalid();
+  }
+  return invalid();
 }

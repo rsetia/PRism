@@ -263,7 +263,6 @@ export function buildBeadsGraph(
   const orderedPlans = topologicalPlans(plansById);
   const nodes: Record<string, GraphDefinition["nodes"][string]> = {};
   const terminalNodeIds: string[] = [];
-  let previousSerializedNodeId: string | undefined;
 
   for (const plan of orderedPlans) {
     nodes[plan.contextNodeId] = {
@@ -309,17 +308,11 @@ export function buildBeadsGraph(
     let terminalNodeId = plan.implementNodeId;
     if (includeMerge) {
       const mergeDependencies = [plan.implementNodeId];
-      if (
-        serializeMerges &&
-        previousSerializedNodeId !== undefined &&
-        !mergeDependencies.includes(previousSerializedNodeId)
-      ) {
-        mergeDependencies.push(previousSerializedNodeId);
-      }
       nodes[plan.mergeNodeId] = {
         executor: "merge_resolve",
         kind: "task",
         dependsOn: mergeDependencies,
+        ...(serializeMerges ? { resources: ["integration-branch"] } : {}),
         config: {
           targetBranch,
           sourceBranchFrom: plan.implementNodeId,
@@ -345,9 +338,6 @@ export function buildBeadsGraph(
         },
       };
       terminalNodeId = plan.updateNodeId;
-    }
-    if (includeMerge && serializeMerges) {
-      previousSerializedNodeId = terminalNodeId;
     }
     terminalNodeIds.push(terminalNodeId);
   }
@@ -378,7 +368,14 @@ export function buildBeadsGraph(
 
   const finalPullRequest = options?.finalPullRequest;
   if (finalPullRequest === undefined) {
-    return { version: 1, nodes, finalNode: completionNode };
+    return {
+      version: 1,
+      ...(includeMerge && serializeMerges
+        ? { resources: { "integration-branch": { capacity: 1 } } }
+        : {}),
+      nodes,
+      finalNode: completionNode,
+    };
   }
   const finalNode = "finalize-integration-pr";
   nodes[finalNode] = {
@@ -410,7 +407,14 @@ export function buildBeadsGraph(
         : { body: finalPullRequest.body }),
     },
   };
-  return { version: 1, nodes, finalNode };
+  return {
+    version: 1,
+    ...(includeMerge && serializeMerges
+      ? { resources: { "integration-branch": { capacity: 1 } } }
+      : {}),
+    nodes,
+    finalNode,
+  };
 }
 
 function beadContext(

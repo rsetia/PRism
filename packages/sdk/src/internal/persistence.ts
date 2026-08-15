@@ -100,10 +100,19 @@ export function snapshotRunEvent(
     case "node_started":
     case "node_cancelling":
     case "node_cancelled":
+    case "node_skipped":
     case "node_reset":
       return Object.freeze({
         kind: event.kind,
         nodeId: event.nodeId,
+        ...persisted,
+      });
+
+    case "node_resource_wait":
+      return Object.freeze({
+        kind: event.kind,
+        nodeId: event.nodeId,
+        resourceIds: Object.freeze([...event.resourceIds]),
         ...persisted,
       });
 

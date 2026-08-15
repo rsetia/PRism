@@ -29,9 +29,9 @@ function inspection(): RunInspection {
     runId: "run-dashboard",
     finished: false,
     nodes: [
-      { nodeId: "context", state: "succeeded", timing: null },
-      { nodeId: "implement", state: "running", timing: null },
-      { nodeId: "review", state: "pending", timing: null },
+      { nodeId: "context", state: "succeeded", timing: null, evidence: null },
+      { nodeId: "implement", state: "running", timing: null, evidence: null },
+      { nodeId: "review", state: "pending", timing: null, evidence: null },
     ],
     failures: [],
     timing: null,
@@ -74,9 +74,24 @@ describe("watch dashboard", () => {
       runId: "failed-run",
       finished: true,
       nodes: [
-        { nodeId: "context", state: "succeeded", timing: null },
-        { nodeId: "implement", state: "failed", timing: null },
-        { nodeId: "review", state: "blocked", timing: null },
+        {
+          nodeId: "context",
+          state: "succeeded",
+          timing: null,
+          evidence: null,
+        },
+        {
+          nodeId: "implement",
+          state: "failed",
+          timing: null,
+          evidence: null,
+        },
+        {
+          nodeId: "review",
+          state: "blocked",
+          timing: null,
+          evidence: null,
+        },
       ],
       failures: [
         {
@@ -126,6 +141,7 @@ describe("watch dashboard", () => {
         nodeId,
         state: states.get(nodeId) ?? "pending",
         timing: null,
+        evidence: null,
       })),
       failures: [],
       timing: null,
@@ -161,8 +177,10 @@ describe("watch dashboard", () => {
     const states = new Map<string, RunInspection["nodes"][number]["state"]>([
       ["context-demo-1", "succeeded"],
       ["implement-demo-1", "running"],
+      ["merge-demo-1", "running"],
       ["context-demo-2", "succeeded"],
       ["implement-demo-2", "succeeded"],
+      ["merge-demo-2", "resource_wait"],
     ]);
     const beadsInspection: RunInspection = {
       runId: "beads-runtime-wait",
@@ -171,6 +189,7 @@ describe("watch dashboard", () => {
         nodeId,
         state: states.get(nodeId) ?? "pending",
         timing: null,
+        evidence: null,
       })),
       failures: [],
       timing: null,
@@ -182,7 +201,7 @@ describe("watch dashboard", () => {
       color: false,
     });
 
-    expect(output).toContain("MERGE WAIT ← 1 CLOSE");
+    expect(output).toContain("MERGE WAIT ← 1 MERGE");
     expect(output).not.toContain("BUILD WAIT ←");
     expect(output.split("\n").every((line) => line.length <= 100)).toBe(true);
   });

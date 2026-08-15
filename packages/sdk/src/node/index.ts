@@ -31,6 +31,19 @@ export type {
 } from "./execution-backend.js";
 export { createLocalExecutionBackend } from "./execution-backend.js";
 export type {
+  AgentExecutionMode,
+  AgentExecutionPolicy,
+  ChildEnvironmentPolicy,
+  SecretRedactor,
+} from "./execution-policy.js";
+export {
+  buildChildEnvironment,
+  createSecretRedactor,
+  SAFE_AGENT_EXECUTION_POLICY,
+  TRUSTED_LOCAL_AGENT_EXECUTION_POLICY,
+  validateAgentExecutionPolicy,
+} from "./execution-policy.js";
+export type {
   GitWorktreeProvisionerOptions,
   ProvisionInput,
   WorkspaceHandle,

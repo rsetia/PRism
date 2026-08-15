@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import type { JsonValue } from "../graph/types.js";
 import { isJsonValue } from "../internal/json.js";
 import { normalizeThrownCause } from "../runtime/failures.js";
+import { parseProofOfWork } from "../runtime/proof-of-work.js";
 import type {
   ExecutionContext,
   ExecutorDefinition,
@@ -130,6 +131,16 @@ export function createCodexExecutor(
     name,
     validateConfig(config: JsonValue | undefined): void {
       validateCodexConfig(name, config);
+      const contract = buildContract({
+        runId: "preflight",
+        nodeId: "preflight",
+        kind: "task",
+        executor: name,
+        input: null,
+        config: config ?? null,
+        attempt: 1,
+      });
+      engine?.validateContract?.(contract);
     },
     async execute(context: ExecutionContext): Promise<NodeExecutionOutcome> {
       let input: unknown;
@@ -254,16 +265,22 @@ export function createCodexExecutor(
                 },
               );
         await pendingLogWrites;
-        outcome =
-          result.status === "succeeded"
-            ? { status: "succeeded", output: result.output }
-            : {
-                status: "failed",
-                cause: result.error ?? "codex failed",
-                ...(result.failureClass === undefined
-                  ? {}
-                  : { failureClass: result.failureClass }),
-              };
+        if (result.status === "succeeded") {
+          try {
+            parseProofOfWork(result.output);
+            outcome = { status: "succeeded", output: result.output };
+          } catch (error: unknown) {
+            outcome = validationFailure("MALFORMED_PROOF_OF_WORK", error);
+          }
+        } else {
+          outcome = {
+            status: "failed",
+            cause: result.error ?? "codex failed",
+            ...(result.failureClass === undefined
+              ? {}
+              : { failureClass: result.failureClass }),
+          };
+        }
       } catch (error: unknown) {
         outcome = infrastructureFailure("CODEX_EXECUTION_FAILED", error);
       }

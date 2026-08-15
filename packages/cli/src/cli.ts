@@ -26,6 +26,7 @@ import type {
   GraphCompileError,
   GraphParseError,
   NodeFailure,
+  ProofOfWorkV1,
   PhaseDuration,
   PersistedRunEvent,
   LogBackend,
@@ -935,6 +936,7 @@ function printJsonGraph(graph: CompiledGraph, io: CliIo): void {
       readonly executor: string;
       readonly kind: CompiledGraph["nodes"][string]["kind"];
       readonly dependsOn: readonly string[];
+      readonly resources: readonly string[];
       readonly dependents: readonly string[];
     }
   > = Object.create(null) as Record<
@@ -943,6 +945,7 @@ function printJsonGraph(graph: CompiledGraph, io: CliIo): void {
       readonly executor: string;
       readonly kind: CompiledGraph["nodes"][string]["kind"];
       readonly dependsOn: readonly string[];
+      readonly resources: readonly string[];
       readonly dependents: readonly string[];
     }
   >;
@@ -953,6 +956,7 @@ function printJsonGraph(graph: CompiledGraph, io: CliIo): void {
       executor: node.executor,
       kind: node.kind,
       dependsOn: node.dependsOn,
+      resources: node.resources,
       dependents: node.dependents,
     };
   }
@@ -960,6 +964,7 @@ function printJsonGraph(graph: CompiledGraph, io: CliIo): void {
   io.stdout(
     stringifyJson({
       version: 1,
+      resources: graph.resources,
       order: graph.order,
       finalNode: graph.finalNode,
       nodes,
@@ -1233,6 +1238,9 @@ async function inspectCommand(
             `  time: ${formatDuration(node.timing.totalDurationMs)} · ${formatPhaseSummary(node.timing.phases)}`,
           );
         }
+        if (node.evidence !== null) {
+          io.stdout(`  evidence: ${formatEvidenceSummary(node.evidence)}`);
+        }
       }
       for (const failure of inspection.failures) {
         io.stdout(`failure ${failure.nodeId}: ${stringifyJson(failure.cause)}`);
@@ -1262,6 +1270,13 @@ async function inspectCommand(
   } finally {
     await store?.close?.();
   }
+}
+
+function formatEvidenceSummary(evidence: ProofOfWorkV1): string {
+  const passed = evidence.validations.filter(
+    (validation) => validation.status === "passed",
+  ).length;
+  return `${evidence.summary} · ${String(evidence.commits.length)} commit(s) · ${String(evidence.pullRequests.length)} PR(s) · ${String(passed)}/${String(evidence.validations.length)} validation(s) passed · ${String(evidence.unresolvedRisks.length)} unresolved risk(s)`;
 }
 
 function formatPhaseSummary(phases: readonly PhaseDuration[]): string {
