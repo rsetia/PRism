@@ -10,7 +10,16 @@ import type {
   LogWriter,
   NodeExecutionOutcome,
 } from "../runtime/ports.js";
-import type { CodexEngine, CodexExecutorContract } from "./codex-engine.js";
+import {
+  buildCodexPrompt,
+  type CodexEngine,
+  type CodexExecutorContract,
+} from "./codex-engine.js";
+import {
+  runAgentSession,
+  type AgentSessionBackend,
+  type AgentSessionStore,
+} from "./agent-session-backend.js";
 import {
   codexContractForSpec,
   parseFinalizePrConfig,
@@ -41,7 +50,11 @@ export interface CodexExecutorOptions {
   /** Registry name — "implement" or "merge_resolve". */
   readonly name: string;
   /** The codex engine (real via createCodexEngine, or a test fake). */
-  readonly engine: CodexEngine;
+  readonly engine?: CodexEngine;
+  /** Structured, resumable alternative to the compatibility Codex engine. */
+  readonly sessionBackend?: AgentSessionBackend;
+  /** Optional durable store; defaults to agent-session.json in the node dir. */
+  readonly sessionStore?: AgentSessionStore;
   /** Provisions the worktree codex runs in (a git worktree in practice). */
   readonly provisioner?: WorkspaceProvisioner;
   /** Working dir when no provisioner is set. Default process.cwd(). */
@@ -98,6 +111,9 @@ export function createCodexExecutor(
   options: CodexExecutorOptions,
 ): ExecutorDefinition {
   validateExecutorName(options.name);
+  if (options.engine === undefined && options.sessionBackend === undefined) {
+    throw new Error("Codex executor requires an engine or sessionBackend");
+  }
   const name = options.name;
   const cwd = optionalDirectory(options.cwd, "cwd") ?? process.cwd();
   const explicitNodeDirBase = optionalDirectory(
@@ -180,23 +196,56 @@ export function createCodexExecutor(
         });
 
         await context.reportPhase(codexExecutionPhase(name));
-        const result = await options.engine.execute({
-          spec,
-          nodeDir,
-          worktreeDir,
-          contract,
-          signal: context.signal,
-          ...(logWriter === undefined
-            ? {}
-            : {
-                onOutput: (chunk: string): void => {
-                  pendingLogWrites = pendingLogWrites.then(() =>
-                    logWriter?.write(chunk),
-                  );
+        const onOutput =
+          logWriter === undefined
+            ? undefined
+            : (chunk: string): void => {
+                pendingLogWrites = pendingLogWrites.then(() =>
+                  logWriter?.write(chunk),
+                );
+              };
+        const result =
+          options.sessionBackend === undefined
+            ? await options.engine!.execute({
+                spec,
+                nodeDir,
+                worktreeDir,
+                contract,
+                signal: context.signal,
+                ...(onOutput === undefined ? {} : { onOutput }),
+                onPhase: context.reportPhase,
+              })
+            : await runAgentSession(
+                {
+                  key: {
+                    runId: context.runId,
+                    nodeId: context.nodeId,
+                    attempt: context.attempt,
+                  },
+                  spec,
+                  nodeDir,
+                  worktreeDir,
+                  prompt: buildCodexPrompt({
+                    spec,
+                    nodeDir,
+                    worktreeDir,
+                    contract,
+                    specPath: join(nodeDir, WORKER_SPEC_FILE),
+                    resultPath: join(nodeDir, "result.json"),
+                    heartbeatPath: join(nodeDir, "heartbeat.json"),
+                    phasePath: join(nodeDir, "phase.json"),
+                  }),
                 },
-              }),
-          onPhase: context.reportPhase,
-        });
+                {
+                  backend: options.sessionBackend,
+                  ...(options.sessionStore === undefined
+                    ? {}
+                    : { store: options.sessionStore }),
+                  signal: context.signal,
+                  ...(onOutput === undefined ? {} : { onOutput }),
+                  onPhase: context.reportPhase,
+                },
+              );
         await pendingLogWrites;
         outcome =
           result.status === "succeeded"
