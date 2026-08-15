@@ -82,6 +82,34 @@ describe("inspectRun", () => {
     expect(inspection.failures).toEqual([]);
   });
 
+  test("recognizes structured evidence while preserving generic output", async () => {
+    const graph = buildGraph({
+      version: 1,
+      nodes: { work: { executor: "constant" } },
+      finalNode: "work",
+    });
+    const proof = {
+      version: 1,
+      summary: "Evidence is inspectable",
+      commits: [{ sha: "abc123" }],
+      pullRequests: [],
+      validations: [{ command: "npm test", status: "passed" }],
+      reviewVerdicts: [],
+      screenshots: [],
+      artifacts: [],
+      unresolvedRisks: [],
+    } as const;
+    const store = await createStoredRun(graph, "evidence", [
+      { kind: "node_ready", nodeId: "work" },
+      { kind: "node_started", nodeId: "work" },
+      { kind: "node_succeeded", nodeId: "work", output: proof },
+    ]);
+
+    expect((await inspectRun(store, "evidence")).nodes[0]?.evidence).toEqual(
+      proof,
+    );
+  });
+
   test("reports failed and blocked nodes with the originating failure", async () => {
     const store = createMemoryStore();
     const graph = buildGraph({
@@ -112,7 +140,7 @@ describe("inspectRun", () => {
     const inspection = await inspectRun(store, "preflight");
     expect(inspection.finished).toBe(true);
     expect(inspection.nodes).toEqual([
-      { nodeId: "ghost", state: "pending", timing: null },
+      { nodeId: "ghost", state: "pending", timing: null, evidence: null },
     ]);
     expect(inspection.failures).toEqual([
       {

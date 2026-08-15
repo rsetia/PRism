@@ -4,6 +4,8 @@ import type { NodePhase } from "./events.js";
 import { reduceNodeState } from "./transitions.js";
 import type { Clock, RunStore } from "./ports.js";
 import type { NodeFailure, NodeState } from "./types.js";
+import { tryParseProofOfWork, type ProofOfWorkV1 } from "./proof-of-work.js";
+import type { JsonValue } from "../graph/types.js";
 
 /**
  * A read-only snapshot of a run, rebuilt from its persisted events (plan
@@ -18,6 +20,8 @@ export interface NodeInspection {
   readonly state: NodeState;
   /** Null when this node has no events or includes legacy timestamp-free data. */
   readonly timing: NodeTiming | null;
+  /** Structured agent evidence; null for generic and legacy outputs. */
+  readonly evidence: ProofOfWorkV1 | null;
 }
 
 export type NodeTimingPhase =
@@ -162,6 +166,7 @@ async function inspectRunSnapshot(
   }
 
   const failureByNode = new Map<string, NodeFailure>();
+  const outputByNode = new Map<string, JsonValue>();
   const events = await readEventSnapshot(store, runId, stored.revision);
   const timings = calculateNodeTimings(stored.graph.order, events);
   for (const event of events) {
@@ -172,9 +177,12 @@ async function inspectRunSnapshot(
     states.set(event.nodeId, reduceNodeState(previous, event));
     if (event.kind === "node_failed") {
       failureByNode.set(event.nodeId, event.failure);
+    } else if (event.kind === "node_succeeded") {
+      outputByNode.set(event.nodeId, event.output);
     } else if (event.kind === "node_reset") {
       // An administrative reset drops the node's recorded failure.
       failureByNode.delete(event.nodeId);
+      outputByNode.delete(event.nodeId);
     }
   }
   const eventFailures = stored.graph.order.flatMap((nodeId) => {
@@ -196,6 +204,9 @@ async function inspectRunSnapshot(
       nodeId,
       state,
       timing: timings.get(nodeId) ?? null,
+      evidence: outputByNode.has(nodeId)
+        ? tryParseProofOfWork(outputByNode.get(nodeId) as JsonValue)
+        : null,
     });
   });
   const timing = calculateRunTiming(

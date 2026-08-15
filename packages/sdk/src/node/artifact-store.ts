@@ -4,9 +4,11 @@ import {
   readFile,
   readdir,
   realpath,
+  rename,
   stat,
   writeFile,
 } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
 import { resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import type {
@@ -16,6 +18,20 @@ import type {
   PutArtifactInput,
 } from "../runtime/ports.js";
 import { decodePathComponent, encodePathComponent } from "./path-component.js";
+import { isPlainObject } from "../internal/json.js";
+
+const METADATA_FILE = ".prism-artifacts-v1.json";
+
+interface ArtifactMetadata {
+  readonly filename: string;
+  readonly size: number;
+  readonly contentType?: string;
+}
+
+interface ArtifactManifest {
+  readonly version: 1;
+  readonly entries: Readonly<Record<string, ArtifactMetadata>>;
+}
 
 /**
  * The ArtifactStore port (plan §14, from PRism-py). It owns worker output
@@ -40,7 +56,7 @@ export function createLocalArtifactStore(
   options: LocalArtifactStoreOptions,
 ): ArtifactStore {
   const baseDir = resolve(options.baseDir);
-  const contentTypes = new Map<string, string>();
+  const metadataWrites = new Map<string, Promise<void>>();
 
   return Object.freeze({
     async put(input: PutArtifactInput): Promise<ArtifactRef> {
@@ -72,10 +88,28 @@ export function createLocalArtifactStore(
       }
       await writeFile(path, input.data);
 
-      if (input.contentType === undefined) {
-        contentTypes.delete(path);
-      } else {
-        contentTypes.set(path, input.contentType);
+      const previousWrite = metadataWrites.get(directory) ?? Promise.resolve();
+      const metadataWrite = previousWrite.then(async () => {
+        const manifest = await readManifest(directory);
+        const metadata: ArtifactMetadata = {
+          filename: input.filename,
+          size: input.data.byteLength,
+          ...(input.contentType === undefined
+            ? {}
+            : { contentType: input.contentType }),
+        };
+        await writeManifest(directory, {
+          version: 1,
+          entries: { ...manifest.entries, [filename]: metadata },
+        });
+      });
+      metadataWrites.set(directory, metadataWrite);
+      try {
+        await metadataWrite;
+      } finally {
+        if (metadataWrites.get(directory) === metadataWrite) {
+          metadataWrites.delete(directory);
+        }
       }
 
       return artifactRef(
@@ -148,19 +182,24 @@ export function createLocalArtifactStore(
         .filter((entry) => entry.isDirectory())
         .sort((left, right) => left.name.localeCompare(right.name))) {
         const attemptDir = resolve(nodeDir, attempt.name);
+        const manifest = await readManifest(attemptDir);
         const entries = await readdir(attemptDir, { withFileTypes: true });
         for (const entry of entries
-          .filter((candidate) => candidate.isFile())
+          .filter(
+            (candidate) =>
+              candidate.isFile() && candidate.name.startsWith("v1-"),
+          )
           .sort((left, right) => left.name.localeCompare(right.name))) {
           const path = resolve(attemptDir, entry.name);
           assertContained(baseDir, path);
           const metadata = await stat(path);
+          const persisted = manifest.entries[entry.name];
           refs.push(
             artifactRef(
               path,
               decodePathComponent(entry.name, "artifact filename"),
               metadata.size,
-              contentTypes.get(path),
+              persisted?.contentType,
             ),
           );
         }
@@ -168,6 +207,64 @@ export function createLocalArtifactStore(
       return Object.freeze(refs);
     },
   });
+}
+
+async function readManifest(directory: string): Promise<ArtifactManifest> {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(
+      await readFile(resolve(directory, METADATA_FILE), "utf8"),
+    );
+  } catch (error: unknown) {
+    if (isErrnoException(error, "ENOENT")) {
+      return { version: 1, entries: {} };
+    }
+    throw new Error(`Invalid artifact metadata in ${directory}`, {
+      cause: error,
+    });
+  }
+  if (
+    !isPlainObject(parsed) ||
+    parsed["version"] !== 1 ||
+    !isPlainObject(parsed["entries"])
+  ) {
+    throw new Error(`Invalid artifact metadata in ${directory}`);
+  }
+
+  const entries: Record<string, ArtifactMetadata> = {};
+  for (const [name, candidate] of Object.entries(parsed["entries"])) {
+    if (
+      !isPlainObject(candidate) ||
+      typeof candidate["filename"] !== "string" ||
+      !Number.isSafeInteger(candidate["size"]) ||
+      (candidate["size"] as number) < 0 ||
+      (candidate["contentType"] !== undefined &&
+        (typeof candidate["contentType"] !== "string" ||
+          candidate["contentType"].length === 0))
+    ) {
+      throw new Error(
+        `Invalid artifact metadata entry ${name} in ${directory}`,
+      );
+    }
+    entries[name] = {
+      filename: candidate["filename"],
+      size: candidate["size"] as number,
+      ...(candidate["contentType"] === undefined
+        ? {}
+        : { contentType: candidate["contentType"] }),
+    };
+  }
+  return { version: 1, entries };
+}
+
+async function writeManifest(
+  directory: string,
+  manifest: ArtifactManifest,
+): Promise<void> {
+  const destination = resolve(directory, METADATA_FILE);
+  const temporary = resolve(directory, `${METADATA_FILE}.${randomUUID()}.tmp`);
+  await writeFile(temporary, JSON.stringify(manifest), "utf8");
+  await rename(temporary, destination);
 }
 
 function artifactRef(

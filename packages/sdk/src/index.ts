@@ -29,6 +29,18 @@ export {
   reduceNodeState,
 } from "./runtime/transitions.js";
 export { TERMINAL_NODE_STATES } from "./runtime/types.js";
+export {
+  parseProofOfWork,
+  PROOF_OF_WORK_VERSION,
+  tryParseProofOfWork,
+} from "./runtime/proof-of-work.js";
+export type {
+  CommitEvidence,
+  ProofOfWorkV1,
+  PullRequestEvidence,
+  ReviewVerdictEvidence,
+  ValidationEvidence,
+} from "./runtime/proof-of-work.js";
 export type {
   FailureClass,
   NodeFailure,
