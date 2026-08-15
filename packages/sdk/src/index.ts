@@ -71,6 +71,14 @@ export type {
   RunTiming,
   WatchRunOptions,
 } from "./runtime/inspect.js";
+export { submitGraphProposal } from "./runtime/graph-revision.js";
+export type {
+  GraphExpansionProposal,
+  GraphProposalDecision,
+  GraphProposalPolicy,
+  GraphProposalResult,
+  GraphRevision,
+} from "./runtime/graph-revision.js";
 export { abortRun, resetRun } from "./runtime/admin.js";
 export type { ResetRunOptions } from "./runtime/admin.js";
 export type {

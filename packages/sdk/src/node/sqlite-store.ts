@@ -15,6 +15,7 @@ import type {
   StoredRun,
 } from "../runtime/ports.js";
 import type { RunOutcome } from "../runtime/types.js";
+import type { GraphRevision } from "../runtime/graph-revision.js";
 
 export interface SqliteStoreOptions {
   /**
@@ -113,11 +114,21 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
       graph_json TEXT NOT NULL,
       finished INTEGER NOT NULL DEFAULT 0 CHECK (finished IN (0, 1)),
       schema_version INTEGER NOT NULL,
+      graph_revision INTEGER NOT NULL DEFAULT 0,
       outcome_json TEXT,
       CHECK (
         (finished = 0 AND outcome_json IS NULL) OR
         (finished = 1 AND outcome_json IS NOT NULL)
       )
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS graph_revisions (
+      run_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      proposal_id TEXT NOT NULL,
+      revision_json TEXT NOT NULL,
+      PRIMARY KEY (run_id, seq),
+      UNIQUE (run_id, proposal_id),
+      FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
     ) STRICT;
     CREATE TABLE IF NOT EXISTS events (
       run_id TEXT NOT NULL,
@@ -140,6 +151,16 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
       token INTEGER PRIMARY KEY AUTOINCREMENT
     ) STRICT;
   `);
+  const runColumns = db.prepare("PRAGMA table_info(runs)").all();
+  if (
+    !runColumns.some(
+      (column) => readString(column, "name") === "graph_revision",
+    )
+  ) {
+    db.exec(
+      "ALTER TABLE runs ADD COLUMN graph_revision INTEGER NOT NULL DEFAULT 0",
+    );
+  }
 
   const newestRun = db
     .prepare("SELECT MAX(schema_version) AS schema_version FROM runs")
@@ -180,7 +201,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     "INSERT INTO runs (run_id, graph_json, schema_version) VALUES (?, ?, ?)",
   );
   const selectRun = db.prepare(
-    `SELECT run_id, graph_json, finished, schema_version, outcome_json,
+    `SELECT run_id, graph_json, finished, schema_version, outcome_json, graph_revision,
        (SELECT COUNT(*) FROM events WHERE events.run_id = runs.run_id) AS revision
      FROM runs WHERE run_id = ?`,
   );
@@ -219,6 +240,21 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   );
   const selectRunLeases = db.prepare(
     "SELECT kind, node_id, fencing_token, expires_at_ms FROM run_leases WHERE run_id = ? AND expires_at_ms > ? ORDER BY kind, node_id",
+  );
+  const selectGraphRevisions = db.prepare(
+    "SELECT revision_json FROM graph_revisions WHERE run_id = ? ORDER BY seq",
+  );
+  const selectGraphRevisionByProposal = db.prepare(
+    "SELECT revision_json FROM graph_revisions WHERE run_id = ? AND proposal_id = ?",
+  );
+  const insertGraphRevision = db.prepare(
+    "INSERT INTO graph_revisions (run_id, seq, proposal_id, revision_json) VALUES (?, ?, ?, ?)",
+  );
+  const selectGraphRevisionCount = db.prepare(
+    "SELECT COUNT(*) AS count FROM graph_revisions WHERE run_id = ?",
+  );
+  const updateGraphRevision = db.prepare(
+    "UPDATE runs SET graph_json = ?, graph_revision = ? WHERE run_id = ?",
   );
 
   function assertOpen(): void {
@@ -387,6 +423,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
         runId: readString(row, "run_id"),
         graph: decodeGraph(readString(row, "graph_json")),
         revision: readNumber(row, "revision"),
+        graphRevision: readNumber(row, "graph_revision"),
       };
       if (finished) {
         if (outcomeJson === undefined) {
@@ -494,6 +531,72 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
       }
     });
   }
+
+  function appendGraphRevision(
+    runId: string,
+    revision: GraphRevision,
+    expectedGraphRevision: number,
+  ): Promise<GraphRevision> {
+    return capture(() => {
+      assertOpen();
+      ensureSchemaCurrent();
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const run = selectRun.get(runId);
+        if (run === undefined) throw new Error(`unknown run: "${runId}"`);
+        const duplicate = selectGraphRevisionByProposal.get(
+          runId,
+          revision.proposal.id,
+        );
+        if (duplicate !== undefined) {
+          db.exec("COMMIT");
+          return decodeGraphRevision(readString(duplicate, "revision_json"));
+        }
+        // Older databases do not have the column until their first write.
+        const current = Object.hasOwn(run, "graph_revision")
+          ? readNumber(run, "graph_revision")
+          : 0;
+        if (current !== expectedGraphRevision) {
+          throw new Error(
+            `graph revision conflict: expected ${String(expectedGraphRevision)}, actual ${String(current)}`,
+          );
+        }
+        if (
+          revision.decision.status === "accepted" &&
+          revision.graph === undefined
+        ) {
+          throw new Error("accepted graph revision is missing graph");
+        }
+        const count = readNumber(selectGraphRevisionCount.get(runId), "count");
+        const accepted = revision.decision.status === "accepted";
+        const persisted = Object.freeze({
+          ...revision,
+          sequence: count,
+          graphRevision: accepted ? current + 1 : current,
+          timestampMs: now(),
+          addedNodeIds: Object.freeze([...revision.addedNodeIds]),
+        });
+        insertGraphRevision.run(
+          runId,
+          count,
+          revision.proposal.id,
+          JSON.stringify(persisted),
+        );
+        if (accepted && persisted.graph !== undefined) {
+          updateGraphRevision.run(
+            JSON.stringify(persisted.graph),
+            current + 1,
+            runId,
+          );
+        }
+        db.exec("COMMIT");
+        return persisted;
+      } catch (error: unknown) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
   function acquireCoordinatorLease(
     runId: string,
     owner: string,
@@ -556,6 +659,20 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
       ),
     );
   }
+  function listGraphRevisions(
+    runId: string,
+  ): Promise<readonly GraphRevision[]> {
+    return capture(() => {
+      assertOpen();
+      if (selectRun.get(runId) === undefined)
+        throw new Error(`unknown run: "${runId}"`);
+      return Object.freeze(
+        selectGraphRevisions
+          .all(runId)
+          .map((row) => decodeGraphRevision(readString(row, "revision_json"))),
+      );
+    });
+  }
 
   function close(): Promise<void> {
     return capture(() => {
@@ -583,6 +700,8 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     renewLease,
     releaseLease,
     getRunLeases,
+    appendGraphRevision,
+    listGraphRevisions,
     close,
   });
 }
@@ -635,6 +754,31 @@ function readNullableString(
     throw new Error(`sqlite column "${column}" is not a string`);
   }
   return value;
+}
+
+function decodeGraphRevision(json: string): GraphRevision {
+  const value = JSON.parse(json) as GraphRevision;
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    typeof value.sequence !== "number" ||
+    typeof value.graphRevision !== "number" ||
+    typeof value.timestampMs !== "number" ||
+    typeof value.proposal?.id !== "string" ||
+    typeof value.proposal.proposer !== "string" ||
+    (value.decision.status !== "accepted" &&
+      value.decision.status !== "rejected") ||
+    !Array.isArray(value.addedNodeIds)
+  ) {
+    throw new Error("invalid persisted graph revision");
+  }
+  return Object.freeze({
+    ...value,
+    addedNodeIds: Object.freeze([...value.addedNodeIds]),
+    ...(value.graph === undefined
+      ? {}
+      : { graph: decodeGraph(JSON.stringify(value.graph)) }),
+  });
 }
 
 function decodeGraph(json: string): CompiledGraph {

@@ -12,11 +12,14 @@ import type {
   StoredRun,
 } from "../runtime/ports.js";
 import type { RunOutcome } from "../runtime/types.js";
+import type { GraphRevision } from "../runtime/graph-revision.js";
 
 interface MemoryRun {
   readonly runId: string;
-  readonly graph: CompiledGraph;
   readonly events: PersistedRunEvent[];
+  readonly graphRevisions: GraphRevision[];
+  graphRevision: number;
+  graph: CompiledGraph;
   readonly waiters: Set<() => void>;
   finished: boolean;
   outcome: RunOutcome | undefined;
@@ -136,6 +139,8 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     runs.set(input.runId, {
       runId: input.runId,
       graph: input.graph,
+      graphRevision: 0,
+      graphRevisions: [],
       finished: false,
       outcome: undefined,
       events: [],
@@ -241,6 +246,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
       runId: run.runId,
       graph: run.graph,
       revision: run.events.length,
+      graphRevision: run.graphRevision,
     };
     if (run.finished) {
       if (run.outcome === undefined) {
@@ -372,6 +378,58 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     return Promise.resolve(Object.freeze(current));
   }
 
+  function appendGraphRevision(
+    runId: string,
+    revision: GraphRevision,
+    expectedGraphRevision: number,
+  ): Promise<GraphRevision> {
+    const run = runs.get(runId);
+    if (run === undefined)
+      return Promise.reject(new Error(`unknown run: "${runId}"`));
+    const duplicate = run.graphRevisions.find(
+      (entry) => entry.proposal.id === revision.proposal.id,
+    );
+    if (duplicate !== undefined) return Promise.resolve(duplicate);
+    if (expectedGraphRevision !== run.graphRevision) {
+      return Promise.reject(
+        new Error(
+          `graph revision conflict: expected ${String(expectedGraphRevision)}, actual ${String(run.graphRevision)}`,
+        ),
+      );
+    }
+    if (
+      revision.decision.status === "accepted" &&
+      revision.graph === undefined
+    ) {
+      return Promise.reject(
+        new Error("accepted graph revision is missing graph"),
+      );
+    }
+    const accepted = revision.decision.status === "accepted";
+    const persisted = Object.freeze({
+      ...revision,
+      sequence: run.graphRevisions.length,
+      graphRevision: accepted ? run.graphRevision + 1 : run.graphRevision,
+      timestampMs: now(),
+      addedNodeIds: Object.freeze([...revision.addedNodeIds]),
+    });
+    run.graphRevisions.push(persisted);
+    if (accepted && persisted.graph !== undefined) {
+      run.graph = persisted.graph;
+      run.graphRevision += 1;
+    }
+    return Promise.resolve(persisted);
+  }
+
+  function listGraphRevisions(
+    runId: string,
+  ): Promise<readonly GraphRevision[]> {
+    const run = runs.get(runId);
+    if (run === undefined)
+      return Promise.reject(new Error(`unknown run: "${runId}"`));
+    return Promise.resolve(Object.freeze([...run.graphRevisions]));
+  }
+
   return Object.freeze({
     createRun,
     appendEvents,
@@ -385,5 +443,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     renewLease,
     releaseLease,
     getRunLeases,
+    appendGraphRevision,
+    listGraphRevisions,
   });
 }

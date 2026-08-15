@@ -151,4 +151,13 @@ complete trust model.
 Full docs, the CLI, and the Beads integration:
 **https://github.com/rsetia/PRism**
 
+### Audited graph expansion
+
+Use `submitGraphProposal(store, runId, proposal, policy)` to append follow-up
+nodes through an explicit policy decision. Proposals are idempotent by id,
+compile before acceptance, and retain rejected decisions in the run's graph
+revision history, available from `inspectRun`. Existing nodes are immutable;
+when a proposal needs to revise completed work instead, create a child run and
+pass the completed output as its input.
+
 MIT
