@@ -1110,29 +1110,31 @@ async function runGraph(
     return EXIT_USAGE;
   }
   let outcome: RunOutcome;
+  let agentRegistry: ReturnType<typeof createAgentExecutorRegistry> | undefined;
   try {
+    agentRegistry = createAgentExecutorRegistry({
+      ...(invocation.agent.repo === undefined
+        ? {}
+        : { repoDir: invocation.agent.repo }),
+      ...(invocation.agent.worktreeDir === undefined
+        ? {}
+        : { worktreeBaseDir: invocation.agent.worktreeDir }),
+      ...(invocation.agent.codexCommand === undefined
+        ? {}
+        : { codexCommand: invocation.agent.codexCommand }),
+      ...(invocation.agent.codexModel === undefined
+        ? {}
+        : { codexModel: invocation.agent.codexModel }),
+      ...(invocation.agent.codexReasoningEffort === undefined
+        ? {}
+        : {
+            codexReasoningEffort: invocation.agent.codexReasoningEffort,
+          }),
+      codexBackend: invocation.agent.codexBackend,
+    });
     const engine = createEngine({
       store,
-      registry: createAgentExecutorRegistry({
-        ...(invocation.agent.repo === undefined
-          ? {}
-          : { repoDir: invocation.agent.repo }),
-        ...(invocation.agent.worktreeDir === undefined
-          ? {}
-          : { worktreeBaseDir: invocation.agent.worktreeDir }),
-        ...(invocation.agent.codexCommand === undefined
-          ? {}
-          : { codexCommand: invocation.agent.codexCommand }),
-        ...(invocation.agent.codexModel === undefined
-          ? {}
-          : { codexModel: invocation.agent.codexModel }),
-        ...(invocation.agent.codexReasoningEffort === undefined
-          ? {}
-          : {
-              codexReasoningEffort: invocation.agent.codexReasoningEffort,
-            }),
-        codexBackend: invocation.agent.codexBackend,
-      }),
+      registry: agentRegistry,
       maxConcurrency: invocation.agent.maxConcurrency,
     });
     const runId =
@@ -1154,6 +1156,7 @@ async function runGraph(
       throw error;
     }
   } finally {
+    await agentRegistry?.close();
     await store.close?.();
   }
 
@@ -1521,34 +1524,36 @@ async function resumeCommand(
   io: CliIo,
 ): Promise<number> {
   let store: RunStore | undefined;
+  let agentRegistry: ReturnType<typeof createAgentExecutorRegistry> | undefined;
   try {
     const projectPaths = resolvePrismProjectPaths(invocation.agent.repo);
     if (projectPaths.prismHome === undefined) {
       throw new Error(executionPrismHomeMessage());
     }
     store = await openPersistentStore(invocation.store, invocation.agent.repo);
+    agentRegistry = createAgentExecutorRegistry({
+      ...(invocation.agent.repo === undefined
+        ? {}
+        : { repoDir: invocation.agent.repo }),
+      ...(invocation.agent.worktreeDir === undefined
+        ? {}
+        : { worktreeBaseDir: invocation.agent.worktreeDir }),
+      ...(invocation.agent.codexCommand === undefined
+        ? {}
+        : { codexCommand: invocation.agent.codexCommand }),
+      ...(invocation.agent.codexModel === undefined
+        ? {}
+        : { codexModel: invocation.agent.codexModel }),
+      ...(invocation.agent.codexReasoningEffort === undefined
+        ? {}
+        : {
+            codexReasoningEffort: invocation.agent.codexReasoningEffort,
+          }),
+      codexBackend: invocation.agent.codexBackend,
+    });
     const engine = createEngine({
       store,
-      registry: createAgentExecutorRegistry({
-        ...(invocation.agent.repo === undefined
-          ? {}
-          : { repoDir: invocation.agent.repo }),
-        ...(invocation.agent.worktreeDir === undefined
-          ? {}
-          : { worktreeBaseDir: invocation.agent.worktreeDir }),
-        ...(invocation.agent.codexCommand === undefined
-          ? {}
-          : { codexCommand: invocation.agent.codexCommand }),
-        ...(invocation.agent.codexModel === undefined
-          ? {}
-          : { codexModel: invocation.agent.codexModel }),
-        ...(invocation.agent.codexReasoningEffort === undefined
-          ? {}
-          : {
-              codexReasoningEffort: invocation.agent.codexReasoningEffort,
-            }),
-        codexBackend: invocation.agent.codexBackend,
-      }),
+      registry: agentRegistry,
       maxConcurrency: invocation.agent.maxConcurrency,
     });
     const handle = engine.resume(invocation.runId);
@@ -1559,6 +1564,7 @@ async function resumeCommand(
     io.stderr(`cannot resume "${invocation.runId}": ${describeError(error)}`);
     return EXIT_USAGE;
   } finally {
+    await agentRegistry?.close();
     await store?.close?.();
   }
 }

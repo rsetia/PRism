@@ -23,34 +23,37 @@ test("runs a worker through the selectable Codex App Server stdio transport", as
     "fixtures",
     "fake-codex-app-server.mjs",
   );
-  const backend = createCodexAppServerBackend(
-    createCodexAppServerStdioClient({
-      command: process.execPath,
-      commandArgs: [fixture],
-      model: "test-model",
-      reasoningEffort: "medium",
-    }),
-  );
+  const client = createCodexAppServerStdioClient({
+    command: process.execPath,
+    commandArgs: [fixture, "--stay-alive"],
+    model: "test-model",
+    reasoningEffort: "medium",
+  });
+  const backend = createCodexAppServerBackend(client);
   const output: string[] = [];
-  const result = await runAgentSession(
-    {
-      key: { runId: "run", nodeId: "node", attempt: 1 },
-      spec: {
-        runId: "run",
-        nodeId: "node",
-        kind: "task",
-        executor: "implement",
-        input: null,
-        config: null,
-        attempt: 1,
+  try {
+    const result = await runAgentSession(
+      {
+        key: { runId: "run", nodeId: "node", attempt: 1 },
+        spec: {
+          runId: "run",
+          nodeId: "node",
+          kind: "task",
+          executor: "implement",
+          input: null,
+          config: null,
+          attempt: 1,
+        },
+        nodeDir: join(root, "node"),
+        worktreeDir: root,
+        prompt: `- On success, write ${join(root, "node", "result.json")} as JSON:`,
+        sandbox: "read-only",
       },
-      nodeDir: join(root, "node"),
-      worktreeDir: root,
-      prompt: `- On success, write ${join(root, "node", "result.json")} as JSON:`,
-      sandbox: "read-only",
-    },
-    { backend, onOutput: (text) => output.push(text) },
-  );
-  expect(result).toEqual({ status: "succeeded", output: "ok" });
-  expect(output).toEqual(["working"]);
+      { backend, onOutput: (text) => output.push(text) },
+    );
+    expect(result).toEqual({ status: "succeeded", output: "ok" });
+    expect(output).toEqual(["working"]);
+  } finally {
+    await client.close();
+  }
 });

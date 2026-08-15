@@ -100,6 +100,42 @@ const transientRetry = (): RetryPolicy => ({
 });
 
 describe("engine resume", () => {
+  test("restores null output for a previously skipped dependency", async () => {
+    const store = createMemoryStore();
+    const graph = buildGraph({
+      version: 2,
+      nodes: {
+        proof: {
+          executor: "constant",
+          config: { value: { proof: { version: 1, hasDiff: false } } },
+        },
+        gated: {
+          executor: "constant",
+          dependsOn: ["proof"],
+          config: { value: "not run" },
+          when: { predicate: "diff_present", equals: true },
+        },
+        final: { executor: "passthrough", dependsOn: ["gated"] },
+      },
+      finalNode: "final",
+    });
+    await seed(store, "skipped", graph, [
+      { kind: "node_ready", nodeId: "proof" },
+      { kind: "node_started", nodeId: "proof" },
+      {
+        kind: "node_succeeded",
+        nodeId: "proof",
+        output: { proof: { version: 1, hasDiff: false } },
+      },
+      { kind: "node_skipped", nodeId: "gated" },
+    ]);
+
+    await expect(engineOn(store).resume("skipped").result).resolves.toEqual({
+      status: "succeeded",
+      output: null,
+    });
+  });
+
   test("continues a run whose upstream node already succeeded", async () => {
     const store = createMemoryStore();
     // 'a' finished; 'b' was made ready but never started (crash here).

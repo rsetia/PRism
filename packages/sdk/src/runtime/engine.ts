@@ -140,6 +140,21 @@ type SchedulerEvent =
   | RetryReady
   | RetryCancelled;
 
+function nodeLeaseFailure(nodeId: string, error: unknown): NodeCompletion {
+  return {
+    nodeId,
+    kind: "node_completion",
+    outcome: {
+      status: "failed",
+      cause: {
+        code: "NODE_LEASE_LOST",
+        message: error instanceof Error ? error.message : String(error),
+      },
+      failureClass: "transient_infra",
+    },
+  };
+}
+
 interface CancellationControl {
   readonly requested: Promise<CancellationRequest>;
   readonly isRequested: () => boolean;
@@ -1019,72 +1034,65 @@ async function executeRun(
       inFlight.set(
         nodeId,
         (async () => {
+          let nodeLease: RunLease;
           try {
-            let nodeLease = await store.acquireNodeLease(
+            nodeLease = await store.acquireNodeLease(
               runId,
               nodeId,
               leaseOwner,
               leaseDurationMs,
             );
-            let renewalFailure: unknown;
-            const renewalTimer = setInterval(
-              () => {
-                void store
-                  .renewLease(nodeLease, leaseDurationMs)
-                  .then((renewed) => {
-                    nodeLease = renewed;
-                  })
-                  .catch((error: unknown) => {
-                    renewalFailure ??= error;
-                  });
-              },
-              Math.max(1, Math.floor(leaseDurationMs / 2)),
-            );
-            try {
-              const result = await invokeExecutor(
-                runId,
-                getNode(graph, nodeId),
-                executor,
-                outputs,
-                controller.signal,
-                attempt,
-                (phase) =>
-                  applyEvents([{ kind: "node_phase_changed", nodeId, phase }]),
-                (usage) =>
-                  applyEvents([
-                    { kind: "node_usage_reported", nodeId, attempt, usage },
-                  ]),
-                (state) =>
-                  applyEvents([{ kind: "node_agent_progress", nodeId, state }]),
-                submitProposal,
-              );
-              if (renewalFailure !== undefined) {
-                throw renewalFailure instanceof Error
-                  ? renewalFailure
-                  : new Error("node lease renewal failed", {
-                      cause: renewalFailure,
-                    });
-              }
-              return result;
-            } finally {
-              clearInterval(renewalTimer);
-              await store.releaseLease(nodeLease);
-            }
           } catch (error: unknown) {
-            return {
-              nodeId,
-              kind: "node_completion" as const,
-              outcome: {
-                status: "failed" as const,
-                cause: {
-                  code: "NODE_LEASE_LOST",
-                  message:
-                    error instanceof Error ? error.message : String(error),
-                },
-                failureClass: "transient_infra" as const,
-              },
-            };
+            return nodeLeaseFailure(nodeId, error);
           }
+
+          let renewalFailure: unknown;
+          const renewalTimer = setInterval(
+            () => {
+              void store
+                .renewLease(nodeLease, leaseDurationMs)
+                .then((renewed) => {
+                  nodeLease = renewed;
+                })
+                .catch((error: unknown) => {
+                  renewalFailure ??= error;
+                  controller.abort({ code: "NODE_LEASE_LOST" });
+                });
+            },
+            Math.max(1, Math.floor(leaseDurationMs / 2)),
+          );
+
+          let result: SchedulerEvent;
+          try {
+            result = await invokeExecutor(
+              runId,
+              getNode(graph, nodeId),
+              executor,
+              outputs,
+              controller.signal,
+              attempt,
+              (phase) =>
+                applyEvents([{ kind: "node_phase_changed", nodeId, phase }]),
+              (usage) =>
+                applyEvents([
+                  { kind: "node_usage_reported", nodeId, attempt, usage },
+                ]),
+              (state) =>
+                applyEvents([{ kind: "node_agent_progress", nodeId, state }]),
+              submitProposal,
+            );
+          } finally {
+            clearInterval(renewalTimer);
+          }
+
+          try {
+            await store.releaseLease(nodeLease);
+          } catch (error: unknown) {
+            return nodeLeaseFailure(nodeId, error);
+          }
+          return renewalFailure === undefined
+            ? result
+            : nodeLeaseFailure(nodeId, renewalFailure);
         })(),
       );
     }

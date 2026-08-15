@@ -18,6 +18,8 @@ export interface CodexAppServerClient {
   steer(session: AgentSession, message: string): Promise<void>;
   interrupt(session: AgentSession): Promise<void>;
   events(session: AgentSession): AsyncIterable<AgentSessionEvent>;
+  /** Stop the transport and reject any outstanding requests. */
+  close(): Promise<void>;
 }
 
 /** First structured AgentSessionBackend; its client speaks Codex App Server JSON-RPC. */

@@ -46,7 +46,9 @@ lines.on("line", async (line) => {
         turn: { id: "turn-1", status: "completed", error: null },
       },
     });
-    setTimeout(() => process.exit(0), 10);
+    if (!process.argv.includes("--stay-alive")) {
+      setTimeout(() => process.exit(0), 10);
+    }
     return;
   }
   send({ id: message.id, result: {} });

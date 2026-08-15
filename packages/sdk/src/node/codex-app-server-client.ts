@@ -80,6 +80,7 @@ export function createCodexAppServerStdioClient(
   options: CodexAppServerStdioClientOptions = {},
 ): CodexAppServerClient {
   let child: ChildProcessWithoutNullStreams | undefined;
+  let lineReader: ReturnType<typeof createInterface> | undefined;
   let initialization: Promise<void> | undefined;
   let nextId = 1;
   const pending = new Map<number, PendingRequest>();
@@ -115,8 +116,8 @@ export function createCodexAppServerStdioClient(
       // The app-server is a reusable helper. Its pipes must not keep a CLI
       // invocation alive after all Prism work has completed.
       child.unref();
-      const lines = createInterface({ input: child.stdout });
-      lines.on("line", (line) => handleMessage(line));
+      lineReader = createInterface({ input: child.stdout });
+      lineReader.on("line", (line) => handleMessage(line));
       child.stderr.on("data", (chunk: Buffer) => {
         const text = chunk.toString("utf8");
         if (text.trim().length === 0) return;
@@ -229,6 +230,10 @@ export function createCodexAppServerStdioClient(
   };
 
   const failTransport = (error: Error): void => {
+    initialization = undefined;
+    child = undefined;
+    lineReader?.close();
+    lineReader = undefined;
     for (const waiter of pending.values()) waiter.reject(error);
     pending.clear();
     broadcastProtocolError(error.message);
@@ -334,6 +339,18 @@ export function createCodexAppServerStdioClient(
       } finally {
         turns.delete(session.id);
       }
+    },
+    close() {
+      const running = child;
+      failTransport(new Error("Codex App Server transport closed"));
+      turns.clear();
+      if (running !== undefined) {
+        running.stdin.destroy();
+        running.stdout.destroy();
+        running.stderr.destroy();
+        if (!running.killed) running.kill("SIGTERM");
+      }
+      return Promise.resolve();
     },
   };
   return Object.freeze(client);

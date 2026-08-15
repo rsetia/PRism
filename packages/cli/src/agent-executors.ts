@@ -16,6 +16,7 @@ import {
   createGitWorktreeProvisioner,
   createMergePrExecutor,
   type AgentSessionBackend,
+  type CodexAppServerClient,
   TRUSTED_LOCAL_AGENT_EXECUTION_POLICY,
 } from "@rsetia/prism/node";
 import { resolvePrismProjectPaths } from "./prism-home.js";
@@ -42,6 +43,11 @@ export interface AgentExecutorRegistryOptions {
   readonly sessionBackend?: AgentSessionBackend;
 }
 
+export interface AgentExecutorRegistry extends ExecutorRegistry {
+  /** Release shared agent transports created by this registry. */
+  close(): Promise<void>;
+}
+
 /**
  * The operator-facing executor set. Keeping it in one factory is important:
  * `run` and `resume` must register the same names or a durable agent run can
@@ -49,7 +55,7 @@ export interface AgentExecutorRegistryOptions {
  */
 export function createAgentExecutorRegistry(
   options: AgentExecutorRegistryOptions = {},
-): ExecutorRegistry {
+): AgentExecutorRegistry {
   const projectPaths = resolvePrismProjectPaths(options.repoDir);
   const repoDir = projectPaths.repoDir;
   const worktreeBaseDir = resolve(
@@ -72,20 +78,23 @@ export function createAgentExecutorRegistry(
     reasoningEffort:
       options.codexReasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT,
   });
+  const appServerClient: CodexAppServerClient | undefined =
+    options.sessionBackend === undefined &&
+    options.codexBackend === "app-server"
+      ? createCodexAppServerStdioClient({
+          ...(options.codexCommand === undefined
+            ? {}
+            : { command: options.codexCommand }),
+          model: options.codexModel ?? DEFAULT_CODEX_MODEL,
+          reasoningEffort:
+            options.codexReasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT,
+        })
+      : undefined;
   const sessionBackend =
     options.sessionBackend ??
-    (options.codexBackend === "app-server"
-      ? createCodexAppServerBackend(
-          createCodexAppServerStdioClient({
-            ...(options.codexCommand === undefined
-              ? {}
-              : { command: options.codexCommand }),
-            model: options.codexModel ?? DEFAULT_CODEX_MODEL,
-            reasoningEffort:
-              options.codexReasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT,
-          }),
-        )
-      : undefined);
+    (appServerClient === undefined
+      ? undefined
+      : createCodexAppServerBackend(appServerClient));
   const provisioner = createGitWorktreeProvisioner({
     repoDir,
     baseDir: worktreeBaseDir,
@@ -110,7 +119,7 @@ export function createAgentExecutorRegistry(
       provisioner,
       logBackend,
     });
-  return createExecutorRegistry([
+  const registry = createExecutorRegistry([
     ...builtinExecutors,
     codexExecutor("implement"),
     codexExecutor("merge_resolve"),
@@ -119,4 +128,8 @@ export function createAgentExecutorRegistry(
     createMergePrExecutor({ cwd: repoDir }),
     createBeadsUpdateExecutor({ cwd: repoDir }),
   ]);
+  return Object.freeze({
+    ...registry,
+    close: () => appServerClient?.close() ?? Promise.resolve(),
+  });
 }
