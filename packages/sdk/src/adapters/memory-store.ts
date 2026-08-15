@@ -5,9 +5,8 @@ import {
 } from "../internal/persistence.js";
 import type { PersistedRunEvent, RunEvent } from "../runtime/events.js";
 import type {
-  AcquireLeaseInput,
-  LeaseFence,
   RunLease,
+  RunLeaseStatus,
   RunStore,
   RunSummary,
   StoredRun,
@@ -55,24 +54,72 @@ export interface MemoryStoreOptions {
 export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
   const runs = new Map<string, MemoryRun>();
   const leases = new Map<string, RunLease>();
+  let nextFencingToken = 1;
   const now = options.now ?? Date.now;
 
-  const leaseKey = (runId: string, nodeId?: string): string =>
-    `${runId}\u0000${nodeId ?? ""}`;
-  const assertFence = (runId: string, fence: LeaseFence | undefined): void => {
-    if (fence === undefined) return;
-    if (fence.runId !== runId)
-      throw new Error(`lease fence targets another run: "${fence.runId}"`);
-    const current = leases.get(leaseKey(runId, fence.nodeId));
+  function leaseKey(
+    lease: Pick<RunLease, "kind" | "runId" | "nodeId">,
+  ): string {
+    return `${lease.runId}\u0000${lease.kind}\u0000${lease.nodeId ?? ""}`;
+  }
+
+  function duration(durationMs: number): void {
+    if (!Number.isFinite(durationMs) || durationMs <= 0) {
+      throw new Error("lease duration must be a finite number greater than 0");
+    }
+  }
+
+  function assertCurrentLease(lease: RunLease): void {
+    const current = leases.get(leaseKey(lease));
     if (
       current === undefined ||
-      current.owner !== fence.owner ||
-      current.fencingToken !== fence.fencingToken ||
+      current.fencingToken !== lease.fencingToken ||
+      current.owner !== lease.owner ||
       current.expiresAtMs <= now()
     ) {
-      throw new Error(`lease fencing conflict for run "${runId}"`);
+      throw new Error(`lease fencing conflict for run: "${lease.runId}"`);
     }
-  };
+  }
+
+  function acquire(
+    kind: RunLease["kind"],
+    runId: string,
+    nodeId: string | undefined,
+    owner: string,
+    durationMs: number,
+  ): Promise<RunLease> {
+    try {
+      duration(durationMs);
+      if (runs.get(runId) === undefined)
+        throw new Error(`unknown run: "${runId}"`);
+      if (owner.length === 0) throw new Error("lease owner must not be empty");
+      const key = leaseKey({
+        kind,
+        runId,
+        ...(nodeId === undefined ? {} : { nodeId }),
+      });
+      const current = leases.get(key);
+      if (
+        current !== undefined &&
+        current.expiresAtMs > now() &&
+        current.owner !== owner
+      ) {
+        throw new Error(`lease ownership conflict for run: "${runId}"`);
+      }
+      const lease = Object.freeze({
+        kind,
+        runId,
+        ...(nodeId === undefined ? {} : { nodeId }),
+        owner,
+        fencingToken: nextFencingToken++,
+        expiresAtMs: now() + durationMs,
+      });
+      leases.set(key, lease);
+      return Promise.resolve(lease);
+    } catch (error: unknown) {
+      return Promise.reject(error);
+    }
+  }
 
   function createRun(input: {
     readonly runId: string;
@@ -97,7 +144,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     runId: string,
     events: readonly RunEvent[],
     expectedRevision?: number,
-    fence?: LeaseFence,
+    lease?: RunLease,
   ): Promise<readonly PersistedRunEvent[]> {
     const run = runs.get(runId);
     if (run === undefined) {
@@ -106,7 +153,13 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     if (run.finished) {
       return Promise.reject(new Error(`run is already finished: "${runId}"`));
     }
-    assertFence(runId, fence);
+    if (lease !== undefined) {
+      try {
+        assertCurrentLease(lease);
+      } catch (error: unknown) {
+        return Promise.reject(error);
+      }
+    }
     if (
       expectedRevision !== undefined &&
       expectedRevision !== run.events.length
@@ -206,7 +259,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
   function finishRun(
     runId: string,
     outcome: RunOutcome,
-    fence?: LeaseFence,
+    lease?: RunLease,
   ): Promise<void> {
     const run = runs.get(runId);
     if (run === undefined) {
@@ -215,10 +268,12 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     if (run.finished) {
       return Promise.resolve();
     }
-    try {
-      assertFence(runId, fence);
-    } catch (error) {
-      return Promise.reject(error);
+    if (lease !== undefined) {
+      try {
+        assertCurrentLease(lease);
+      } catch (error: unknown) {
+        return Promise.reject(error);
+      }
     }
 
     try {
@@ -235,15 +290,17 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     return Promise.resolve();
   }
 
-  function reopenRun(runId: string, fence?: LeaseFence): Promise<void> {
+  function reopenRun(runId: string, lease?: RunLease): Promise<void> {
     const run = runs.get(runId);
     if (run === undefined) {
       return Promise.reject(new Error(`unknown run: "${runId}"`));
     }
-    try {
-      assertFence(runId, fence);
-    } catch (error) {
-      return Promise.reject(error);
+    if (lease !== undefined) {
+      try {
+        assertCurrentLease(lease);
+      } catch (error: unknown) {
+        return Promise.reject(error);
+      }
     }
     run.finished = false;
     run.outcome = undefined;
@@ -259,77 +316,56 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     return Promise.resolve(Object.freeze(summaries));
   }
 
-  function acquireLease(input: AcquireLeaseInput): Promise<RunLease> {
-    if (
-      !Number.isSafeInteger(input.ttlMs) ||
-      input.ttlMs <= 0 ||
-      input.owner.length === 0
-    ) {
-      return Promise.reject(
-        new Error("lease owner and ttlMs must be non-empty and positive"),
-      );
-    }
-    if (!runs.has(input.runId))
-      return Promise.reject(new Error(`unknown run: "${input.runId}"`));
-    const key = leaseKey(input.runId, input.nodeId);
-    const current = leases.get(key);
-    const at = now();
-    if (
-      current !== undefined &&
-      current.expiresAtMs > at &&
-      current.owner !== input.owner
-    ) {
-      return Promise.reject(
-        new Error(`lease ownership conflict for run "${input.runId}"`),
-      );
-    }
-    const lease = Object.freeze({
-      runId: input.runId,
-      ...(input.nodeId === undefined ? {} : { nodeId: input.nodeId }),
-      owner: input.owner,
-      expiresAtMs: at + input.ttlMs,
-      fencingToken:
-        current === undefined
-          ? 1
-          : current.fencingToken + (current.owner === input.owner ? 0 : 1),
-    });
-    leases.set(key, lease);
-    return Promise.resolve(lease);
+  function acquireCoordinatorLease(
+    runId: string,
+    owner: string,
+    durationMs: number,
+  ): Promise<RunLease> {
+    return acquire("coordinator", runId, undefined, owner, durationMs);
   }
-
-  function renewLease(lease: RunLease, ttlMs: number): Promise<RunLease> {
-    if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0)
-      return Promise.reject(
-        new Error("lease ttlMs must be a positive integer"),
-      );
+  function acquireNodeLease(
+    runId: string,
+    nodeId: string,
+    owner: string,
+    durationMs: number,
+  ): Promise<RunLease> {
+    return acquire("node", runId, nodeId, owner, durationMs);
+  }
+  function renewLease(lease: RunLease, durationMs: number): Promise<RunLease> {
     try {
-      assertFence(lease.runId, lease);
-      const renewed = Object.freeze({ ...lease, expiresAtMs: now() + ttlMs });
-      leases.set(leaseKey(lease.runId, lease.nodeId), renewed);
+      duration(durationMs);
+      assertCurrentLease(lease);
+      const renewed = Object.freeze({
+        ...lease,
+        expiresAtMs: now() + durationMs,
+      });
+      leases.set(leaseKey(lease), renewed);
       return Promise.resolve(renewed);
-    } catch (error) {
+    } catch (error: unknown) {
       return Promise.reject(error);
     }
   }
-
   function releaseLease(lease: RunLease): Promise<void> {
-    const current = leases.get(leaseKey(lease.runId, lease.nodeId));
+    const current = leases.get(leaseKey(lease));
     if (
-      current?.owner === lease.owner &&
-      current.fencingToken === lease.fencingToken
+      current?.fencingToken === lease.fencingToken &&
+      current.owner === lease.owner
     )
-      leases.delete(leaseKey(lease.runId, lease.nodeId));
+      leases.delete(leaseKey(lease));
     return Promise.resolve();
   }
-
-  function getLease(
-    runId: string,
-    nodeId?: string,
-  ): Promise<RunLease | undefined> {
-    const lease = leases.get(leaseKey(runId, nodeId));
-    return Promise.resolve(
-      lease === undefined || lease.expiresAtMs <= now() ? undefined : lease,
-    );
+  function getRunLeases(runId: string): Promise<readonly RunLeaseStatus[]> {
+    const current = [...leases.values()]
+      .filter((lease) => lease.runId === runId && lease.expiresAtMs > now())
+      .map(({ kind, nodeId, fencingToken, expiresAtMs }) =>
+        Object.freeze({
+          kind,
+          ...(nodeId === undefined ? {} : { nodeId }),
+          fencingToken,
+          expiresAtMs,
+        }),
+      );
+    return Promise.resolve(Object.freeze(current));
   }
 
   return Object.freeze({
@@ -340,9 +376,10 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     listRuns,
     finishRun,
     reopenRun,
-    acquireLease,
+    acquireCoordinatorLease,
+    acquireNodeLease,
     renewLease,
     releaseLease,
-    getLease,
+    getRunLeases,
   });
 }

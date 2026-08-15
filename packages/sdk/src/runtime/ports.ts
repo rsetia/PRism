@@ -102,30 +102,6 @@ export interface CreateRunInput {
   readonly graph: CompiledGraph;
 }
 
-/** A renewable, fenced claim to coordinate a run or execute one node. */
-export interface RunLease {
-  readonly runId: string;
-  /** Omitted for the run-wide coordinator lease. */
-  readonly nodeId?: string;
-  readonly owner: string;
-  readonly expiresAtMs: number;
-  /** Increases on every takeover; stale owners can never become current again. */
-  readonly fencingToken: number;
-}
-
-export interface AcquireLeaseInput {
-  readonly runId: string;
-  readonly nodeId?: string;
-  readonly owner: string;
-  readonly ttlMs: number;
-}
-
-/** A write fence is deliberately the lease itself, not just its token. */
-export type LeaseFence = Pick<
-  RunLease,
-  "runId" | "nodeId" | "owner" | "fencingToken"
->;
-
 interface StoredRunBase {
   readonly runId: string;
   readonly graph: CompiledGraph;
@@ -151,6 +127,26 @@ export type StoredRun =
 export interface RunSummary {
   readonly runId: string;
   readonly finished: boolean;
+}
+
+/** A time-bounded exclusive claim on either a run coordinator or one node. */
+export interface RunLease {
+  readonly kind: "coordinator" | "node";
+  readonly runId: string;
+  readonly nodeId?: string;
+  /** Opaque caller identity; stores never expose it to observers. */
+  readonly owner: string;
+  /** Monotonically increasing generation used to fence replaced owners. */
+  readonly fencingToken: number;
+  readonly expiresAtMs: number;
+}
+
+/** Safe ownership information suitable for status and inspect output. */
+export interface RunLeaseStatus {
+  readonly kind: RunLease["kind"];
+  readonly nodeId?: string;
+  readonly fencingToken: number;
+  readonly expiresAtMs: number;
 }
 
 /**
@@ -183,7 +179,7 @@ export interface RunStore {
     runId: string,
     events: readonly RunEvent[],
     expectedRevision?: number,
-    fence?: LeaseFence,
+    lease?: RunLease,
   ): Promise<readonly PersistedRunEvent[]>;
   readEvents(runId: string, fromSeq?: number): AsyncIterable<PersistedRunEvent>;
   getRun(runId: string): Promise<StoredRun | undefined>;
@@ -191,17 +187,28 @@ export interface RunStore {
   finishRun(
     runId: string,
     outcome: RunOutcome,
-    fence?: LeaseFence,
+    lease?: RunLease,
   ): Promise<void>;
-  reopenRun(runId: string, fence?: LeaseFence): Promise<void>;
-  /** Atomically acquire a coordinator (no nodeId) or node lease. */
-  acquireLease?(input: AcquireLeaseInput): Promise<RunLease>;
-  /** Extend a current lease. Rejects expiry, takeover, and stale fencing. */
-  renewLease?(lease: RunLease, ttlMs: number): Promise<RunLease>;
-  /** Best-effort release; a stale lease cannot release its replacement. */
-  releaseLease?(lease: RunLease): Promise<void>;
-  /** Current unexpired ownership, for status/inspect without host metadata. */
-  getLease?(runId: string, nodeId?: string): Promise<RunLease | undefined>;
+  reopenRun(runId: string, lease?: RunLease): Promise<void>;
+  /** Acquire an exclusive renewable coordinator lease, or reject on conflict. */
+  acquireCoordinatorLease(
+    runId: string,
+    owner: string,
+    durationMs: number,
+  ): Promise<RunLease>;
+  /** Acquire an exclusive renewable per-node lease, or reject on conflict. */
+  acquireNodeLease(
+    runId: string,
+    nodeId: string,
+    owner: string,
+    durationMs: number,
+  ): Promise<RunLease>;
+  /** Extend a lease only when its fencing token remains current. */
+  renewLease(lease: RunLease, durationMs: number): Promise<RunLease>;
+  /** Idempotently release a current lease. Stale releases cannot release a successor. */
+  releaseLease(lease: RunLease): Promise<void>;
+  /** Returns current non-expired ownership without exposing owner identities. */
+  getRunLeases(runId: string): Promise<readonly RunLeaseStatus[]>;
   close?(): Promise<void>;
 }
 

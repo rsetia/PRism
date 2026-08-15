@@ -2,7 +2,7 @@ import type { CompiledGraph } from "../graph/types.js";
 import type { PersistedRunEvent } from "./events.js";
 import type { NodePhase } from "./events.js";
 import { reduceNodeState } from "./transitions.js";
-import type { Clock, RunStore } from "./ports.js";
+import type { Clock, RunLeaseStatus, RunStore } from "./ports.js";
 import type { NodeFailure, NodeState } from "./types.js";
 import { tryParseProofOfWork, type ProofOfWorkV1 } from "./proof-of-work.js";
 import type { JsonValue } from "../graph/types.js";
@@ -22,13 +22,6 @@ export interface NodeInspection {
   readonly timing: NodeTiming | null;
   /** Structured agent evidence; null for generic and legacy outputs. */
   readonly evidence: ProofOfWorkV1 | null;
-  /** Current node ownership without exposing the opaque owner identity. */
-  readonly lease?: LeaseInspection | null;
-}
-
-export interface LeaseInspection {
-  readonly expiresAtMs: number;
-  readonly fencingToken: number;
 }
 
 export type NodeTimingPhase =
@@ -61,8 +54,8 @@ export interface RunInspection {
   readonly failures: readonly NodeFailure[];
   /** Null for empty or legacy timestamp-free event logs. */
   readonly timing: RunTiming | null;
-  /** Current coordinator ownership without host or owner metadata. */
-  readonly coordinatorLease?: LeaseInspection | null;
+  /** Current non-expired ownership, without exposing owner identities. */
+  readonly leases?: readonly RunLeaseStatus[];
 }
 
 export interface CriticalPathTiming {
@@ -204,20 +197,7 @@ async function inspectRunSnapshot(
       ? stored.outcome.failures
       : eventFailures;
 
-  const leaseView = (
-    lease: { expiresAtMs: number; fencingToken: number } | undefined,
-  ): LeaseInspection | null =>
-    lease === undefined
-      ? null
-      : Object.freeze({
-          expiresAtMs: lease.expiresAtMs,
-          fencingToken: lease.fencingToken,
-        });
-  const coordinatorLease = await store.getLease?.(runId);
-  const nodeLeases = await Promise.all(
-    stored.graph.order.map((nodeId) => store.getLease?.(runId, nodeId)),
-  );
-  const nodes = stored.graph.order.map((nodeId, index) => {
+  const nodes = stored.graph.order.map((nodeId) => {
     const state = states.get(nodeId);
     if (state === undefined) {
       throw new Error(`compiled graph order contains unknown node "${nodeId}"`);
@@ -229,9 +209,6 @@ async function inspectRunSnapshot(
       evidence: outputByNode.has(nodeId)
         ? tryParseProofOfWork(outputByNode.get(nodeId) as JsonValue)
         : null,
-      ...(leaseView(nodeLeases[index]) === null
-        ? {}
-        : { lease: leaseView(nodeLeases[index]) }),
     });
   });
   const timing = calculateRunTiming(
@@ -240,6 +217,7 @@ async function inspectRunSnapshot(
     events,
     timings,
   );
+  const leases = await store.getRunLeases(runId);
 
   return Object.freeze({
     runId,
@@ -247,9 +225,7 @@ async function inspectRunSnapshot(
     nodes: Object.freeze(nodes),
     failures: Object.freeze(failures),
     timing,
-    ...(leaseView(coordinatorLease) === null
-      ? {}
-      : { coordinatorLease: leaseView(coordinatorLease) }),
+    leases,
   });
 }
 

@@ -63,7 +63,6 @@ export { inspectRun, watchRun } from "./runtime/inspect.js";
 export type {
   CriticalPathTiming,
   NodeInspection,
-  LeaseInspection,
   NodeTiming,
   NodeTimingPhase,
   PhaseDuration,
@@ -89,9 +88,6 @@ export type {
   LogBackend,
   LogTarget,
   LogWriter,
-  AcquireLeaseInput,
-  LeaseFence,
-  RunLease,
   ReadLogOptions,
   RunSummary,
   ExecutionContext,
@@ -100,6 +96,8 @@ export type {
   NodeExecutionOutcome,
   PutArtifactInput,
   RunStore,
+  RunLease,
+  RunLeaseStatus,
   StoredRun,
 } from "./runtime/ports.js";
 export { createEngine } from "./runtime/engine.js";
