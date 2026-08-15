@@ -17,6 +17,8 @@ export interface SqliteStoreOptions {
    * for the contract suite, not for reopen tests).
    */
   readonly path: string;
+  /** Time source used when an event is durably appended. */
+  readonly now?: () => number;
 }
 
 const loadBuiltin = createRequire(import.meta.url);
@@ -52,8 +54,12 @@ function openDatabase(path: string): Database {
  *     PRIMARY KEY (run_id, seq)
  *   )
  * Set `PRAGMA journal_mode = WAL` and `PRAGMA foreign_keys = ON`.
- * This unreleased package starts with schema version 1. Store that version
- * and refuse to open a newer one.
+ * Schema version 2 adds stable event timestamps inside event_json. Version 1
+ * events remain readable with timestampMs: null, making unavailable timing
+ * data explicit instead of inventing a migration time. The version stamp
+ * (user_version + runs.schema_version) is applied on the first write, never
+ * on open, so a read-only open cannot strand the file above what an older
+ * release accepts.
  *
  * Behavior parity with the memory store:
  * - createRun: INSERT the run; a duplicate run_id violates the primary
@@ -77,8 +83,9 @@ function openDatabase(path: string): Database {
  * persisted runs and events unchanged — that is what makes resume work.
  */
 export function createSqliteStore(options: SqliteStoreOptions): RunStore {
-  const schemaVersion = 1;
+  const schemaVersion = 2;
   const db = openDatabase(options.path);
+  const now = options.now ?? Date.now;
   let closed = false;
   const waiters = new Map<string, Set<() => void>>();
 
@@ -125,7 +132,15 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
       `run schema version ${String(newestRunVersion)} is newer than supported version ${String(schemaVersion)}`,
     );
   }
-  if (storedVersion < schemaVersion) {
+  // The version stamp is deferred to the first write: opening a store for
+  // reading (inspect, watch) must leave the database byte-identical so the
+  // previous release can still open it after a rollback.
+  let stampedVersion = storedVersion >= schemaVersion;
+
+  function ensureSchemaCurrent(): void {
+    if (stampedVersion) {
+      return;
+    }
     db.exec("BEGIN IMMEDIATE");
     try {
       db.prepare(
@@ -137,9 +152,9 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
       if (db.isTransaction) {
         db.exec("ROLLBACK");
       }
-      db.close();
       throw error;
     }
+    stampedVersion = true;
   }
 
   const insertRun = db.prepare(
@@ -204,6 +219,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   }): Promise<void> {
     return capture(() => {
       assertOpen();
+      ensureSchemaCurrent();
       insertRun.run(input.runId, JSON.stringify(input.graph), schemaVersion);
     });
   }
@@ -215,6 +231,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   ): Promise<readonly PersistedRunEvent[]> {
     return capture(() => {
       assertOpen();
+      ensureSchemaCurrent();
       db.exec("BEGIN IMMEDIATE");
       try {
         const run = selectRun.get(runId);
@@ -233,7 +250,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
           );
         }
         const persisted = events.map((event) => {
-          const saved = snapshotRunEvent(event, sequence);
+          const saved = snapshotRunEvent(event, sequence, now());
           insertEvent.run(runId, sequence, JSON.stringify(saved));
           sequence += 1;
           return saved;
@@ -333,6 +350,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   function finishRun(runId: string, outcome: RunOutcome): Promise<void> {
     return capture(() => {
       assertOpen();
+      ensureSchemaCurrent();
       const run = selectRun.get(runId);
       if (run === undefined) {
         throw new Error(`unknown run: "${runId}"`);
@@ -349,6 +367,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   function reopenRun(runId: string): Promise<void> {
     return capture(() => {
       assertOpen();
+      ensureSchemaCurrent();
       const result = reopenRunStatement.run(runId);
       if (result.changes === 0) {
         throw new Error(`unknown run: "${runId}"`);
@@ -469,7 +488,20 @@ function decodeEvent(json: string, seq: number): PersistedRunEvent {
   ) {
     throw new Error(`stored event at sequence ${String(seq)} is invalid`);
   }
-  const persisted = { ...value, seq };
+  const timestampMs = value["timestampMs"];
+  if (
+    timestampMs !== undefined &&
+    (!Number.isSafeInteger(timestampMs) || (timestampMs as number) < 0)
+  ) {
+    throw new Error(
+      `stored event at sequence ${String(seq)} has an invalid timestampMs`,
+    );
+  }
+  const persisted = {
+    ...value,
+    seq,
+    timestampMs: timestampMs === undefined ? null : (timestampMs as number),
+  };
   deepFreeze(persisted);
   return persisted as unknown as PersistedRunEvent;
 }

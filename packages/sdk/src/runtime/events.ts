@@ -58,8 +58,13 @@ export type RunEvent =
     };
 
 /**
- * An event as the store returns it. `seq` is assigned by the store on
- * append — monotonic per run, gapless, starting at 0 — never by the
- * event's producer.
+ * An event as the store returns it. `seq` and `timestampMs` are assigned by
+ * the store on append — never by the event's producer. `seq` is monotonic per
+ * run, gapless, and starts at 0. `timestampMs` is Unix epoch milliseconds and
+ * remains stable across reads. It is null only for events loaded from a
+ * pre-timestamp store.
  */
-export type PersistedRunEvent = RunEvent & { readonly seq: number };
+export type PersistedRunEvent = RunEvent & {
+  readonly seq: number;
+  readonly timestampMs: number | null;
+};

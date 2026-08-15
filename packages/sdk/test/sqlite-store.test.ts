@@ -1,6 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { afterAll, describe, expect, test } from "vitest";
 import {
   builtinExecutors,
@@ -57,6 +58,115 @@ async function collect(
 }
 
 describe("sqlite durability", () => {
+  test("upgrades timestamp-free version 1 events without inventing times", async () => {
+    const path = tempDbPath();
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      PRAGMA user_version = 1;
+      CREATE TABLE runs (
+        run_id TEXT PRIMARY KEY,
+        graph_json TEXT NOT NULL,
+        finished INTEGER NOT NULL DEFAULT 0 CHECK (finished IN (0, 1)),
+        schema_version INTEGER NOT NULL,
+        outcome_json TEXT,
+        CHECK (
+          (finished = 0 AND outcome_json IS NULL) OR
+          (finished = 1 AND outcome_json IS NOT NULL)
+        )
+      ) STRICT;
+      CREATE TABLE events (
+        run_id TEXT NOT NULL,
+        seq INTEGER NOT NULL CHECK (seq >= 0),
+        event_json TEXT NOT NULL,
+        PRIMARY KEY (run_id, seq),
+        FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+      ) STRICT;
+    `);
+    legacy
+      .prepare(
+        "INSERT INTO runs (run_id, graph_json, schema_version) VALUES (?, ?, 1)",
+      )
+      .run("legacy", JSON.stringify(fixtureGraph()));
+    legacy
+      .prepare("INSERT INTO events (run_id, seq, event_json) VALUES (?, 0, ?)")
+      .run(
+        "legacy",
+        JSON.stringify({ kind: "node_ready", nodeId: "only", seq: 0 }),
+      );
+    legacy.close();
+
+    const store = createSqliteStore({ path, now: () => 123 });
+    const reader = store.readEvents("legacy")[Symbol.asyncIterator]();
+    const before = await reader.next();
+    await reader.return?.();
+    if (before.done) throw new Error("legacy event was not read");
+    const legacyEvent: PersistedRunEvent = before.value;
+    expect(legacyEvent.timestampMs).toBeNull();
+
+    const appended = await store.appendEvents("legacy", [
+      { kind: "node_started", nodeId: "only" },
+    ]);
+    expect(appended[0]?.timestampMs).toBe(123);
+    await store.close?.();
+
+    // The append above is a write, so only now is the file stamped as
+    // version 2.
+    const stamped = new DatabaseSync(path);
+    expect(stamped.prepare("PRAGMA user_version").get()).toEqual({
+      user_version: 2,
+    });
+    stamped.close();
+  });
+
+  test("a read-only open leaves a version 1 database untouched", async () => {
+    const path = tempDbPath();
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      PRAGMA user_version = 1;
+      CREATE TABLE runs (
+        run_id TEXT PRIMARY KEY,
+        graph_json TEXT NOT NULL,
+        finished INTEGER NOT NULL DEFAULT 0 CHECK (finished IN (0, 1)),
+        schema_version INTEGER NOT NULL,
+        outcome_json TEXT,
+        CHECK (
+          (finished = 0 AND outcome_json IS NULL) OR
+          (finished = 1 AND outcome_json IS NOT NULL)
+        )
+      ) STRICT;
+      CREATE TABLE events (
+        run_id TEXT NOT NULL,
+        seq INTEGER NOT NULL CHECK (seq >= 0),
+        event_json TEXT NOT NULL,
+        PRIMARY KEY (run_id, seq),
+        FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+      ) STRICT;
+    `);
+    legacy
+      .prepare(
+        "INSERT INTO runs (run_id, graph_json, schema_version) VALUES (?, ?, 1)",
+      )
+      .run("legacy", JSON.stringify(fixtureGraph()));
+    legacy.close();
+
+    const store = createSqliteStore({ path });
+    expect(await store.listRuns()).toEqual([
+      { runId: "legacy", finished: false },
+    ]);
+    await store.getRun("legacy");
+    await store.close?.();
+
+    // A rollback to the version 1 release must still open this file.
+    const untouched = new DatabaseSync(path);
+    expect(untouched.prepare("PRAGMA user_version").get()).toEqual({
+      user_version: 1,
+    });
+    expect(untouched.prepare("SELECT schema_version FROM runs").get()).toEqual({
+      schema_version: 1,
+    });
+    untouched.close();
+  });
+
   test("run summaries survive reopen in newest-first order", async () => {
     const path = tempDbPath();
     const store = createSqliteStore({ path });

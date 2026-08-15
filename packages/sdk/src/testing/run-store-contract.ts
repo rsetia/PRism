@@ -81,8 +81,28 @@ export function runStoreContract(
       const second = await s.appendEvents("r", [ready("b")]);
       expect(first.map((e) => e.seq)).toEqual([0, 1]);
       expect(second.map((e) => e.seq)).toEqual([2]);
+      expect(
+        [...first, ...second].every(
+          (event) =>
+            Number.isSafeInteger(event.timestampMs) &&
+            (event.timestampMs ?? -1) >= 0,
+        ),
+      ).toBe(true);
       expect(first[0]?.kind).toBe("node_ready");
       expect((await s.getRun("r"))?.revision).toBe(3);
+    });
+
+    test("persisted timestamps remain stable across reads", async () => {
+      const s = open();
+      await s.createRun({ runId: "r", graph: fixtureGraph() });
+      const appended = await s.appendEvents("r", [ready("a"), started("a")]);
+      await s.finishRun("r", cancelledOutcome());
+      const read: PersistedRunEvent[] = [];
+      await collect(s.readEvents("r"), read);
+
+      expect(read.map((event) => event.timestampMs)).toEqual(
+        appended.map((event) => event.timestampMs),
+      );
     });
 
     test("appendEvents rejects a stale expected revision", async () => {
