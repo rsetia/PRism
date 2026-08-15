@@ -97,8 +97,9 @@ export interface CodexExecutorOptions {
  *    : undefined. worktreeDir = workspace?.dir ?? cwd ?? process.cwd().
  * 5. nodeDir = mkdtemp under nodeDirBase ?? worktreeDir; write spec.json
  *    (the codex engine reads its protocol files there).
- * 6. result = await engine.execute({ spec, nodeDir, worktreeDir, contract,
- *    signal: context.signal }).
+ * 6. result = await engine.execute(...) for the compatibility backend, or
+ *    runAgentSession(...) for a structured session backend. The latter starts
+ *    or resumes the durable {runId,nodeId,attempt} conversation.
  * 7. map: succeeded -> { status: "succeeded", output: result.output };
  *    failed -> { status: "failed", cause: result.error ?? "codex failed",
  *    failureClass: result.failureClass }. A thrown engine error ->
@@ -111,7 +112,9 @@ export function createCodexExecutor(
   options: CodexExecutorOptions,
 ): ExecutorDefinition {
   validateExecutorName(options.name);
-  if (options.engine === undefined && options.sessionBackend === undefined) {
+  const engine = options.engine;
+  const sessionBackend = options.sessionBackend;
+  if (engine === undefined && sessionBackend === undefined) {
     throw new Error("Codex executor requires an engine or sessionBackend");
   }
   const name = options.name;
@@ -205,8 +208,8 @@ export function createCodexExecutor(
                 );
               };
         const result =
-          options.sessionBackend === undefined
-            ? await options.engine!.execute({
+          sessionBackend === undefined
+            ? await engine!.execute({
                 spec,
                 nodeDir,
                 worktreeDir,
@@ -237,7 +240,7 @@ export function createCodexExecutor(
                   }),
                 },
                 {
-                  backend: options.sessionBackend,
+                  backend: sessionBackend,
                   ...(options.sessionStore === undefined
                     ? {}
                     : { store: options.sessionStore }),

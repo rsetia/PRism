@@ -20,6 +20,7 @@ import {
   createFileLogBackend,
 } from "../src/node/index.js";
 import type {
+  AgentSessionBackend,
   CodexEngine,
   CodexExecutionInput,
   WorkerResult,
@@ -122,6 +123,56 @@ function context(
 }
 
 describe("createCodexExecutor", () => {
+  test("requires either a compatibility engine or a session backend", () => {
+    expect(() =>
+      createCodexExecutor({ name: "implement", cwd: tempDir }),
+    ).toThrow("requires an engine or sessionBackend");
+  });
+
+  test("uses a resumable session backend and maps its result", async () => {
+    const calls: string[] = [];
+    const backend: AgentSessionBackend = {
+      name: "fake-session",
+      async start(input) {
+        calls.push(
+          `start:${input.key.runId}:${input.key.nodeId}:${String(input.key.attempt)}`,
+        );
+        return { id: "session-1", state: null };
+      },
+      async resume(_input, session) {
+        calls.push(`resume:${session.id}`);
+        return session;
+      },
+      async steer() {},
+      async interrupt() {},
+      async *events() {
+        yield { kind: "phase", phase: "validation" } as const;
+        yield {
+          kind: "result",
+          result: { status: "succeeded", output: { session: true } },
+        } as const;
+      },
+    };
+    const executor = createCodexExecutor({
+      name: "implement",
+      sessionBackend: backend,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+    });
+    const phases: NodePhase[] = [];
+    await expect(
+      executor.execute(
+        context([], {
+          reportPhase: async (phase) => {
+            phases.push(phase);
+          },
+        }),
+      ),
+    ).resolves.toEqual({ status: "succeeded", output: { session: true } });
+    expect(calls).toEqual(["start:direct-run:direct-node:1"]);
+    expect(phases).toContain("validation");
+  });
+
   test("runs an implement node and maps a succeeded result", async () => {
     const { engine, inputs } = fakeEngine({
       status: "succeeded",

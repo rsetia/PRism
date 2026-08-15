@@ -12,6 +12,7 @@ import {
   createFileLogBackend,
   createGitWorktreeProvisioner,
   createMergePrExecutor,
+  type AgentSessionBackend,
 } from "@rsetia/prism/node";
 import { resolvePrismProjectPaths } from "./prism-home.js";
 
@@ -31,6 +32,8 @@ export interface AgentExecutorRegistryOptions {
   readonly codexModel?: string;
   /** Codex reasoning effort. Default medium. */
   readonly codexReasoningEffort?: string;
+  /** Selects a structured backend when embedding the CLI registry. */
+  readonly sessionBackend?: AgentSessionBackend;
 }
 
 /**
@@ -67,26 +70,20 @@ export function createAgentExecutorRegistry(
     baseDir: worktreeBaseDir,
   });
 
+  const codexExecutor = (name: "implement" | "merge_resolve" | "finalize_pr") =>
+    createCodexExecutor({
+      name,
+      ...(options.sessionBackend === undefined
+        ? { engine: codexEngine }
+        : { sessionBackend: options.sessionBackend }),
+      provisioner,
+      logBackend,
+    });
   return createExecutorRegistry([
     ...builtinExecutors,
-    createCodexExecutor({
-      name: "implement",
-      engine: codexEngine,
-      provisioner,
-      logBackend,
-    }),
-    createCodexExecutor({
-      name: "merge_resolve",
-      engine: codexEngine,
-      provisioner,
-      logBackend,
-    }),
-    createCodexExecutor({
-      name: "finalize_pr",
-      engine: codexEngine,
-      provisioner,
-      logBackend,
-    }),
+    codexExecutor("implement"),
+    codexExecutor("merge_resolve"),
+    codexExecutor("finalize_pr"),
     // Kept for hand-authored graphs that only need deterministic PR merging.
     createMergePrExecutor({ cwd: repoDir }),
     createBeadsUpdateExecutor({ cwd: repoDir }),
