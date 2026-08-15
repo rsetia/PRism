@@ -30,6 +30,7 @@ function graph(nodes: Record<string, unknown>, finalNode = "a"): CompiledGraph {
 interface Start {
   readonly nodeId: string;
   readonly attempt: number;
+  readonly signal: AbortSignal;
   succeed(output?: JsonValue): void;
   fail(): void;
 }
@@ -48,6 +49,7 @@ function controlled(): {
           const start: Start = {
             nodeId: context.nodeId,
             attempt: context.attempt,
+            signal: context.signal,
             succeed: (output = null) =>
               resolve({ status: "succeeded", output }),
             fail: () =>
@@ -143,5 +145,35 @@ describe("scheduler resources", () => {
       status: "succeeded",
       output: "done",
     });
+  });
+
+  test("cancellation clears a resource holder and cancels its waiters", async () => {
+    const executor = controlled();
+    const handle = createEngine({
+      store: createMemoryStore(),
+      registry: createExecutorRegistry([executor.definition]),
+      maxConcurrency: 2,
+    }).run(
+      graph({
+        a: { executor: "controlled", resources: ["shared"] },
+        b: { executor: "controlled", resources: ["shared"] },
+      }),
+    );
+
+    const a = await executor.next();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const cancellation = handle.cancel("stop");
+    expect(a.signal.aborted).toBe(true);
+    a.succeed();
+    await cancellation;
+
+    await expect(handle.result).resolves.toEqual({
+      status: "cancelled",
+      reason: "stop",
+      failures: [],
+    });
+    expect(await kinds(handle)).toEqual(
+      expect.arrayContaining(["node_resource_wait", "node_cancelled"]),
+    );
   });
 });
