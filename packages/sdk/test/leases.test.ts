@@ -19,7 +19,7 @@ function graph() {
 describe("run leases", () => {
   test("expired owners are replaced and fenced from later writes", async () => {
     const clock = createManualClock();
-    const store = createMemoryStore({ now: clock.now });
+    const store = createMemoryStore({ now: () => clock.now() });
     await store.createRun({ runId: "r", graph: graph() });
     const first = await store.acquireCoordinatorLease("r", "first", 10);
     await expect(
@@ -48,7 +48,7 @@ describe("run leases", () => {
 
   test("renewal preserves the token and status hides the owner", async () => {
     const clock = createManualClock();
-    const store = createMemoryStore({ now: clock.now });
+    const store = createMemoryStore({ now: () => clock.now() });
     await store.createRun({ runId: "r", graph: graph() });
     const lease = await store.acquireNodeLease(
       "r",

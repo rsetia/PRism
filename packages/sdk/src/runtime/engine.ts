@@ -922,7 +922,13 @@ async function executeRun(
               (phase) =>
                 applyEvents([{ kind: "node_phase_changed", nodeId, phase }]),
             );
-            if (renewalFailure !== undefined) throw renewalFailure;
+            if (renewalFailure !== undefined) {
+              throw renewalFailure instanceof Error
+                ? renewalFailure
+                : new Error("node lease renewal failed", {
+                    cause: renewalFailure,
+                  });
+            }
             return result;
           } finally {
             clearInterval(renewalTimer);

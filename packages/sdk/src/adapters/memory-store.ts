@@ -30,6 +30,10 @@ function wakeReaders(run: MemoryRun): void {
   }
 }
 
+function asError(error: unknown, message: string): Error {
+  return error instanceof Error ? error : new Error(message, { cause: error });
+}
+
 /**
  * In-memory RunStore — enough persistence to execute runs today, and
  * the same interface the durable store implements later.
@@ -117,7 +121,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
       leases.set(key, lease);
       return Promise.resolve(lease);
     } catch (error: unknown) {
-      return Promise.reject(error);
+      return Promise.reject(asError(error, "lease acquisition failed"));
     }
   }
 
@@ -157,7 +161,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
       try {
         assertCurrentLease(lease);
       } catch (error: unknown) {
-        return Promise.reject(error);
+        return Promise.reject(asError(error, "lease fencing failed"));
       }
     }
     if (
@@ -272,7 +276,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
       try {
         assertCurrentLease(lease);
       } catch (error: unknown) {
-        return Promise.reject(error);
+        return Promise.reject(asError(error, "lease fencing failed"));
       }
     }
 
@@ -299,7 +303,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
       try {
         assertCurrentLease(lease);
       } catch (error: unknown) {
-        return Promise.reject(error);
+        return Promise.reject(asError(error, "lease fencing failed"));
       }
     }
     run.finished = false;
@@ -342,7 +346,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
       leases.set(leaseKey(lease), renewed);
       return Promise.resolve(renewed);
     } catch (error: unknown) {
-      return Promise.reject(error);
+      return Promise.reject(asError(error, "lease renewal failed"));
     }
   }
   function releaseLease(lease: RunLease): Promise<void> {
