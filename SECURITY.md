@@ -60,6 +60,14 @@ you'd treat a shell script someone handed you.
 Cancellation terminates the supervised child, but external operations already
 performed by that child may not be reversible.
 
+## Evaluation and release boundary
+
+`npm run eval` uses fake executors and in-memory stores only; it never makes
+paid model calls or uses live GitHub credentials. A maintainer may separately
+opt into a Codex/GitHub smoke against a disposable repository, but that check
+is not public CI. This keeps release proof repeatable while making the
+privileged executor boundary explicit.
+
 ## Supported versions
 
 Prism is pre-1.0 (`0.1.0-alpha.0`). Only the latest commit on `main` is
