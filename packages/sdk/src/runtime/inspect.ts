@@ -1,3 +1,4 @@
+import type { CompiledGraph } from "../graph/types.js";
 import type { PersistedRunEvent } from "./events.js";
 import type { NodePhase } from "./events.js";
 import { reduceNodeState } from "./transitions.js";
@@ -47,6 +48,26 @@ export interface RunInspection {
   readonly nodes: readonly NodeInspection[];
   /** Originating failures observed so far. */
   readonly failures: readonly NodeFailure[];
+  /** Null for empty or legacy timestamp-free event logs. */
+  readonly timing: RunTiming | null;
+}
+
+export interface CriticalPathTiming {
+  readonly nodeIds: readonly string[];
+  readonly durationMs: number;
+  readonly phases: readonly PhaseDuration[];
+}
+
+export interface RunTiming {
+  readonly startedAtMs: number;
+  readonly completedAtMs: number | null;
+  readonly totalDurationMs: number;
+  /** Coverage across cumulative node wall time, from 0 through 1. */
+  readonly attributionCoverage: number;
+  /** Cumulative totals across nodes; parallel work may overlap. */
+  readonly phases: readonly PhaseDuration[];
+  readonly waitingPhases: readonly PhaseDuration[];
+  readonly criticalPath: CriticalPathTiming;
 }
 
 export interface WatchRunOptions {
@@ -177,13 +198,151 @@ async function inspectRunSnapshot(
       timing: timings.get(nodeId) ?? null,
     });
   });
+  const timing = calculateRunTiming(
+    stored.graph,
+    stored.finished,
+    events,
+    timings,
+  );
 
   return Object.freeze({
     runId,
     finished: stored.finished,
     nodes: Object.freeze(nodes),
     failures: Object.freeze(failures),
+    timing,
   });
+}
+
+function calculateRunTiming(
+  graph: CompiledGraph,
+  finished: boolean,
+  events: readonly PersistedRunEvent[],
+  nodeTimings: ReadonlyMap<string, NodeTiming>,
+): RunTiming | null {
+  if (
+    events.length === 0 ||
+    events.some((event) => event.timestampMs === null)
+  ) {
+    return null;
+  }
+  // A loop, not Math.min(...spread): a long run's event log can exceed the
+  // engine's argument-count limit and throw RangeError.
+  let startedAtMs = events[0]?.timestampMs as number;
+  let observedAtMs = startedAtMs;
+  for (const event of events) {
+    const timestampMs = event.timestampMs as number;
+    if (timestampMs < startedAtMs) startedAtMs = timestampMs;
+    if (timestampMs > observedAtMs) observedAtMs = timestampMs;
+  }
+  const totalDurationMs = Math.max(0, observedAtMs - startedAtMs);
+  const cumulativePhases = sumPhases([...nodeTimings.values()]);
+  const cumulativeNodeDurationMs = [...nodeTimings.values()].reduce(
+    (total, timing) => total + timing.totalDurationMs,
+    0,
+  );
+  const attributedDurationMs = [...nodeTimings.values()].reduce(
+    (total, timing) => total + timing.attributedDurationMs,
+    0,
+  );
+  const criticalPath = calculateCriticalPath(graph, nodeTimings);
+  return Object.freeze({
+    startedAtMs,
+    completedAtMs: finished ? observedAtMs : null,
+    totalDurationMs,
+    attributionCoverage:
+      cumulativeNodeDurationMs === 0
+        ? 1
+        : Math.min(1, attributedDurationMs / cumulativeNodeDurationMs),
+    phases: cumulativePhases,
+    waitingPhases: Object.freeze(
+      cumulativePhases.filter((phase) => isWaitingPhase(phase.phase)),
+    ),
+    criticalPath,
+  });
+}
+
+function calculateCriticalPath(
+  graph: CompiledGraph,
+  timings: ReadonlyMap<string, NodeTiming>,
+): CriticalPathTiming {
+  const paths = new Map<
+    string,
+    { readonly durationMs: number; readonly nodeIds: readonly string[] }
+  >();
+  for (const nodeId of graph.order) {
+    const node = graph.nodes[nodeId];
+    const timing = timings.get(nodeId);
+    if (node === undefined || timing === undefined) continue;
+    const predecessor = node.dependsOn
+      .map((dependencyId) => paths.get(dependencyId))
+      .filter(
+        (
+          path,
+        ): path is {
+          readonly durationMs: number;
+          readonly nodeIds: readonly string[];
+        } => path !== undefined,
+      )
+      .sort((left, right) => right.durationMs - left.durationMs)[0];
+    const activeDurationMs = timing.phases
+      .filter((phase) => phase.phase !== "dependency_wait")
+      .reduce((total, phase) => total + phase.durationMs, 0);
+    paths.set(nodeId, {
+      durationMs: (predecessor?.durationMs ?? 0) + activeDurationMs,
+      nodeIds: [...(predecessor?.nodeIds ?? []), nodeId],
+    });
+  }
+  const selected = paths.get(graph.finalNode) ??
+    [...paths.values()].sort(
+      (left, right) => right.durationMs - left.durationMs,
+    )[0] ?? { durationMs: 0, nodeIds: [] };
+  const pathTimings = selected.nodeIds.flatMap((nodeId) => {
+    const timing = timings.get(nodeId);
+    return timing === undefined ? [] : [timing];
+  });
+  return Object.freeze({
+    nodeIds: Object.freeze([...selected.nodeIds]),
+    durationMs: selected.durationMs,
+    phases: Object.freeze(
+      sumPhases(pathTimings).filter(
+        (phase) => phase.phase !== "dependency_wait",
+      ),
+    ),
+  });
+}
+
+function sumPhases(timings: readonly NodeTiming[]): readonly PhaseDuration[] {
+  const totals = new Map<NodeTimingPhase, number>();
+  for (const timing of timings) {
+    for (const phase of timing.phases) {
+      totals.set(
+        phase.phase,
+        (totals.get(phase.phase) ?? 0) + phase.durationMs,
+      );
+    }
+  }
+  return Object.freeze(
+    [...totals.entries()]
+      .map(([phase, durationMs]) => Object.freeze({ phase, durationMs }))
+      .sort(
+        (left, right) =>
+          right.durationMs - left.durationMs ||
+          left.phase.localeCompare(right.phase),
+      ),
+  );
+}
+
+function isWaitingPhase(phase: NodeTimingPhase): boolean {
+  return (
+    phase === "dependency_wait" ||
+    phase === "scheduler_queue" ||
+    phase === "retry_wait" ||
+    phase === "recovery_wait" ||
+    phase === "ci_wait" ||
+    phase === "review_wait" ||
+    phase === "merge_lock_wait"
+  );
 }
 
 interface MutableTiming {
