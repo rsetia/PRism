@@ -75,6 +75,7 @@ export async function abortRun(store: RunStore, runId: string): Promise<void> {
   if (stored.finished) {
     return;
   }
+  await assertNoActiveCoordinatorLease(store, runId, "abort");
 
   const { states, order, failures } = await replayStates(store, runId);
   const events: RunEvent[] = [];
@@ -136,6 +137,7 @@ export async function resetRun(
       throw new Error(`unknown node "${nodeId}" in run "${runId}"`);
     }
   }
+  await assertNoActiveCoordinatorLease(store, runId, "reset");
 
   const targets = new Set<string>();
   const visit = (nodeId: string): void => {
@@ -161,5 +163,18 @@ export async function resetRun(
     .map((nodeId) => ({ kind: "node_reset", nodeId }));
   if (events.length > 0) {
     await store.appendEvents(runId, events);
+  }
+}
+
+async function assertNoActiveCoordinatorLease(
+  store: RunStore,
+  runId: string,
+  operation: "abort" | "reset",
+): Promise<void> {
+  const leases = await store.getRunLeases(runId);
+  if (leases.some((lease) => lease.kind === "coordinator")) {
+    throw new Error(
+      `cannot ${operation} run "${runId}" while an active coordinator lease exists`,
+    );
   }
 }
