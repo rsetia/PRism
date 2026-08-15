@@ -425,6 +425,7 @@ function calculateNodeTimings(
       case "node_succeeded":
       case "node_failed":
       case "node_blocked":
+      case "node_skipped":
       case "node_cancelled":
         completeTiming(timing, timestampMs);
         break;

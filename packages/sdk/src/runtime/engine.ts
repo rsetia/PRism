@@ -1,4 +1,9 @@
-import type { CompiledGraph, CompiledNode, JsonValue } from "../graph/types.js";
+import type {
+  CompiledGraph,
+  CompiledNode,
+  ExecutionCondition,
+  JsonValue,
+} from "../graph/types.js";
 import {
   snapshotJsonValue,
   snapshotNodeFailure,
@@ -381,6 +386,107 @@ interface RunExecutionState {
   readonly hasCancelledNodes: boolean;
 }
 
+interface Proof {
+  readonly changedPaths: readonly string[];
+  readonly hasDiff: boolean | undefined;
+  readonly validationStatuses: readonly ("passed" | "failed")[];
+  readonly reviewStatuses: readonly ("approved" | "changes_requested")[];
+  readonly hasUnresolvedRisk: boolean;
+}
+
+/**
+ * Conditions deliberately recognize only the v1 proof envelope. Arbitrary
+ * executor output is not introspected, so a graph cannot turn this into an
+ * implicit file, environment, or command-reading capability.
+ */
+function evaluateCondition(
+  condition: ExecutionCondition,
+  inputs: readonly (JsonValue | undefined)[],
+): boolean {
+  const proof = collectProof(inputs);
+  if ("all" in condition)
+    return condition.all.every((child) => evaluateCondition(child, inputs));
+  if ("any" in condition)
+    return condition.any.some((child) => evaluateCondition(child, inputs));
+  if ("not" in condition) return !evaluateCondition(condition.not, inputs);
+  switch (condition.predicate) {
+    case "changed_path":
+      return proof.changedPaths.some((path) =>
+        globMatches(condition.matches, path),
+      );
+    case "diff_present":
+      return proof.hasDiff === condition.equals;
+    case "validation_status":
+      return proof.validationStatuses.includes(condition.equals);
+    case "review_status":
+      return proof.reviewStatuses.includes(condition.equals);
+    case "unresolved_risk":
+      return proof.hasUnresolvedRisk === condition.equals;
+  }
+}
+
+function collectProof(inputs: readonly (JsonValue | undefined)[]): Proof {
+  const changedPaths: string[] = [];
+  const validationStatuses: ("passed" | "failed")[] = [];
+  const reviewStatuses: ("approved" | "changes_requested")[] = [];
+  let hasDiff: boolean | undefined;
+  let hasUnresolvedRisk = false;
+  for (const input of inputs) {
+    if (
+      !isRecord(input) ||
+      !isRecord(input["proof"]) ||
+      input["proof"]["version"] !== 1
+    )
+      continue;
+    const proof = input["proof"];
+    if (Array.isArray(proof["changedPaths"]))
+      changedPaths.push(
+        ...proof["changedPaths"].filter(
+          (value): value is string => typeof value === "string",
+        ),
+      );
+    if (typeof proof["hasDiff"] === "boolean")
+      hasDiff = hasDiff === true || proof["hasDiff"];
+    if (
+      proof["validationStatus"] === "passed" ||
+      proof["validationStatus"] === "failed"
+    )
+      validationStatuses.push(proof["validationStatus"]);
+    if (
+      proof["reviewStatus"] === "approved" ||
+      proof["reviewStatus"] === "changes_requested"
+    )
+      reviewStatuses.push(proof["reviewStatus"]);
+    if (proof["unresolvedRisk"] === true) hasUnresolvedRisk = true;
+  }
+  return {
+    changedPaths,
+    hasDiff,
+    validationStatuses,
+    reviewStatuses,
+    hasUnresolvedRisk,
+  };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function globMatches(pattern: string, value: string): boolean {
+  const expression =
+    "^" +
+    pattern
+      .split("**")
+      .map((part) => part.split("*").map(escapeRegex).join("[^/]*"))
+      .join(".*") +
+    "$";
+  return new RegExp(expression).test(value);
+}
+
+function escapeRegex(value: string): string {
+  return value.replace(/[|\\{}()[\]^$+?.]/g, "\\$&");
+}
+
 function createInitialExecutionState(graph: CompiledGraph): RunExecutionState {
   const states = new Map<string, NodeState>();
   const attempts = new Map<string, number>();
@@ -446,6 +552,7 @@ function replayExecutionState(
       case "node_ready":
       case "node_blocked":
       case "node_cancelling":
+      case "node_skipped":
         break;
       default: {
         const unhandledEvent: never = event;
@@ -510,6 +617,7 @@ async function executeRun(
       resumedState === "succeeded" ||
       resumedState === "failed" ||
       resumedState === "blocked" ||
+      resumedState === "skipped" ||
       resumedState === "cancelled"
     ) {
       continue;
@@ -616,9 +724,10 @@ async function executeRun(
 
       const node = getNode(graph, nodeId);
       if (
-        node.dependsOn.every(
-          (dependencyId) => states.get(dependencyId) === "succeeded",
-        )
+        node.dependsOn.every((dependencyId) => {
+          const state = states.get(dependencyId);
+          return state === "succeeded" || state === "skipped";
+        })
       ) {
         events.push({ kind: "node_ready", nodeId });
       }
@@ -648,6 +757,32 @@ async function executeRun(
         return;
       }
       await applyEvents(events);
+    }
+  }
+
+  async function skipUnmatchedNodes(): Promise<void> {
+    while (true) {
+      const events: RunEvent[] = [];
+      for (const nodeId of graph.order) {
+        if (states.get(nodeId) !== "pending") continue;
+        const node = getNode(graph, nodeId);
+        if (
+          node.when !== undefined &&
+          node.dependsOn.every((dependencyId) => {
+            const state = states.get(dependencyId);
+            return state === "succeeded" || state === "skipped";
+          }) &&
+          !evaluateCondition(
+            node.when,
+            node.dependsOn.map((id) => outputs.get(id)),
+          )
+        ) {
+          events.push({ kind: "node_skipped", nodeId });
+        }
+      }
+      if (events.length === 0) return;
+      await applyEvents(events);
+      for (const event of events) outputs.set(event.nodeId, null);
     }
   }
 
@@ -828,6 +963,7 @@ async function executeRun(
   }
 
   await propagateBlockedNodes();
+  await skipUnmatchedNodes();
   await promoteReadyNodes();
 
   while (true) {
@@ -926,6 +1062,7 @@ async function executeRun(
           },
         ]);
         outputs.set(schedulerEvent.nodeId, schedulerEvent.outcome.output);
+        await skipUnmatchedNodes();
         await promoteReadyNodes();
         break;
       }
@@ -950,6 +1087,7 @@ async function executeRun(
       state !== "succeeded" &&
       state !== "failed" &&
       state !== "blocked" &&
+      state !== "skipped" &&
       state !== "cancelled"
     ) {
       throw new Error(`run stopped with node "${nodeId}" in state "${state}"`);

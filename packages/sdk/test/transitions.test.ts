@@ -18,6 +18,7 @@ const STATES: readonly NodeState[] = [
   "succeeded",
   "failed",
   "blocked",
+  "skipped",
   "cancelling",
   "cancelled",
   "retry_wait",
@@ -29,6 +30,7 @@ const EVENTS: readonly RunEvent[] = [
   { kind: "node_succeeded", nodeId: "n", output: "value" },
   { kind: "node_failed", nodeId: "n", failure: { nodeId: "n", cause: "boom" } },
   { kind: "node_blocked", nodeId: "n", blockedBy: ["dep"] },
+  { kind: "node_skipped", nodeId: "n" },
   { kind: "node_cancelling", nodeId: "n" },
   { kind: "node_cancelled", nodeId: "n" },
   {
@@ -48,6 +50,7 @@ const LEGAL = new Map<string, NodeState>([
   ),
   ["pending+node_ready", "ready"],
   ["pending+node_blocked", "blocked"],
+  ["pending+node_skipped", "skipped"],
   ["ready+node_started", "running"],
   ["running+node_succeeded", "succeeded"],
   ["running+node_failed", "failed"],

@@ -27,6 +27,15 @@ function expectCompiled(graph: GraphDefinition): CompiledGraph {
 }
 
 describe("compileGraph", () => {
+  test("preserves graph version 2 in the compiled plan", () => {
+    const graph = expectCompiled({
+      version: 2,
+      nodes: { only: { executor: "test", dependsOn: [] } },
+      finalNode: "only",
+    });
+    expect(graph.version).toBe(2);
+  });
+
   test("produces stable topological order with a lexicographic tie-break", () => {
     const graph = expectCompiled(
       definition(

@@ -18,6 +18,7 @@ const TERMINAL_STATES: ReadonlySet<NodeState> = new Set([
   "succeeded",
   "failed",
   "blocked",
+  "skipped",
   "cancelled",
 ]);
 
@@ -33,6 +34,7 @@ const STATE_PRESENTATION: Readonly<Record<NodeState, StatePresentation>> = {
   succeeded: { symbol: "✓", style: "\u001B[1;32m" },
   failed: { symbol: "✕", style: "\u001B[1;37;41m" },
   blocked: { symbol: "⊘", style: "\u001B[1;35m" },
+  skipped: { symbol: "↷", style: DIM },
   cancelling: { symbol: "◌", style: "\u001B[1;33m" },
   cancelled: { symbol: "—", style: DIM },
   retry_wait: { symbol: "↻", style: "\u001B[1;33m" },
@@ -631,6 +633,7 @@ function aggregateState(states: readonly NodeState[]): NodeState {
   const priority: readonly NodeState[] = [
     "failed",
     "blocked",
+    "skipped",
     "cancelling",
     "running",
     "retry_wait",
@@ -654,6 +657,7 @@ function countStates(
     succeeded: 0,
     failed: 0,
     blocked: 0,
+    skipped: 0,
     cancelling: 0,
     cancelled: 0,
     retry_wait: 0,

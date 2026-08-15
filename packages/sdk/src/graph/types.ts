@@ -10,6 +10,23 @@
  */
 export type NodeKind = "task" | "merge";
 
+/** A data-only gate evaluated from versioned upstream proof outputs. */
+export type ExecutionCondition =
+  | { readonly all: readonly ExecutionCondition[] }
+  | { readonly any: readonly ExecutionCondition[] }
+  | { readonly not: ExecutionCondition }
+  | { readonly predicate: "changed_path"; readonly matches: string }
+  | { readonly predicate: "diff_present"; readonly equals: boolean }
+  | {
+      readonly predicate: "validation_status";
+      readonly equals: "passed" | "failed";
+    }
+  | {
+      readonly predicate: "review_status";
+      readonly equals: "approved" | "changes_requested";
+    }
+  | { readonly predicate: "unresolved_risk"; readonly equals: boolean };
+
 /** `config` is opaque JSON: the SDK never interprets it. */
 export type JsonValue =
   | null
@@ -30,6 +47,8 @@ export interface NodeDefinition {
   /** Defaults to "task" when the source omits it. */
   readonly kind?: NodeKind;
   readonly config?: JsonValue;
+  /** Available only in graph version 2; false means this node is skipped. */
+  readonly when?: ExecutionCondition;
 }
 
 /**
@@ -38,7 +57,7 @@ export interface NodeDefinition {
  * type's.
  */
 export interface GraphDefinition {
-  readonly version: 1;
+  readonly version: 1 | 2;
   readonly nodes: Readonly<Record<string, NodeDefinition>>;
   readonly finalNode?: string;
 }
@@ -53,6 +72,7 @@ export interface CompiledNode {
   /** Reverse edges, precomputed so the engine can promote dependents. */
   readonly dependents: readonly string[];
   readonly config?: JsonValue;
+  readonly when?: ExecutionCondition;
 }
 
 /**
@@ -60,7 +80,7 @@ export interface CompiledNode {
  * the readonly modifiers here vanish after compilation to JavaScript.
  */
 export interface CompiledGraph {
-  readonly version: 1;
+  readonly version: 1 | 2;
   readonly nodes: Readonly<Record<string, CompiledNode>>;
   /** Stable topological order: Kahn's algorithm, lexicographic tie-break. */
   readonly order: readonly string[];

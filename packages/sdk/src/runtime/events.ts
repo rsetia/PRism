@@ -77,6 +77,7 @@ export type RunEvent =
       /** The failed-or-blocked dependencies that caused this. */
       readonly blockedBy: readonly string[];
     }
+  | { readonly kind: "node_skipped"; readonly nodeId: string }
   | { readonly kind: "node_cancelling"; readonly nodeId: string }
   | { readonly kind: "node_cancelled"; readonly nodeId: string }
   | {
