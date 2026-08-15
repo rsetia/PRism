@@ -34,7 +34,11 @@ import type {
   RunStore,
 } from "@rsetia/prism";
 import { createFileLogBackend, createSqliteStore } from "@rsetia/prism/node";
-import { createAgentExecutorRegistry } from "./agent-executors.js";
+import {
+  createAgentExecutorRegistry,
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_REASONING_EFFORT,
+} from "./agent-executors.js";
 import { generateBeadsDag } from "./beads-dag.js";
 import { applyGreptileAppSlug } from "./review-policy.js";
 import {
@@ -97,6 +101,7 @@ Commands:
                                       Snapshot Beads into an agent DAG
   run <file> [--json] [--store <db>] [--run-id <id>] [--repo <path>]
              [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
+             [--codex-reasoning-effort <level>]
              [--greptile-app-slug <slug>]
                                       Execute the graph
   inspect <run-id> [--store <db>] [--json]
@@ -110,6 +115,7 @@ Commands:
                                       Render the live DAG (default latest running run)
   resume <run-id> [--store <db>] [--json] [--repo <path>]
          [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
+         [--codex-reasoning-effort <level>]
                                       Continue an interrupted run to completion
   abort <run-id> [--store <db>] [--json]
                                       Force a stuck run to a cancelled, finished state
@@ -123,7 +129,9 @@ Defaults:
   Beads, store, worktrees, and logs     $PRISM_HOME/<kind>/<project>/...
   Skill install target                  ~/.claude/skills
   Pull-request reviewer                 Greptile (@greptile review)
-  Maximum concurrency                   ${String(DEFAULT_MAX_CONCURRENCY)}`;
+  Maximum concurrency                   ${String(DEFAULT_MAX_CONCURRENCY)}
+  Codex model                           ${DEFAULT_CODEX_MODEL}
+  Codex reasoning effort                ${DEFAULT_CODEX_REASONING_EFFORT}`;
 
 interface ValidateInvocation {
   readonly command: "validate";
@@ -253,6 +261,7 @@ interface AgentInvocationOptions {
   readonly maxConcurrency: number;
   readonly codexCommand: string | undefined;
   readonly codexModel: string | undefined;
+  readonly codexReasoningEffort: string | undefined;
   readonly worktreeDir: string | undefined;
 }
 
@@ -266,6 +275,7 @@ interface ParsedFlags {
   readonly maxConcurrency: string | undefined;
   readonly codexCommand: string | undefined;
   readonly codexModel: string | undefined;
+  readonly codexReasoningEffort: string | undefined;
   readonly worktreeDir: string | undefined;
   readonly greptileAppSlug: string | undefined;
 }
@@ -281,6 +291,7 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
   let maxConcurrency: string | undefined;
   let codexCommand: string | undefined;
   let codexModel: string | undefined;
+  let codexReasoningEffort: string | undefined;
   let worktreeDir: string | undefined;
   let greptileAppSlug: string | undefined;
 
@@ -297,6 +308,7 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
       arg === "--max-concurrency" ||
       arg === "--codex-bin" ||
       arg === "--codex-model" ||
+      arg === "--codex-reasoning-effort" ||
       arg === "--worktree-dir" ||
       arg === "--greptile-app-slug"
     ) {
@@ -324,6 +336,9 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
       } else if (arg === "--codex-model") {
         if (codexModel !== undefined) return undefined;
         codexModel = value;
+      } else if (arg === "--codex-reasoning-effort") {
+        if (codexReasoningEffort !== undefined) return undefined;
+        codexReasoningEffort = value;
       } else if (arg === "--worktree-dir") {
         if (worktreeDir !== undefined) return undefined;
         worktreeDir = value;
@@ -350,6 +365,7 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
     maxConcurrency,
     codexCommand,
     codexModel,
+    codexReasoningEffort,
     worktreeDir,
     greptileAppSlug,
   };
@@ -541,6 +557,7 @@ function noAgentFlags(flags: ParsedFlags): boolean {
     flags.maxConcurrency === undefined &&
     flags.codexCommand === undefined &&
     flags.codexModel === undefined &&
+    flags.codexReasoningEffort === undefined &&
     flags.worktreeDir === undefined &&
     flags.greptileAppSlug === undefined
   );
@@ -551,6 +568,7 @@ function noWorkerFlags(flags: ParsedFlags): boolean {
     flags.maxConcurrency === undefined &&
     flags.codexCommand === undefined &&
     flags.codexModel === undefined &&
+    flags.codexReasoningEffort === undefined &&
     flags.worktreeDir === undefined &&
     flags.greptileAppSlug === undefined
   );
@@ -571,6 +589,7 @@ function parseAgentOptions(
     maxConcurrency,
     codexCommand: flags.codexCommand,
     codexModel: flags.codexModel,
+    codexReasoningEffort: flags.codexReasoningEffort,
     worktreeDir: flags.worktreeDir,
   };
 }
@@ -1086,6 +1105,11 @@ async function runGraph(
         ...(invocation.agent.codexModel === undefined
           ? {}
           : { codexModel: invocation.agent.codexModel }),
+        ...(invocation.agent.codexReasoningEffort === undefined
+          ? {}
+          : {
+              codexReasoningEffort: invocation.agent.codexReasoningEffort,
+            }),
       }),
       maxConcurrency: invocation.agent.maxConcurrency,
     });
@@ -1460,6 +1484,11 @@ async function resumeCommand(
         ...(invocation.agent.codexModel === undefined
           ? {}
           : { codexModel: invocation.agent.codexModel }),
+        ...(invocation.agent.codexReasoningEffort === undefined
+          ? {}
+          : {
+              codexReasoningEffort: invocation.agent.codexReasoningEffort,
+            }),
       }),
       maxConcurrency: invocation.agent.maxConcurrency,
     });

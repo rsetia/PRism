@@ -12,6 +12,7 @@ import { afterAll, describe, expect, test } from "vitest";
 import { buildCodexPrompt, createCodexEngine } from "../src/node/index.js";
 import type {
   CodexEngine,
+  CodexEngineOptions,
   CodexExecutorContract,
   WorkerSpec,
 } from "../src/node/index.js";
@@ -51,7 +52,7 @@ function spec(mode = "success"): WorkerSpec {
   };
 }
 
-function engine(): CodexEngine {
+function engine(options: CodexEngineOptions = {}): CodexEngine {
   return createCodexEngine({
     command: process.execPath,
     commandArgs: [FAKE_CODEX],
@@ -60,6 +61,7 @@ function engine(): CodexEngine {
     heartbeatIntervalMs: 10,
     killGraceMs: 100,
     stdio: "ignore",
+    ...options,
   });
 }
 
@@ -116,6 +118,30 @@ describe("createCodexEngine", () => {
       ]),
     );
     expect(existsSync(join(location.nodeDir, "heartbeat.json"))).toBe(true);
+  });
+
+  test("passes model and reasoning effort as invocation overrides", async () => {
+    const location = paths();
+    const result = await engine({
+      model: "gpt-5.6-terra",
+      reasoningEffort: "medium",
+    }).execute({
+      ...location,
+      spec: spec(),
+      contract,
+    });
+    expect(result.status).toBe("succeeded");
+    const args = JSON.parse(
+      readFileSync(join(location.nodeDir, "captured-args.json"), "utf8"),
+    ) as string[];
+    expect(args).toEqual(
+      expect.arrayContaining([
+        "--model",
+        "gpt-5.6-terra",
+        "--config",
+        'model_reasoning_effort="medium"',
+      ]),
+    );
   });
 
   test("honors a trusted contract that requires unsandboxed host access", async () => {

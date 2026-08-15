@@ -15,6 +15,9 @@ import {
 } from "@rsetia/prism/node";
 import { resolvePrismProjectPaths } from "./prism-home.js";
 
+export const DEFAULT_CODEX_MODEL = "gpt-5.6-terra";
+export const DEFAULT_CODEX_REASONING_EFFORT = "medium";
+
 export interface AgentExecutorRegistryOptions {
   /** Git repository Codex implement/merge nodes mutate. Default cwd. */
   readonly repoDir?: string;
@@ -24,8 +27,10 @@ export interface AgentExecutorRegistryOptions {
   readonly logBaseDir?: string;
   /** Codex executable. Default "codex". */
   readonly codexCommand?: string;
-  /** Optional model passed to `codex exec`. */
+  /** Model passed to `codex exec`. Default gpt-5.6-terra. */
   readonly codexModel?: string;
+  /** Codex reasoning effort. Default medium. */
+  readonly codexReasoningEffort?: string;
 }
 
 /**
@@ -53,7 +58,9 @@ export function createAgentExecutorRegistry(
     ...(options.codexCommand === undefined
       ? {}
       : { command: options.codexCommand }),
-    ...(options.codexModel === undefined ? {} : { model: options.codexModel }),
+    model: options.codexModel ?? DEFAULT_CODEX_MODEL,
+    reasoningEffort:
+      options.codexReasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT,
   });
   const provisioner = createGitWorktreeProvisioner({
     repoDir,

@@ -70,6 +70,8 @@ export interface CodexEngineOptions {
   /** Extra `codex exec` arguments inserted before the stdin prompt marker. */
   readonly execArgs?: readonly string[];
   readonly model?: string;
+  /** Reasoning effort passed as a per-run Codex config override. */
+  readonly reasoningEffort?: string;
   /** Additional writable directories passed through `--add-dir`. */
   readonly additionalWritableDirs?: readonly string[];
   /** Allow a non-git workspace. Default false. */
@@ -411,6 +413,12 @@ function buildCommandArgs(
   args.push("--ephemeral", "--color", "never", "-C", worktreeDir);
   if (options.model !== undefined) {
     args.push("--model", options.model);
+  }
+  if (options.reasoningEffort !== undefined) {
+    args.push(
+      "--config",
+      `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`,
+    );
   }
   for (const directory of new Set([nodeDir, ...additionalWritableDirs])) {
     args.push("--add-dir", directory);
