@@ -336,6 +336,44 @@ describe("inspectRun", () => {
     });
   });
 
+  test("reports resource contention separately from critical-path work", async () => {
+    const graph = buildGraph({
+      version: 1,
+      resources: { shared: { capacity: 1 } },
+      nodes: {
+        work: { executor: "constant", resources: ["shared"] },
+      },
+      finalNode: "work",
+    });
+    const store = await createStoredRun(graph, "resource-timing", [
+      { kind: "node_ready", nodeId: "work" },
+      {
+        kind: "node_resource_wait",
+        nodeId: "work",
+        resourceIds: ["shared"],
+      },
+      { kind: "node_started", nodeId: "work" },
+      { kind: "node_succeeded", nodeId: "work", output: null },
+    ]);
+
+    const inspection = await inspectRun(store, "resource-timing");
+    expect(inspection.nodes[0]?.timing?.phases).toContainEqual({
+      phase: "resource_contention",
+      durationMs: 10,
+    });
+    expect(inspection.timing?.waitingPhases).toContainEqual({
+      phase: "resource_contention",
+      durationMs: 10,
+    });
+    expect(inspection.timing?.criticalPath).toMatchObject({
+      nodeIds: ["work"],
+      durationMs: 20,
+    });
+    expect(inspection.timing?.criticalPath.phases).not.toContainEqual(
+      expect.objectContaining({ phase: "resource_contention" }),
+    );
+  });
+
   test("charges an in-progress phase up to the run's latest observed event", async () => {
     const graph = buildGraph({
       version: 1,

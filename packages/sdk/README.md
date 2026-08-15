@@ -3,7 +3,7 @@
 The **Prism** agent-graph SDK: compile a graph of tasks — nodes plus
 "depends on" edges — into an immutable plan and run it, dependency-ordered,
 with bounded concurrency, failure-classified retry, cooperative cancellation,
-durable resume, and a streamed event log.
+durable resume, capacity-limited scheduler resources, and a streamed event log.
 
 ```js
 import {
@@ -17,9 +17,14 @@ import {
 
 const parsed = parseGraph({
   version: 1,
+  resources: { deployment: { capacity: 1 } },
   nodes: {
     first: { executor: "constant", config: { value: "hello" } },
-    second: { executor: "passthrough", dependsOn: ["first"] },
+    second: {
+      executor: "passthrough",
+      dependsOn: ["first"],
+      resources: ["deployment"],
+    },
   },
   finalNode: "second",
 });
@@ -47,6 +52,9 @@ const outcome = await engine.run(compiled.graph).result;
 - Failures are data; node lifecycle events and terminal outcomes are durable;
   resume replays unfinished work and returns the recorded result for finished
   work.
+- Resource requests are acquired atomically in stable graph order and are
+  separate from dependency edges. Inspection attributes their wait time to
+  `resource_contention`, outside the weighted dependency critical path.
 
 ```ts
 import { runStoreContract } from "@rsetia/prism/testing";

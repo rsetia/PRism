@@ -18,6 +18,7 @@ import type { JsonValue } from "../graph/types.js";
 export type NodeState =
   | "pending"
   | "ready"
+  | "resource_wait"
   | "running"
   | "succeeded"
   | "failed"

@@ -197,6 +197,52 @@ describe("parseGraph", () => {
     ).toContain("CONDITION_REQUIRES_VERSION_2");
   });
 
+  test("parses resource declarations and node requests", () => {
+    const result = parseGraph({
+      version: 1,
+      resources: { database: { capacity: 2 } },
+      nodes: {
+        only: { executor: "constant", resources: ["database"] },
+      },
+    });
+    expect(result).toMatchObject({
+      ok: true,
+      graph: {
+        resources: { database: { capacity: 2 } },
+        nodes: { only: { resources: ["database"] } },
+      },
+    });
+  });
+
+  test("rejects malformed resources and duplicate node requests", () => {
+    for (const resources of [
+      null,
+      [],
+      { lock: {} },
+      { lock: { capacity: 0 } },
+      { lock: { capacity: 1.5 } },
+    ]) {
+      expect(
+        failCodes({
+          version: 1,
+          resources,
+          nodes: { only: { executor: "constant" } },
+        }),
+      ).toContain("INVALID_RESOURCES");
+    }
+    expect(
+      failErrors({
+        version: 1,
+        resources: { lock: { capacity: 1 } },
+        nodes: { only: { executor: "constant", resources: ["lock", "lock"] } },
+      }),
+    ).toContainEqual({
+      code: "DUPLICATE_RESOURCE",
+      nodeId: "only",
+      resourceId: "lock",
+    });
+  });
+
   test("collects all errors in one pass, not just the first", () => {
     const codes = failCodes({
       version: 99,

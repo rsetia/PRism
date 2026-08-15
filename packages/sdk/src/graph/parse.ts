@@ -5,6 +5,7 @@ import type {
   NodeDefinition,
   ExecutionCondition,
   NodeKind,
+  ResourceDefinition,
 } from "./types.js";
 import { isJsonValue, isPlainObject } from "../internal/json.js";
 
@@ -12,11 +13,12 @@ export type ParseResult =
   | { readonly ok: true; readonly graph: GraphDefinition }
   | { readonly ok: false; readonly errors: readonly GraphParseError[] };
 
-const ROOT_PROPERTIES = new Set(["version", "nodes", "finalNode"]);
+const ROOT_PROPERTIES = new Set(["version", "resources", "nodes", "finalNode"]);
 const NODE_PROPERTIES = new Set([
   "executor",
   "dependsOn",
   "kind",
+  "resources",
   "config",
   "when",
 ]);
@@ -63,6 +65,42 @@ export function parseGraph(input: unknown): ParseResult {
     null,
   ) as Record<string, NodeDefinition>;
   const nodes = input["nodes"];
+
+  const parsedResources: Record<string, ResourceDefinition> = Object.create(
+    null,
+  ) as Record<string, ResourceDefinition>;
+  const resources = input["resources"];
+  let resourcesAreValid = true;
+  if (Object.hasOwn(input, "resources")) {
+    if (!isPlainObject(resources)) {
+      errors.push({ code: "INVALID_RESOURCES", path: "resources" });
+      resourcesAreValid = false;
+    } else {
+      for (const [resourceId, candidate] of Object.entries(resources)) {
+        if (resourceId.length === 0) {
+          errors.push({ code: "INVALID_RESOURCES", path: "resources." });
+          resourcesAreValid = false;
+          continue;
+        }
+        if (
+          !isPlainObject(candidate) ||
+          Object.keys(candidate).some((key) => key !== "capacity") ||
+          !Number.isSafeInteger(candidate["capacity"]) ||
+          (candidate["capacity"] as number) < 1
+        ) {
+          errors.push({
+            code: "INVALID_RESOURCES",
+            path: `resources.${resourceId}`,
+          });
+          resourcesAreValid = false;
+          continue;
+        }
+        parsedResources[resourceId] = {
+          capacity: candidate["capacity"] as number,
+        };
+      }
+    }
+  }
 
   if (!isPlainObject(nodes) || Object.keys(nodes).length === 0) {
     errors.push({ code: "EMPTY_GRAPH" });
@@ -168,17 +206,50 @@ export function parseGraph(input: unknown): ParseResult {
         errors.push({ code: "CONDITION_REQUIRES_VERSION_2", nodeId });
       }
 
+      const requestedResources: string[] = [];
+      let requestedResourcesAreValid = true;
+      if (Object.hasOwn(candidate, "resources")) {
+        const requests = candidate["resources"];
+        if (!Array.isArray(requests)) {
+          requestedResourcesAreValid = false;
+        } else {
+          const seen = new Set<string>();
+          for (const resourceId of requests) {
+            if (typeof resourceId !== "string" || resourceId.length === 0) {
+              requestedResourcesAreValid = false;
+              continue;
+            }
+            requestedResources.push(resourceId);
+            if (seen.has(resourceId)) {
+              errors.push({
+                code: "DUPLICATE_RESOURCE",
+                nodeId,
+                resourceId,
+              });
+            }
+            seen.add(resourceId);
+          }
+        }
+      }
+      if (!requestedResourcesAreValid) {
+        errors.push({ code: "INVALID_NODE", nodeId, property: "resources" });
+      }
+
       if (
         executorIsValid &&
         dependsOnIsValid &&
         configIsValid &&
         kindIsValid &&
+        requestedResourcesAreValid &&
         (!hasWhen || parsedWhen !== undefined)
       ) {
         parsedNodes[nodeId] = {
           executor,
           dependsOn,
           ...(hasKind ? { kind: kind as NodeKind } : {}),
+          ...(Object.hasOwn(candidate, "resources")
+            ? { resources: requestedResources }
+            : {}),
           ...(hasConfig ? { config: config as JsonValue } : {}),
           ...(parsedWhen === undefined ? {} : { when: parsedWhen }),
         };
@@ -200,13 +271,14 @@ export function parseGraph(input: unknown): ParseResult {
 
   return {
     ok: true,
-    graph: hasFinalNode
-      ? {
-          version: input["version"] as 1 | 2,
-          nodes: parsedNodes,
-          finalNode: finalNode as string,
-        }
-      : { version: input["version"] as 1 | 2, nodes: parsedNodes },
+    graph: {
+      version: input["version"] as 1 | 2,
+      ...(Object.hasOwn(input, "resources") && resourcesAreValid
+        ? { resources: parsedResources }
+        : {}),
+      nodes: parsedNodes,
+      ...(hasFinalNode ? { finalNode: finalNode as string } : {}),
+    },
   };
 }
 

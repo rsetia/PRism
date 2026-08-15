@@ -230,6 +230,53 @@ describe("engine resume", () => {
     });
   });
 
+  test("a resumed resource waiter runs after an interrupted owner releases", async () => {
+    const store = createMemoryStore();
+    const clock = createManualClock();
+    const graph = buildGraph({
+      version: 1,
+      resources: { shared: { capacity: 1 } },
+      nodes: {
+        a: {
+          executor: "constant",
+          resources: ["shared"],
+          config: { value: "A" },
+        },
+        b: {
+          executor: "constant",
+          resources: ["shared"],
+          config: { value: "B" },
+        },
+      },
+      finalNode: "a",
+    });
+    await seed(store, "resource-resume", graph, [
+      { kind: "node_ready", nodeId: "a" },
+      { kind: "node_ready", nodeId: "b" },
+      { kind: "node_started", nodeId: "a" },
+      {
+        kind: "node_resource_wait",
+        nodeId: "b",
+        resourceIds: ["shared"],
+      },
+    ]);
+
+    const handle = engineOn(store, [], {
+      retryPolicy: transientRetry(),
+      clock,
+    }).resume("resource-resume");
+    await drain(handle, clock);
+    await expect(handle.result).resolves.toEqual({
+      status: "succeeded",
+      output: "A",
+    });
+    const started: string[] = [];
+    for await (const event of handle.events) {
+      if (event.kind === "node_started") started.push(event.nodeId);
+    }
+    expect(started).toEqual(["a", "b", "a"]);
+  });
+
   test("resuming an unknown run rejects", async () => {
     const store = createMemoryStore();
     await expect(engineOn(store).resume("nope").result).rejects.toThrow();

@@ -27,6 +27,7 @@ export interface NodeInspection {
 export type NodeTimingPhase =
   | "dependency_wait"
   | "scheduler_queue"
+  | "resource_contention"
   | "retry_wait"
   | "recovery_wait"
   | NodePhase;
@@ -297,7 +298,11 @@ function calculateCriticalPath(
       )
       .sort((left, right) => right.durationMs - left.durationMs)[0];
     const activeDurationMs = timing.phases
-      .filter((phase) => phase.phase !== "dependency_wait")
+      .filter(
+        (phase) =>
+          phase.phase !== "dependency_wait" &&
+          phase.phase !== "resource_contention",
+      )
       .reduce((total, phase) => total + phase.durationMs, 0);
     paths.set(nodeId, {
       durationMs: (predecessor?.durationMs ?? 0) + activeDurationMs,
@@ -317,7 +322,9 @@ function calculateCriticalPath(
     durationMs: selected.durationMs,
     phases: Object.freeze(
       sumPhases(pathTimings).filter(
-        (phase) => phase.phase !== "dependency_wait",
+        (phase) =>
+          phase.phase !== "dependency_wait" &&
+          phase.phase !== "resource_contention",
       ),
     ),
   });
@@ -348,6 +355,7 @@ function isWaitingPhase(phase: NodeTimingPhase): boolean {
   return (
     phase === "dependency_wait" ||
     phase === "scheduler_queue" ||
+    phase === "resource_contention" ||
     phase === "retry_wait" ||
     phase === "recovery_wait" ||
     phase === "ci_wait" ||
@@ -411,6 +419,9 @@ function calculateNodeTimings(
         break;
       case "node_started":
         changePhase(timing, "execution", timestampMs);
+        break;
+      case "node_resource_wait":
+        changePhase(timing, "resource_contention", timestampMs);
         break;
       case "node_phase_changed":
         changePhase(timing, event.phase, timestampMs);

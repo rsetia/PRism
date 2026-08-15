@@ -14,6 +14,7 @@ export type {
   JsonValue,
   NodeDefinition,
   NodeKind,
+  ResourceDefinition,
 } from "./graph/types.js";
 export type { GraphCompileError, GraphParseError } from "./graph/errors.js";
 export { buildBeadsGraph, parseBeadsJsonl } from "./beads/generate.js";

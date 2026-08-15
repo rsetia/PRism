@@ -11,6 +11,7 @@ export type GraphParseError =
   | { readonly code: "UNKNOWN_PROPERTY"; readonly path: string }
   | { readonly code: "EMPTY_GRAPH" }
   | { readonly code: "INVALID_NODE_ID"; readonly nodeId: string }
+  | { readonly code: "INVALID_RESOURCES"; readonly path: string }
   | {
       readonly code: "INVALID_NODE";
       readonly nodeId: string;
@@ -20,6 +21,11 @@ export type GraphParseError =
       readonly code: "DUPLICATE_DEPENDENCY";
       readonly nodeId: string;
       readonly dependencyId: string;
+    }
+  | {
+      readonly code: "DUPLICATE_RESOURCE";
+      readonly nodeId: string;
+      readonly resourceId: string;
     }
   | {
       readonly code: "INVALID_KIND";
@@ -41,6 +47,11 @@ export type GraphCompileError =
       readonly code: "UNKNOWN_DEPENDENCY";
       readonly nodeId: string;
       readonly dependencyId: string;
+    }
+  | {
+      readonly code: "UNKNOWN_RESOURCE";
+      readonly nodeId: string;
+      readonly resourceId: string;
     }
   | { readonly code: "CYCLE"; readonly nodeIds: readonly string[] }
   | { readonly code: "UNKNOWN_FINAL_NODE"; readonly finalNode: string }
