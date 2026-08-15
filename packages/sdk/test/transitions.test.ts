@@ -55,6 +55,7 @@ const LEGAL = new Map<string, NodeState>([
   ["pending+node_skipped", "skipped"],
   ["ready+node_started", "running"],
   ["ready+node_resource_wait", "resource_wait"],
+  ["resource_wait+node_resource_wait", "resource_wait"],
   ["resource_wait+node_started", "running"],
   ["running+node_succeeded", "succeeded"],
   ["running+node_failed", "failed"],

@@ -32,6 +32,7 @@ export class IllegalTransitionError extends Error {
  *   pending  + node_skipped   -> skipped
  *   ready    + node_started   -> running
  *   ready    + node_resource_wait -> resource_wait
+ *   ready | resource_wait + node_resource_wait -> resource_wait
  *   ready | resource_wait + node_started -> running
  *   running | cancelling + node_phase_changed -> unchanged
  *   running  + node_succeeded -> succeeded
@@ -65,7 +66,7 @@ export function reduceNodeState(
       break;
 
     case "node_resource_wait":
-      if (previous === "ready") {
+      if (previous === "ready" || previous === "resource_wait") {
         return "resource_wait";
       }
       break;

@@ -383,6 +383,8 @@ interface RunExecutionState {
   readonly outputs: Map<string, JsonValue>;
   readonly originatingFailures: Map<string, NodeFailure>;
   readonly retryDelays: Map<string, number>;
+  /** Most recently persisted contention reason for each parked node. */
+  readonly resourceWaitResourceIds: Map<string, readonly string[]>;
   readonly hasCancelledNodes: boolean;
 }
 
@@ -500,6 +502,7 @@ function createInitialExecutionState(graph: CompiledGraph): RunExecutionState {
     outputs: new Map(),
     originatingFailures: new Map(),
     retryDelays: new Map(),
+    resourceWaitResourceIds: new Map(),
     hasCancelledNodes: false,
   };
 }
@@ -524,6 +527,10 @@ function replayExecutionState(
           event.nodeId,
           (initial.attempts.get(event.nodeId) ?? 0) + 1,
         );
+        initial.resourceWaitResourceIds.delete(event.nodeId);
+        break;
+      case "node_resource_wait":
+        initial.resourceWaitResourceIds.set(event.nodeId, event.resourceIds);
         break;
       case "node_phase_changed":
         break;
@@ -547,10 +554,10 @@ function replayExecutionState(
         initial.outputs.delete(event.nodeId);
         initial.originatingFailures.delete(event.nodeId);
         initial.retryDelays.delete(event.nodeId);
+        initial.resourceWaitResourceIds.delete(event.nodeId);
         cancelledNodes.delete(event.nodeId);
         break;
       case "node_ready":
-      case "node_resource_wait":
       case "node_blocked":
       case "node_cancelling":
       case "node_skipped":
@@ -652,8 +659,14 @@ async function executeRun(
   }
 
   const execution = initialState ?? createInitialExecutionState(graph);
-  const { states, attempts, outputs, originatingFailures, retryDelays } =
-    execution;
+  const {
+    states,
+    attempts,
+    outputs,
+    originatingFailures,
+    retryDelays,
+    resourceWaitResourceIds,
+  } = execution;
   const inFlight = new Map<string, Promise<SchedulerEvent>>();
   let cancellationObserved = false;
   let cancellationAccepted = execution.hasCancelledNodes;
@@ -860,18 +873,27 @@ async function executeRun(
       }
       const waits: RunEvent[] = [];
       for (const candidateId of graph.order) {
-        if (states.get(candidateId) !== "ready") continue;
+        const state = states.get(candidateId);
+        if (state !== "ready" && state !== "resource_wait") continue;
         const saturated = getNode(graph, candidateId).resources.filter(
           (resourceId) =>
             (held.get(resourceId) ?? 0) >=
             (graph.resources[resourceId]?.capacity ?? 0),
         );
-        if (saturated.length > 0) {
+        if (
+          saturated.length > 0 &&
+          (state === "ready" ||
+            !sameResourceIds(
+              resourceWaitResourceIds.get(candidateId) ?? [],
+              saturated,
+            ))
+        ) {
           waits.push({
             kind: "node_resource_wait",
             nodeId: candidateId,
             resourceIds: saturated,
           });
+          resourceWaitResourceIds.set(candidateId, saturated);
         }
       }
       await applyEvents(waits);
@@ -894,6 +916,7 @@ async function executeRun(
       }
 
       await applyEvents([{ kind: "node_started", nodeId }]);
+      resourceWaitResourceIds.delete(nodeId);
       const attempt = (attempts.get(nodeId) ?? 0) + 1;
       attempts.set(nodeId, attempt);
       if (cancellation.isRequested()) {
@@ -1158,6 +1181,16 @@ async function executeRun(
     status: "succeeded",
     output: outputs.get(graph.finalNode) as JsonValue,
   };
+}
+
+function sameResourceIds(
+  left: readonly string[],
+  right: readonly string[],
+): boolean {
+  return (
+    left.length === right.length &&
+    left.every((id, index) => id === right[index])
+  );
 }
 
 /**
