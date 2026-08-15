@@ -244,9 +244,7 @@ export function compileGraph(graph: GraphDefinition): CompileResult {
     const when =
       node.when === undefined
         ? undefined
-        : (cloneJsonValue(
-            node.when as unknown as JsonValue,
-          ) as unknown as typeof node.when);
+        : (cloneJsonValue(node.when) as typeof node.when);
     compiledNodes[nodeId] =
       node.config === undefined
         ? when === undefined
