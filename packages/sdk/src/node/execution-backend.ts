@@ -6,7 +6,6 @@ import {
   mkdtemp,
   readFile,
   rename,
-  rm,
   writeFile,
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
@@ -367,7 +366,6 @@ export function createLocalExecutionBackend(
       if (redacted !== parsed) {
         const temporaryPath = `${resultPath}.${String(process.pid)}.tmp`;
         await writeFile(temporaryPath, JSON.stringify(redacted), "utf8");
-        await rm(resultPath, { force: true });
         await rename(temporaryPath, resultPath);
       }
       return redacted;

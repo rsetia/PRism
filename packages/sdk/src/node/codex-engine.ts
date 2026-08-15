@@ -614,7 +614,6 @@ async function persistWorkerResult(
 ): Promise<void> {
   const temporaryPath = `${resultPath}.${String(process.pid)}.tmp`;
   await writeFile(temporaryPath, JSON.stringify(result), "utf8");
-  await rm(resultPath, { force: true });
   await rename(temporaryPath, resultPath);
 }
 
