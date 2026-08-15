@@ -112,6 +112,9 @@ export function createCodexAppServerStdioClient(
           stdio: ["pipe", "pipe", "pipe"],
         },
       );
+      // The app-server is a reusable helper. Its pipes must not keep a CLI
+      // invocation alive after all Prism work has completed.
+      child.unref();
       const lines = createInterface({ input: child.stdout });
       lines.on("line", (line) => handleMessage(line));
       child.stderr.on("data", (chunk: Buffer) => {

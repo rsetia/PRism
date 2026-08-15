@@ -788,7 +788,7 @@ function decodeGraph(json: string): CompiledGraph {
   const value = JSON.parse(json) as unknown;
   if (
     !isPlainObject(value) ||
-    value["version"] !== 1 ||
+    (value["version"] !== 1 && value["version"] !== 2) ||
     !isPlainObject(value["nodes"]) ||
     !Array.isArray(value["order"]) ||
     !value["order"].every((nodeId) => typeof nodeId === "string") ||

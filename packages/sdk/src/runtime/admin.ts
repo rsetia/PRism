@@ -93,8 +93,10 @@ export async function abortRun(store: RunStore, runId: string): Promise<void> {
   }
 
   if (events.length > 0) {
+    await assertNoActiveCoordinatorLease(store, runId, "abort");
     await store.appendEvents(runId, events);
   }
+  await assertNoActiveCoordinatorLease(store, runId, "abort");
   await store.finishRun(runId, {
     status: "cancelled",
     reason: null,
@@ -149,6 +151,7 @@ export async function resetRun(
 
   // The run must accept appends; reopen it if it had finished.
   if (stored.finished) {
+    await assertNoActiveCoordinatorLease(store, runId, "reset");
     await store.reopenRun(runId);
   }
 
@@ -156,6 +159,7 @@ export async function resetRun(
     .filter((nodeId) => targets.has(nodeId))
     .map((nodeId) => ({ kind: "node_reset", nodeId }));
   if (events.length > 0) {
+    await assertNoActiveCoordinatorLease(store, runId, "reset");
     await store.appendEvents(runId, events);
   }
 }

@@ -94,9 +94,9 @@ export function createAgentExecutorRegistry(
   const codexExecutor = (name: "implement" | "merge_resolve" | "finalize_pr") =>
     createCodexExecutor({
       name,
-      ...(sessionBackend === undefined
-        ? { engine: codexEngine }
-        : { sessionBackend }),
+      // Preflight policy validation must run for both execution transports.
+      engine: codexEngine,
+      ...(sessionBackend === undefined ? {} : { sessionBackend }),
       ...(sessionBackend === undefined
         ? {}
         : {
