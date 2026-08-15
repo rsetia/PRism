@@ -9,6 +9,8 @@ import type {
   NodeExecutionOutcome,
 } from "../runtime/ports.js";
 import type { ExecutionBackend, WorkerHandle } from "./execution-backend.js";
+import { isProgressReportingExecutionBackend } from "./execution-backend.js";
+import { assessAgentProgress, type StallPolicy } from "./agent-progress.js";
 import type {
   WorkspaceHandle,
   WorkspaceProvisioner,
@@ -28,6 +30,8 @@ export interface SubprocessExecutorOptions {
   readonly idleTimeoutMs?: number;
   /** How often to poll status and liveness. Default 250ms. */
   readonly pollIntervalMs?: number;
+  /** Structured-session stall policy. Compatibility backends remain explicitly unobservable. */
+  readonly stallPolicy?: StallPolicy;
   /**
    * Turn the node's ordered upstream outputs into the worker's serialized
    * input (this is the §13 shapeInput seam, load-bearing now that inputs
@@ -55,6 +59,24 @@ export function createSubprocessExecutor(
   const pollIntervalMs = options.pollIntervalMs ?? 250;
   validateDuration("idleTimeoutMs", idleTimeoutMs);
   validateDuration("pollIntervalMs", pollIntervalMs);
+  if (options.stallPolicy !== undefined) {
+    // Validate eagerly, before a graph can start, with a harmless snapshot.
+    assessAgentProgress(
+      {
+        capability: "structured",
+        sessionStartedAtMs: 0,
+        processLivenessAtMs: null,
+        lastModelEventAtMs: null,
+        lastToolEventAtMs: null,
+        lastWorkspaceMutationAtMs: null,
+        lastPhaseTransitionAtMs: null,
+        externalWait: null,
+        decisions: [],
+      },
+      0,
+      options.stallPolicy,
+    );
+  }
 
   const shapeInput =
     options.shapeInput ??
@@ -120,6 +142,7 @@ export function createSubprocessExecutor(
           clock,
           idleTimeoutMs,
           pollIntervalMs,
+          options.stallPolicy,
           workspace,
         );
       } catch (error: unknown) {
@@ -140,9 +163,20 @@ async function supervise(
   clock: Clock,
   idleTimeoutMs: number,
   pollIntervalMs: number,
+  stallPolicy: StallPolicy | undefined,
   workspace: WorkspaceHandle | undefined,
 ): Promise<NodeExecutionOutcome> {
   let handle: WorkerHandle | undefined;
+  let reportedProgress:
+    "active" | "waiting" | "stalled" | "unobservable" | undefined;
+  const reportProgress = async (
+    state: "active" | "waiting" | "stalled" | "unobservable",
+  ): Promise<void> => {
+    if (reportedProgress !== state) {
+      reportedProgress = state;
+      await context.reportAgentProgress?.(state);
+    }
+  };
   try {
     if (context.signal.aborted) {
       return cancellationFailure();
@@ -152,6 +186,9 @@ async function supervise(
       workspace === undefined
         ? await backend.launch(spec)
         : await backend.launch(spec, { cwd: workspace.dir });
+    if (!isProgressReportingExecutionBackend(backend)) {
+      await reportProgress("unobservable");
+    }
 
     while (true) {
       if (context.signal.aborted) {
@@ -189,6 +226,42 @@ async function supervise(
             failureClass: "transient_infra",
           };
         case "alive":
+          if (
+            stallPolicy !== undefined &&
+            isProgressReportingExecutionBackend(backend)
+          ) {
+            const assessment = assessAgentProgress(
+              await backend.readAgentProgress(handle),
+              clock.now(),
+              stallPolicy,
+            );
+            await reportProgress(assessment.state);
+            if (assessment.decision !== null) {
+              await backend.recordStallDecision(handle, assessment.decision);
+              if (assessment.decision.action === "restart") {
+                await backend.terminate(handle);
+                return {
+                  status: "failed",
+                  cause: stallCause(
+                    "AGENT_STALL_RESTART_REQUESTED",
+                    assessment.decision,
+                  ),
+                  failureClass: "transient_infra",
+                };
+              }
+              if (assessment.decision.action === "escalate") {
+                // The executor always releases a provisioned worktree after
+                // this attempt. Stop the worker first so cleanup cannot
+                // remove its current working directory while it is running.
+                await backend.terminate(handle);
+                return {
+                  status: "failed",
+                  cause: stallCause("AGENT_STALLED", assessment.decision),
+                  failureClass: "manual_review_required",
+                };
+              }
+            }
+          }
           try {
             await clock.wait(pollIntervalMs, context.signal);
           } catch (error: unknown) {
@@ -215,6 +288,24 @@ async function supervise(
     }
     return infrastructureFailure(error);
   }
+}
+
+function stallCause(
+  code: string,
+  decision: {
+    readonly action: string;
+    readonly atMs: number;
+    readonly attempt: number;
+  },
+): JsonValue {
+  return {
+    code,
+    decision: {
+      action: decision.action,
+      atMs: decision.atMs,
+      attempt: decision.attempt,
+    },
+  };
 }
 
 function workerOutcome(result: WorkerResult): NodeExecutionOutcome {

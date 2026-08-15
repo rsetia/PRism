@@ -8,6 +8,7 @@ import { summarizeUsage, type UsageTotals } from "./usage.js";
 import { tryParseProofOfWork, type ProofOfWorkV1 } from "./proof-of-work.js";
 import type { JsonValue } from "../graph/types.js";
 import type { GraphRevision } from "./graph-revision.js";
+import type { AgentProgressState } from "../node/agent-progress.js";
 
 /**
  * A read-only snapshot of a run, rebuilt from its persisted events (plan
@@ -24,6 +25,7 @@ export interface NodeInspection {
   readonly timing: NodeTiming | null;
   /** Structured agent evidence; null for generic and legacy outputs. */
   readonly evidence: ProofOfWorkV1 | null;
+  readonly agentProgress?: AgentProgressState | null;
 }
 
 export type NodeTimingPhase =
@@ -190,6 +192,7 @@ async function inspectRunSnapshot(
 
   const failureByNode = new Map<string, NodeFailure>();
   const outputByNode = new Map<string, JsonValue>();
+  const progressByNode = new Map<string, AgentProgressState>();
   const events = await readEventSnapshot(store, runId, stored.revision);
   const timings = calculateNodeTimings(stored.graph.order, events);
   for (const event of events) {
@@ -206,6 +209,9 @@ async function inspectRunSnapshot(
       // An administrative reset drops the node's recorded failure.
       failureByNode.delete(event.nodeId);
       outputByNode.delete(event.nodeId);
+      progressByNode.delete(event.nodeId);
+    } else if (event.kind === "node_agent_progress") {
+      progressByNode.set(event.nodeId, event.state);
     }
   }
   const eventFailures = stored.graph.order.flatMap((nodeId) => {
@@ -230,6 +236,9 @@ async function inspectRunSnapshot(
       evidence: outputByNode.has(nodeId)
         ? tryParseProofOfWork(outputByNode.get(nodeId) as JsonValue)
         : null,
+      ...(progressByNode.has(nodeId)
+        ? { agentProgress: progressByNode.get(nodeId) as AgentProgressState }
+        : {}),
     });
   });
   const timing = calculateRunTiming(
@@ -503,6 +512,8 @@ function calculateNodeTimings(
         break;
       case "node_phase_changed":
         changePhase(timing, event.phase, timestampMs);
+        break;
+      case "node_agent_progress":
         break;
       case "node_retry_wait":
         changePhase(timing, "retry_wait", timestampMs);

@@ -28,8 +28,22 @@ export type {
   LocalExecutionBackendOptions,
   WorkerHandle,
   WorkerStatus,
+  ProgressReportingExecutionBackend,
 } from "./execution-backend.js";
-export { createLocalExecutionBackend } from "./execution-backend.js";
+export {
+  createLocalExecutionBackend,
+  isProgressReportingExecutionBackend,
+} from "./execution-backend.js";
+export { assessAgentProgress } from "./agent-progress.js";
+export type {
+  AgentProgressAssessment,
+  AgentProgressSnapshot,
+  AgentProgressState,
+  AgentStallDecision,
+  ExternalWaitState,
+  StallAction,
+  StallPolicy,
+} from "./agent-progress.js";
 export type {
   AgentExecutionMode,
   AgentExecutionPolicy,

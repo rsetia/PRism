@@ -10,6 +10,10 @@ import {
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { WorkerResult, WorkerSpec } from "./worker-protocol.js";
+import type {
+  AgentProgressSnapshot,
+  AgentStallDecision,
+} from "./agent-progress.js";
 import {
   NODE_DIR_ENV_VAR,
   parseWorkerResult,
@@ -95,6 +99,33 @@ export interface ExecutionBackend {
   collect(handle: WorkerHandle): Promise<WorkerResult>;
   /** Optionally releases an underlying client or connection pool. */
   close?(): Promise<void>;
+}
+
+/**
+ * A backend backed by an agent session stream, rather than only a child
+ * process. Its event stream is the authoritative source for stall handling.
+ * `recordStallDecision` must durably de-duplicate a restored decision.
+ */
+export interface ProgressReportingExecutionBackend extends ExecutionBackend {
+  readonly progressCapability: "structured";
+  readAgentProgress(handle: WorkerHandle): Promise<AgentProgressSnapshot>;
+  recordStallDecision(
+    handle: WorkerHandle,
+    decision: AgentStallDecision,
+  ): Promise<void>;
+}
+
+export function isProgressReportingExecutionBackend(
+  backend: ExecutionBackend,
+): backend is ProgressReportingExecutionBackend {
+  return (
+    (backend as Partial<ProgressReportingExecutionBackend>)
+      .progressCapability === "structured" &&
+    typeof (backend as Partial<ProgressReportingExecutionBackend>)
+      .readAgentProgress === "function" &&
+    typeof (backend as Partial<ProgressReportingExecutionBackend>)
+      .recordStallDecision === "function"
+  );
 }
 
 export interface LocalExecutionBackendOptions {

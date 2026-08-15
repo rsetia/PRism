@@ -7,6 +7,7 @@ import {
   compileGraph,
   createEngine,
   createExecutorRegistry,
+  createManualClock,
   createMemoryStore,
   parseGraph,
 } from "../src/index.js";
@@ -14,6 +15,12 @@ import type { CompiledGraph, ExecutorDefinition } from "../src/index.js";
 import {
   createLocalExecutionBackend,
   createSubprocessExecutor,
+} from "../src/node/index.js";
+import type {
+  AgentProgressSnapshot,
+  AgentStallDecision,
+  ProgressReportingExecutionBackend,
+  WorkerHandle,
 } from "../src/node/index.js";
 
 const WORKER = fileURLToPath(
@@ -135,5 +142,81 @@ describe("createSubprocessExecutor", () => {
     await handle.cancel({ why: "stop" });
     const outcome = await handle.result;
     expect(outcome.status).toBe("cancelled");
+  });
+
+  test("a live non-progressing structured session triggers escalation", async () => {
+    const clock = createManualClock();
+    const decisions: AgentStallDecision[] = [];
+    const states: string[] = [];
+    let terminated = false;
+    const handle: WorkerHandle = { id: "fake", runId: "r", nodeId: "n" };
+    const progress: AgentProgressSnapshot = {
+      capability: "structured",
+      sessionStartedAtMs: 0,
+      processLivenessAtMs: 0,
+      lastModelEventAtMs: null,
+      lastToolEventAtMs: null,
+      lastWorkspaceMutationAtMs: null,
+      lastPhaseTransitionAtMs: null,
+      externalWait: null,
+      decisions,
+    };
+    const backend: ProgressReportingExecutionBackend = {
+      progressCapability: "structured",
+      launch: () => Promise.resolve(handle),
+      poll: () => Promise.resolve("running"),
+      checkLiveness: () => Promise.resolve("alive"),
+      terminate: () => {
+        terminated = true;
+        return Promise.resolve();
+      },
+      collect: () => Promise.reject(new Error("still running")),
+      readAgentProgress: () => Promise.resolve(progress),
+      recordStallDecision: (_handle, decision) => {
+        decisions.push(decision);
+        return Promise.resolve();
+      },
+    };
+    const executor = createSubprocessExecutor({
+      name: "structured",
+      backend,
+      clock,
+      pollIntervalMs: 10,
+      stallPolicy: { timeoutMs: 100, action: "escalate" },
+    });
+    const outcomePromise = Promise.resolve(
+      executor.execute({
+        runId: "r",
+        nodeId: "n",
+        kind: "task",
+        attempt: 1,
+        inputs: [],
+        signal: new AbortController().signal,
+        reportPhase: () => Promise.resolve(),
+        reportAgentProgress: (state) => {
+          states.push(state);
+          return Promise.resolve();
+        },
+      }),
+    );
+
+    let settled = false;
+    void outcomePromise.finally(() => {
+      settled = true;
+    });
+    for (let turn = 0; turn < 1_000 && !settled; turn += 1) {
+      await Promise.resolve();
+      if (clock.pending > 0) clock.advanceToNext();
+    }
+    const outcome = await outcomePromise;
+    expect(outcome).toMatchObject({
+      status: "failed",
+      failureClass: "manual_review_required",
+    });
+    expect(decisions).toHaveLength(1);
+    expect(states).toEqual(["active", "stalled"]);
+    // Escalation is terminal for the attempt.  This prevents a provisioner
+    // from deleting the active worker's worktree during executor cleanup.
+    expect(terminated).toBe(true);
   });
 });

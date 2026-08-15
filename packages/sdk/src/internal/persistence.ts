@@ -124,6 +124,14 @@ export function snapshotRunEvent(
         ...persisted,
       });
 
+    case "node_agent_progress":
+      return Object.freeze({
+        kind: event.kind,
+        nodeId: event.nodeId,
+        state: event.state,
+        ...persisted,
+      });
+
     case "node_succeeded":
       return Object.freeze({
         kind: event.kind,

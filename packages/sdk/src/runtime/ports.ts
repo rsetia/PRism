@@ -6,6 +6,7 @@ import type {
 } from "./graph-revision.js";
 import type { PersistedRunEvent, RunEvent, UsageReport } from "./events.js";
 import type { NodePhase } from "./events.js";
+import type { AgentProgressState } from "../node/agent-progress.js";
 import type { FailureClass } from "./types.js";
 import type { RunOutcome } from "./types.js";
 
@@ -54,6 +55,8 @@ export interface ExecutionContext {
   readonly reportPhase: (phase: NodePhase) => Promise<void>;
   /** Append normalized provider usage for this attempt. */
   readonly reportUsage?: (usage: UsageReport) => Promise<void>;
+  /** Persist the latest agent-progress state for watch and inspect consumers. */
+  readonly reportAgentProgress?: (state: AgentProgressState) => Promise<void>;
   /** Propose an append-only graph expansion through the engine's policy gate. */
   readonly submitGraphProposal?: (
     proposal: GraphExpansionProposal,

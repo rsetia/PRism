@@ -262,6 +262,7 @@ async function invokeExecutor(
   attempt: number,
   reportPhase: ExecutionContext["reportPhase"],
   reportUsage: NonNullable<ExecutionContext["reportUsage"]>,
+  reportAgentProgress: NonNullable<ExecutionContext["reportAgentProgress"]>,
   submitProposal: NonNullable<ExecutionContext["submitGraphProposal"]>,
 ): Promise<SchedulerEvent> {
   const inputs = Object.freeze(
@@ -285,6 +286,7 @@ async function invokeExecutor(
           signal,
           reportPhase,
           reportUsage,
+          reportAgentProgress,
           submitGraphProposal: submitProposal,
         }
       : {
@@ -297,6 +299,7 @@ async function invokeExecutor(
           signal,
           reportPhase,
           reportUsage,
+          reportAgentProgress,
           submitGraphProposal: submitProposal,
         },
   );
@@ -550,6 +553,7 @@ function replayExecutionState(
         initial.resourceWaitResourceIds.set(event.nodeId, event.resourceIds);
         break;
       case "node_phase_changed":
+      case "node_agent_progress":
         break;
       case "node_succeeded":
         initial.outputs.set(event.nodeId, event.output);
@@ -1045,6 +1049,8 @@ async function executeRun(
                 applyEvents([
                   { kind: "node_usage_reported", nodeId, attempt, usage },
                 ]),
+              (state) =>
+                applyEvents([{ kind: "node_agent_progress", nodeId, state }]),
               submitProposal,
             );
             if (renewalFailure !== undefined) {
