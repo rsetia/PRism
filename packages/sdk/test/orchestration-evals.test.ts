@@ -104,6 +104,9 @@ function assertHistory(events: readonly PersistedRunEvent[]): void {
 }
 
 describe("deterministic production orchestration evaluations", () => {
+  // This intentionally aggregates the release matrix: its baseline metrics
+  // describe the complete profile, while focused unit suites cover each
+  // primitive independently and retain their own failure reporting.
   test("measures the release scenario matrix against checked-in thresholds", async () => {
     expect(baseline).toMatchObject({
       schemaVersion: 1,
@@ -313,6 +316,7 @@ describe("deterministic production orchestration evaluations", () => {
       ).resolves.toMatchObject({ owner: "new" });
       completed.push("stale lease takeover");
       validated.push("stale lease takeover");
+      // Store-only fencing has no execution usage or lifecycle span.
       durations.push(0);
       costs.push(0);
     }
@@ -350,6 +354,7 @@ describe("deterministic production orchestration evaluations", () => {
       expect(await store.listGraphRevisions?.("proposal")).toHaveLength(2);
       completed.push("dynamic proposal approval/rejection");
       validated.push("dynamic proposal approval/rejection");
+      // Policy-only proposals likewise have no executor usage or event span.
       durations.push(0);
       costs.push(0);
     }
