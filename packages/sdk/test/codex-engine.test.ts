@@ -17,6 +17,7 @@ import {
 import type {
   AgentExecutionPolicy,
   CodexEngine,
+  CodexEngineOptions,
   CodexExecutorContract,
   WorkerSpec,
 } from "../src/node/index.js";
@@ -56,7 +57,10 @@ function spec(mode = "success"): WorkerSpec {
   };
 }
 
-function engine(executionPolicy?: AgentExecutionPolicy): CodexEngine {
+function engine(
+  options: CodexEngineOptions = {},
+  executionPolicy?: AgentExecutionPolicy,
+): CodexEngine {
   return createCodexEngine({
     command: process.execPath,
     commandArgs: [FAKE_CODEX],
@@ -65,6 +69,7 @@ function engine(executionPolicy?: AgentExecutionPolicy): CodexEngine {
     heartbeatIntervalMs: 10,
     killGraceMs: 100,
     stdio: "ignore",
+    ...options,
     ...(executionPolicy === undefined ? {} : { executionPolicy }),
   });
 }
@@ -124,9 +129,36 @@ describe("createCodexEngine", () => {
     expect(existsSync(join(location.nodeDir, "heartbeat.json"))).toBe(true);
   });
 
+  test("passes model and reasoning effort as invocation overrides", async () => {
+    const location = paths();
+    const result = await engine({
+      model: "gpt-5.6-terra",
+      reasoningEffort: "medium",
+    }).execute({
+      ...location,
+      spec: spec(),
+      contract,
+    });
+    expect(result.status).toBe("succeeded");
+    const args = JSON.parse(
+      readFileSync(join(location.nodeDir, "captured-args.json"), "utf8"),
+    ) as string[];
+    expect(args).toEqual(
+      expect.arrayContaining([
+        "--model",
+        "gpt-5.6-terra",
+        "--config",
+        'model_reasoning_effort="medium"',
+      ]),
+    );
+  });
+
   test("honors a trusted contract that requires unsandboxed host access", async () => {
     const location = paths();
-    const result = await engine(TRUSTED_LOCAL_AGENT_EXECUTION_POLICY).execute({
+    const result = await engine(
+      {},
+      TRUSTED_LOCAL_AGENT_EXECUTION_POLICY,
+    ).execute({
       ...location,
       spec: spec(),
       contract: {
@@ -174,14 +206,17 @@ describe("createCodexEngine", () => {
     const output: string[] = [];
     const secret = "top-secret-value";
     const location = paths();
-    const result = await engine({
-      mode: "isolated",
-      environment: {
-        inherit: ["PATH"],
-        values: { TEST_AGENT_SECRET: secret },
-        secretNames: ["TEST_AGENT_SECRET"],
+    const result = await engine(
+      {},
+      {
+        mode: "isolated",
+        environment: {
+          inherit: ["PATH"],
+          values: { TEST_AGENT_SECRET: secret },
+          secretNames: ["TEST_AGENT_SECRET"],
+        },
       },
-    }).execute({
+    ).execute({
       ...location,
       spec: spec("secret-output"),
       contract,

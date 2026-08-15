@@ -58,6 +58,10 @@ From your project repository:
 prism run <graph-file>
 ```
 
+Codex-backed nodes use `gpt-5.6-terra` with `medium` reasoning by default.
+Override either setting for a run or resume with `--codex-model <id>` and
+`--codex-reasoning-effort <level>`.
+
 If both production and staging Greptile apps review the same pull requests,
 select the production GitHub App for the whole run:
 

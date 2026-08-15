@@ -108,6 +108,10 @@ Commands: `skills` (install the planning skill); `validate`, `graph`,
 the weighted critical path,
 and largest waits; `inspect --json` exposes the same timing data for tools.
 
+Codex-backed nodes default to `gpt-5.6-terra` with `medium` reasoning. Both
+`run` and `resume` accept `--codex-model <id>` and
+`--codex-reasoning-effort <level>` overrides.
+
 Prism executors run real commands (`codex`, `gh`, `bd`, your validation
 commands) with no sandbox — see
 [SECURITY.md](https://github.com/rsetia/PRism/blob/main/SECURITY.md) before

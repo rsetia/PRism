@@ -7,14 +7,21 @@ import {
 } from "@rsetia/prism";
 import {
   createBeadsUpdateExecutor,
+  createCodexAppServerBackend,
+  createCodexAppServerStdioClient,
   createCodexEngine,
   createCodexExecutor,
+  createFileAgentSessionStore,
   createFileLogBackend,
   createGitWorktreeProvisioner,
   createMergePrExecutor,
+  type AgentSessionBackend,
   TRUSTED_LOCAL_AGENT_EXECUTION_POLICY,
 } from "@rsetia/prism/node";
 import { resolvePrismProjectPaths } from "./prism-home.js";
+
+export const DEFAULT_CODEX_MODEL = "gpt-5.6-terra";
+export const DEFAULT_CODEX_REASONING_EFFORT = "medium";
 
 export interface AgentExecutorRegistryOptions {
   /** Git repository Codex implement/merge nodes mutate. Default cwd. */
@@ -25,8 +32,14 @@ export interface AgentExecutorRegistryOptions {
   readonly logBaseDir?: string;
   /** Codex executable. Default "codex". */
   readonly codexCommand?: string;
-  /** Optional model passed to `codex exec`. */
+  /** Model passed to `codex exec`. Default gpt-5.6-terra. */
   readonly codexModel?: string;
+  /** Codex reasoning effort. Default medium. */
+  readonly codexReasoningEffort?: string;
+  /** Worker transport. Default "exec"; "app-server" enables durable threads. */
+  readonly codexBackend?: "exec" | "app-server";
+  /** Selects a structured backend when embedding the CLI registry. */
+  readonly sessionBackend?: AgentSessionBackend;
 }
 
 /**
@@ -55,33 +68,53 @@ export function createAgentExecutorRegistry(
     ...(options.codexCommand === undefined
       ? {}
       : { command: options.codexCommand }),
-    ...(options.codexModel === undefined ? {} : { model: options.codexModel }),
+    model: options.codexModel ?? DEFAULT_CODEX_MODEL,
+    reasoningEffort:
+      options.codexReasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT,
   });
+  const sessionBackend =
+    options.sessionBackend ??
+    (options.codexBackend === "app-server"
+      ? createCodexAppServerBackend(
+          createCodexAppServerStdioClient({
+            ...(options.codexCommand === undefined
+              ? {}
+              : { command: options.codexCommand }),
+            model: options.codexModel ?? DEFAULT_CODEX_MODEL,
+            reasoningEffort:
+              options.codexReasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT,
+          }),
+        )
+      : undefined);
   const provisioner = createGitWorktreeProvisioner({
     repoDir,
     baseDir: worktreeBaseDir,
   });
 
+  const codexExecutor = (name: "implement" | "merge_resolve" | "finalize_pr") =>
+    createCodexExecutor({
+      name,
+      ...(sessionBackend === undefined
+        ? { engine: codexEngine }
+        : { sessionBackend }),
+      ...(sessionBackend === undefined
+        ? {}
+        : {
+            // Session records must outlive both a provisioned worktree and
+            // the process that created this registry. Logs are already kept
+            // in the project-scoped durable Prism directory.
+            sessionStore: createFileAgentSessionStore(
+              join(logBaseDir, "agent-sessions"),
+            ),
+          }),
+      provisioner,
+      logBackend,
+    });
   return createExecutorRegistry([
     ...builtinExecutors,
-    createCodexExecutor({
-      name: "implement",
-      engine: codexEngine,
-      provisioner,
-      logBackend,
-    }),
-    createCodexExecutor({
-      name: "merge_resolve",
-      engine: codexEngine,
-      provisioner,
-      logBackend,
-    }),
-    createCodexExecutor({
-      name: "finalize_pr",
-      engine: codexEngine,
-      provisioner,
-      logBackend,
-    }),
+    codexExecutor("implement"),
+    codexExecutor("merge_resolve"),
+    codexExecutor("finalize_pr"),
     // Kept for hand-authored graphs that only need deterministic PR merging.
     createMergePrExecutor({ cwd: repoDir }),
     createBeadsUpdateExecutor({ cwd: repoDir }),
