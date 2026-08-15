@@ -65,12 +65,14 @@ export { summarizeUsage } from "./runtime/usage.js";
 export type { AttemptUsage, UsageTotals } from "./runtime/usage.js";
 export type {
   CriticalPathTiming,
+  InspectRunOptions,
   NodeInspection,
   NodeTiming,
   NodeTimingPhase,
   PhaseDuration,
   RunInspection,
   RunTiming,
+  SchedulerUtilization,
   WatchRunOptions,
 } from "./runtime/inspect.js";
 export { submitGraphProposal } from "./runtime/graph-revision.js";
@@ -91,6 +93,7 @@ export type {
   WorkerPhase,
 } from "./runtime/events.js";
 export { NODE_PHASES, WORKER_PHASES } from "./runtime/events.js";
+export type { UsagePriceMetadata } from "./runtime/usage.js";
 export type {
   Clock,
   CreateRunInput,

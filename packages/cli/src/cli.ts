@@ -1229,6 +1229,7 @@ async function inspectCommand(
           timing: inspection.timing,
           leases: inspection.leases,
           usage: inspection.usage ?? null,
+          scheduler: inspection.scheduler ?? null,
         }),
       );
     } else {
@@ -1251,6 +1252,9 @@ async function inspectCommand(
           `usage: ${usage.inputTokens ?? "unknown"} input tokens · ${usage.outputTokens ?? "unknown"} output tokens · ${usage.costUsd === null ? "cost unknown" : `$${usage.costUsd.toFixed(4)} ${usage.costKind}`}`,
         );
       }
+      io.stdout(
+        `realized concurrency: ${String(inspection.scheduler?.maximumRealizedNodeConcurrency ?? 0)}`,
+      );
       for (const failure of inspection.failures) {
         io.stdout(`failure ${failure.nodeId}: ${stringifyJson(failure.cause)}`);
       }

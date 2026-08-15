@@ -121,6 +121,8 @@ export type RunEvent =
 
 /** Provider-neutral counters. Missing fields are deliberately unknown. */
 export interface UsageReport {
+  readonly provider?: string;
+  readonly model?: string;
   readonly inputTokens?: number;
   readonly outputTokens?: number;
   readonly cachedTokens?: number;
