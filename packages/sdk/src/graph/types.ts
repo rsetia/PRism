@@ -27,6 +27,11 @@ export type ExecutionCondition =
     }
   | { readonly predicate: "unresolved_risk"; readonly equals: boolean };
 
+/** A durable scheduler semaphore declared by the graph. */
+export interface ResourceDefinition {
+  readonly capacity: number;
+}
+
 /** `config` is opaque JSON: the SDK never interprets it. */
 export type JsonValue =
   | null
@@ -46,6 +51,8 @@ export interface NodeDefinition {
   readonly dependsOn: readonly string[];
   /** Defaults to "task" when the source omits it. */
   readonly kind?: NodeKind;
+  /** Resources acquired atomically before this node starts. */
+  readonly resources?: readonly string[];
   readonly config?: JsonValue;
   /** Available only in graph version 2; false means this node is skipped. */
   readonly when?: ExecutionCondition;
@@ -58,6 +65,7 @@ export interface NodeDefinition {
  */
 export interface GraphDefinition {
   readonly version: 1 | 2;
+  readonly resources?: Readonly<Record<string, ResourceDefinition>>;
   readonly nodes: Readonly<Record<string, NodeDefinition>>;
   readonly finalNode?: string;
 }
@@ -69,6 +77,7 @@ export interface CompiledNode {
   /** Resolved to a concrete kind — "task" when the source omitted it. */
   readonly kind: NodeKind;
   readonly dependsOn: readonly string[];
+  readonly resources: readonly string[];
   /** Reverse edges, precomputed so the engine can promote dependents. */
   readonly dependents: readonly string[];
   readonly config?: JsonValue;
@@ -81,6 +90,7 @@ export interface CompiledNode {
  */
 export interface CompiledGraph {
   readonly version: 1 | 2;
+  readonly resources: Readonly<Record<string, ResourceDefinition>>;
   readonly nodes: Readonly<Record<string, CompiledNode>>;
   /** Stable topological order: Kahn's algorithm, lexicographic tie-break. */
   readonly order: readonly string[];

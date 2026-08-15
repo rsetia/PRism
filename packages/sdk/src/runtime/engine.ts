@@ -550,6 +550,7 @@ function replayExecutionState(
         cancelledNodes.delete(event.nodeId);
         break;
       case "node_ready":
+      case "node_resource_wait":
       case "node_blocked":
       case "node_cancelling":
       case "node_skipped":
@@ -849,9 +850,45 @@ async function executeRun(
       [...states.values()].filter((state) => state === "running").length;
 
     while (runningCount() < maxConcurrency && !cancellation.isRequested()) {
-      const nodeId = graph.order.find(
-        (candidateId) => states.get(candidateId) === "ready",
-      );
+      const held = new Map<string, number>();
+      for (const runningNodeId of graph.order) {
+        const state = states.get(runningNodeId);
+        if (state !== "running" && state !== "cancelling") continue;
+        for (const resourceId of getNode(graph, runningNodeId).resources) {
+          held.set(resourceId, (held.get(resourceId) ?? 0) + 1);
+        }
+      }
+      const waits: RunEvent[] = [];
+      for (const candidateId of graph.order) {
+        if (states.get(candidateId) !== "ready") continue;
+        const saturated = getNode(graph, candidateId).resources.filter(
+          (resourceId) =>
+            (held.get(resourceId) ?? 0) >=
+            (graph.resources[resourceId]?.capacity ?? 0),
+        );
+        if (saturated.length > 0) {
+          waits.push({
+            kind: "node_resource_wait",
+            nodeId: candidateId,
+            resourceIds: saturated,
+          });
+        }
+      }
+      await applyEvents(waits);
+
+      const nodeId = graph.order.find((candidateId) => {
+        const state = states.get(candidateId);
+        if (state !== "ready" && state !== "resource_wait") return false;
+        return getNode(graph, candidateId).resources.every((resourceId) => {
+          const capacity = graph.resources[resourceId]?.capacity;
+          if (capacity === undefined) {
+            throw new Error(
+              `compiled graph is missing resource "${resourceId}"`,
+            );
+          }
+          return (held.get(resourceId) ?? 0) < capacity;
+        });
+      });
       if (nodeId === undefined) {
         return;
       }
@@ -893,7 +930,12 @@ async function executeRun(
 
     for (const nodeId of graph.order) {
       const state = states.get(nodeId);
-      if (state === "pending" || state === "ready" || state === "retry_wait") {
+      if (
+        state === "pending" ||
+        state === "ready" ||
+        state === "resource_wait" ||
+        state === "retry_wait"
+      ) {
         events.push({ kind: "node_cancelled", nodeId });
         if (state === "retry_wait") {
           retryWaitingNodeIds.push(nodeId);

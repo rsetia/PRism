@@ -55,6 +55,12 @@ export type WorkerPhase = (typeof WORKER_PHASES)[number];
  */
 export type RunEvent =
   | { readonly kind: "node_ready"; readonly nodeId: string }
+  | {
+      readonly kind: "node_resource_wait";
+      readonly nodeId: string;
+      /** Currently saturated requests, in deterministic resource order. */
+      readonly resourceIds: readonly string[];
+    }
   | { readonly kind: "node_started"; readonly nodeId: string }
   | {
       readonly kind: "node_phase_changed";

@@ -901,6 +901,7 @@ function printJsonGraph(graph: CompiledGraph, io: CliIo): void {
       readonly executor: string;
       readonly kind: CompiledGraph["nodes"][string]["kind"];
       readonly dependsOn: readonly string[];
+      readonly resources: readonly string[];
       readonly dependents: readonly string[];
     }
   > = Object.create(null) as Record<
@@ -909,6 +910,7 @@ function printJsonGraph(graph: CompiledGraph, io: CliIo): void {
       readonly executor: string;
       readonly kind: CompiledGraph["nodes"][string]["kind"];
       readonly dependsOn: readonly string[];
+      readonly resources: readonly string[];
       readonly dependents: readonly string[];
     }
   >;
@@ -919,6 +921,7 @@ function printJsonGraph(graph: CompiledGraph, io: CliIo): void {
       executor: node.executor,
       kind: node.kind,
       dependsOn: node.dependsOn,
+      resources: node.resources,
       dependents: node.dependents,
     };
   }
@@ -926,6 +929,7 @@ function printJsonGraph(graph: CompiledGraph, io: CliIo): void {
   io.stdout(
     stringifyJson({
       version: 1,
+      resources: graph.resources,
       order: graph.order,
       finalNode: graph.finalNode,
       nodes,

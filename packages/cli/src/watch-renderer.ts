@@ -30,6 +30,7 @@ interface StatePresentation {
 const STATE_PRESENTATION: Readonly<Record<NodeState, StatePresentation>> = {
   pending: { symbol: "○", style: DIM },
   ready: { symbol: "◇", style: "\u001B[1;33m" },
+  resource_wait: { symbol: "⌛", style: "\u001B[1;33m" },
   running: { symbol: "▶", style: "\u001B[1;30;46m" },
   succeeded: { symbol: "✓", style: "\u001B[1;32m" },
   failed: { symbol: "✕", style: "\u001B[1;37;41m" },
@@ -97,7 +98,8 @@ function renderHeader(
   ).length;
   const issues = counts.failed + counts.blocked + counts.cancelled;
   const active = counts.running + counts.cancelling;
-  const queued = counts.pending + counts.ready + counts.retry_wait;
+  const queued =
+    counts.pending + counts.ready + counts.resource_wait + counts.retry_wait;
   const runStatus = inspection.finished
     ? issues > 0
       ? "FAILED"
@@ -457,18 +459,34 @@ function findWorkflowRuntimeWait(
   >,
   displayId: (id: string) => string,
 ): WorkflowRuntimeWait | undefined {
-  const waitingStage = workflow.stages.find(
-    (stage) => (stateByNode.get(stage.nodeId) ?? "pending") === "pending",
-  );
+  const waitingStage = workflow.stages.find((stage) => {
+    const state = stateByNode.get(stage.nodeId) ?? "pending";
+    return state === "pending" || state === "resource_wait";
+  });
   if (waitingStage === undefined) return undefined;
 
   const ownNodes = new Set(workflow.stages.map((stage) => stage.nodeId));
-  const blockerNodeIds =
-    graph.nodes[waitingStage.nodeId]?.dependsOn.filter(
+  const waitingNode = graph.nodes[waitingStage.nodeId];
+  const resourceBlockers =
+    (stateByNode.get(waitingStage.nodeId) ?? "pending") === "resource_wait"
+      ? graph.order.filter((nodeId) => {
+          const state = stateByNode.get(nodeId) ?? "pending";
+          if (state !== "running" && state !== "cancelling") return false;
+          const node = graph.nodes[nodeId];
+          return (
+            node?.resources.some((resourceId) =>
+              waitingNode?.resources.includes(resourceId),
+            ) === true
+          );
+        })
+      : [];
+  const dependencyBlockers =
+    waitingNode?.dependsOn.filter(
       (dependencyId) =>
         !ownNodes.has(dependencyId) &&
         (stateByNode.get(dependencyId) ?? "pending") !== "succeeded",
     ) ?? [];
+  const blockerNodeIds = unique([...resourceBlockers, ...dependencyBlockers]);
   if (blockerNodeIds.length === 0) return undefined;
 
   const blockerLabels = unique(
@@ -637,6 +655,7 @@ function aggregateState(states: readonly NodeState[]): NodeState {
     "cancelling",
     "running",
     "retry_wait",
+    "resource_wait",
     "ready",
     "cancelled",
     "pending",
@@ -653,6 +672,7 @@ function countStates(
   const counts: Record<NodeState, number> = {
     pending: 0,
     ready: 0,
+    resource_wait: 0,
     running: 0,
     succeeded: 0,
     failed: 0,

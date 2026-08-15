@@ -260,15 +260,17 @@ describe("buildBeadsGraph", () => {
     });
   });
 
-  test("fans out implementations while serializing merge/update chains", () => {
+  test("fans out implementations while resource-locking independent merges", () => {
     const graph = buildBeadsGraph([bead("A"), bead("B")]);
     expect(graph.nodes["implement-a"]?.dependsOn).toEqual(["context-a"]);
     expect(graph.nodes["implement-b"]?.dependsOn).toEqual(["context-b"]);
     expect(graph.nodes["merge-a"]?.dependsOn).toEqual(["implement-a"]);
-    expect(graph.nodes["merge-b"]?.dependsOn).toEqual([
-      "implement-b",
-      "update-a",
-    ]);
+    expect(graph.nodes["merge-b"]?.dependsOn).toEqual(["implement-b"]);
+    expect(graph.resources).toEqual({
+      "integration-branch": { capacity: 1 },
+    });
+    expect(graph.nodes["merge-a"]?.resources).toEqual(["integration-branch"]);
+    expect(graph.nodes["merge-b"]?.resources).toEqual(["integration-branch"]);
   });
 
   test("includeBeadsUpdate: false omits beads_update nodes", () => {

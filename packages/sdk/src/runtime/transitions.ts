@@ -57,8 +57,14 @@ export function reduceNodeState(
       break;
 
     case "node_started":
-      if (previous === "ready") {
+      if (previous === "ready" || previous === "resource_wait") {
         return "running";
+      }
+      break;
+
+    case "node_resource_wait":
+      if (previous === "ready") {
+        return "resource_wait";
       }
       break;
 
@@ -108,6 +114,7 @@ export function reduceNodeState(
       if (
         previous === "pending" ||
         previous === "ready" ||
+        previous === "resource_wait" ||
         previous === "cancelling" ||
         previous === "retry_wait"
       ) {

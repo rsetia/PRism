@@ -187,6 +187,37 @@ describe("compileGraph", () => {
     expect(graph.nodes["final"]?.dependents).toEqual([]);
   });
 
+  test("rejects requests for undeclared resources", () => {
+    const result = compileGraph(
+      definition({
+        a: { executor: "test", dependsOn: [], resources: ["missing"] },
+      }),
+    );
+    expect(result).toEqual({
+      ok: false,
+      errors: [
+        { code: "UNKNOWN_RESOURCE", nodeId: "a", resourceId: "missing" },
+      ],
+    });
+  });
+
+  test("defensively copies and freezes resources", () => {
+    const source: GraphDefinition = {
+      version: 1,
+      resources: { shared: { capacity: 2 } },
+      nodes: {
+        a: { executor: "test", dependsOn: [], resources: ["shared"] },
+      },
+      finalNode: "a",
+    };
+    const graph = expectCompiled(source);
+    expect(graph.resources).toEqual({ shared: { capacity: 2 } });
+    expect(graph.nodes["a"]?.resources).toEqual(["shared"]);
+    expect(Object.isFrozen(graph.resources)).toBe(true);
+    expect(Object.isFrozen(graph.resources["shared"])).toBe(true);
+    expect(Object.isFrozen(graph.nodes["a"]?.resources)).toBe(true);
+  });
+
   test("allows disconnected components when finalNode is declared", () => {
     const graph = expectCompiled(
       definition(

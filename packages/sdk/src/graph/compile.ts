@@ -114,6 +114,8 @@ export function compileGraph(graph: GraphDefinition): CompileResult {
   const errors: GraphCompileError[] = [];
   const nodeIds = Object.keys(graph.nodes).sort(compareNodeIds);
   const nodeIdSet = new Set(nodeIds);
+  const resourceIds = Object.keys(graph.resources ?? {}).sort(compareNodeIds);
+  const resourceIdSet = new Set(resourceIds);
   const dependentsByNodeId = new Map<string, string[]>();
   const remainingDependencyCount = new Map<string, number>();
 
@@ -150,6 +152,11 @@ export function compileGraph(graph: GraphDefinition): CompileResult {
       const dependencyCount = remainingDependencyCount.get(nodeId);
       if (dependencyCount !== undefined) {
         remainingDependencyCount.set(nodeId, dependencyCount + 1);
+      }
+    }
+    for (const resourceId of node.resources ?? []) {
+      if (!resourceIdSet.has(resourceId)) {
+        errors.push({ code: "UNKNOWN_RESOURCE", nodeId, resourceId });
       }
     }
   }
@@ -239,6 +246,7 @@ export function compileGraph(graph: GraphDefinition): CompileResult {
       executor: node.executor,
       kind: node.kind ?? "task",
       dependsOn: [...node.dependsOn],
+      resources: [...(node.resources ?? [])].sort(compareNodeIds),
       dependents: [...(dependentsByNodeId.get(nodeId) ?? [])],
     };
     const when =
@@ -261,6 +269,12 @@ export function compileGraph(graph: GraphDefinition): CompileResult {
     ok: true,
     graph: deepFreeze({
       version: graph.version,
+      resources: Object.fromEntries(
+        resourceIds.map((resourceId) => [
+          resourceId,
+          { capacity: graph.resources?.[resourceId]?.capacity as number },
+        ]),
+      ),
       nodes: compiledNodes,
       order,
       finalNode,

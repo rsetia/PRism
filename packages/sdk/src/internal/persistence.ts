@@ -108,6 +108,14 @@ export function snapshotRunEvent(
         ...persisted,
       });
 
+    case "node_resource_wait":
+      return Object.freeze({
+        kind: event.kind,
+        nodeId: event.nodeId,
+        resourceIds: Object.freeze([...event.resourceIds]),
+        ...persisted,
+      });
+
     case "node_phase_changed":
       return Object.freeze({
         kind: event.kind,
