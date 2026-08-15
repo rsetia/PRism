@@ -64,6 +64,7 @@ export function createSubprocessExecutor(
     assessAgentProgress(
       {
         capability: "structured",
+        sessionStartedAtMs: 0,
         processLivenessAtMs: null,
         lastModelEventAtMs: null,
         lastToolEventAtMs: null,

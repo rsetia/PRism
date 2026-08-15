@@ -283,11 +283,11 @@ async function invokeExecutor(
           kind: node.kind,
           attempt,
           inputs,
-            signal,
-            reportPhase,
-            reportUsage,
-            reportAgentProgress,
-            submitGraphProposal: submitProposal,
+          signal,
+          reportPhase,
+          reportUsage,
+          reportAgentProgress,
+          submitGraphProposal: submitProposal,
         }
       : {
           runId,
@@ -296,11 +296,11 @@ async function invokeExecutor(
           attempt,
           inputs,
           config: node.config,
-            signal,
-            reportPhase,
-            reportUsage,
-            reportAgentProgress,
-            submitGraphProposal: submitProposal,
+          signal,
+          reportPhase,
+          reportUsage,
+          reportAgentProgress,
+          submitGraphProposal: submitProposal,
         },
   );
 

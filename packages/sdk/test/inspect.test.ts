@@ -61,6 +61,25 @@ async function createStoredRun(
 }
 
 describe("inspectRun", () => {
+  test("surfaces the latest structured agent-progress state", async () => {
+    const graph = buildGraph({
+      version: 1,
+      nodes: { work: { executor: "constant" } },
+      finalNode: "work",
+    });
+    const store = await createStoredRun(graph, "agent-progress", [
+      { kind: "node_ready", nodeId: "work" },
+      { kind: "node_started", nodeId: "work" },
+      { kind: "node_agent_progress", nodeId: "work", state: "active" },
+      { kind: "node_agent_progress", nodeId: "work", state: "waiting" },
+    ]);
+
+    expect((await inspectRun(store, "agent-progress")).nodes[0]).toMatchObject({
+      state: "running",
+      agentProgress: "waiting",
+    });
+  });
+
   test("reports every node succeeded for a finished run", async () => {
     const store = createMemoryStore();
     const graph = buildGraph({

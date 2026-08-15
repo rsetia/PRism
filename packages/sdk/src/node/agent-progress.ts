@@ -5,6 +5,12 @@
  */
 export interface AgentProgressSnapshot {
   readonly capability: "structured" | "reduced" | "unobservable";
+  /**
+   * Durable start time for this session. This gives a new or resumed session
+   * one policy timeout to emit its first structured progress event without
+   * treating repeated process heartbeats as progress.
+   */
+  readonly sessionStartedAtMs: number;
   /** The agent process was last known to be alive at this time. */
   readonly processLivenessAtMs: number | null;
   readonly lastModelEventAtMs: number | null;
@@ -81,7 +87,8 @@ export function assessAgentProgress(
   }
 
   const lastProgressAtMs = latestProgress(snapshot);
-  if (lastProgressAtMs !== null && now - lastProgressAtMs <= policy.timeoutMs) {
+  const progressBaseline = lastProgressAtMs ?? snapshot.sessionStartedAtMs;
+  if (now - progressBaseline <= policy.timeoutMs) {
     return Object.freeze({ state: "active", lastProgressAtMs, decision: null });
   }
 

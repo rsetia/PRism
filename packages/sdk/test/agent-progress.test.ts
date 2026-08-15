@@ -7,6 +7,7 @@ function snapshot(
 ): AgentProgressSnapshot {
   return {
     capability: "structured",
+    sessionStartedAtMs: 0,
     processLivenessAtMs: 1_000,
     lastModelEventAtMs: null,
     lastToolEventAtMs: null,
@@ -21,6 +22,17 @@ function snapshot(
 const policy = { timeoutMs: 100, action: "escalate" as const, maxAttempts: 2 };
 
 describe("assessAgentProgress", () => {
+  test("allows startup grace before the first structured event", () => {
+    expect(assessAgentProgress(snapshot(), 100, policy)).toMatchObject({
+      state: "active",
+      decision: null,
+    });
+    expect(assessAgentProgress(snapshot(), 101, policy)).toMatchObject({
+      state: "stalled",
+      decision: { action: "escalate", attempt: 1 },
+    });
+  });
+
   test("does not mistake a live supervisor for agent progress", () => {
     const assessment = assessAgentProgress(snapshot(), 1_000, policy);
     expect(assessment.state).toBe("stalled");
