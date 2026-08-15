@@ -15,7 +15,7 @@
     "lint": "eslint .",
     "format": "prettier --write .",
     "format:check": "prettier --check .",
-    "test": "vitest run --passWithNoTests",
+    "test": "vitest run --passWithNoTests --exclude '**/orchestration-evals.test.ts'",
     "eval": "vitest run packages/sdk/test/orchestration-evals.test.ts",
     "pack:check": "publint packages/sdk && publint packages/cli && attw --pack packages/sdk --profile esm-only",
     "smoke": "node scripts/package-smoke.mjs",

@@ -106,7 +106,8 @@ function assertHistory(events: readonly PersistedRunEvent[]): void {
 describe("deterministic production orchestration evaluations", () => {
   // This intentionally aggregates the release matrix: its baseline metrics
   // describe the complete profile, while focused unit suites cover each
-  // primitive independently and retain their own failure reporting.
+  // primitive independently and retain their own failure reporting. It runs
+  // only under `npm run eval`, rather than being duplicated by `npm test`.
   test("measures the release scenario matrix against checked-in thresholds", async () => {
     expect(baseline).toMatchObject({
       schemaVersion: 1,
