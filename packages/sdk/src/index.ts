@@ -9,6 +9,7 @@ export type { CompileResult } from "./graph/compile.js";
 export type {
   CompiledGraph,
   CompiledNode,
+  ExecutionCondition,
   GraphDefinition,
   JsonValue,
   NodeDefinition,

@@ -26,7 +26,13 @@ export type GraphParseError =
       readonly nodeId: string;
       readonly found: unknown;
     }
-  | { readonly code: "INVALID_FINAL_NODE" };
+  | { readonly code: "INVALID_FINAL_NODE" }
+  | {
+      readonly code: "INVALID_CONDITION";
+      readonly nodeId: string;
+      readonly path: string;
+    }
+  | { readonly code: "CONDITION_REQUIRES_VERSION_2"; readonly nodeId: string };
 
 /** Cross-node invariant violations found by compileGraph. */
 export type GraphCompileError =

@@ -241,10 +241,22 @@ export function compileGraph(graph: GraphDefinition): CompileResult {
       dependsOn: [...node.dependsOn],
       dependents: [...(dependentsByNodeId.get(nodeId) ?? [])],
     };
+    const when =
+      node.when === undefined
+        ? undefined
+        : (cloneJsonValue(
+            node.when as unknown as JsonValue,
+          ) as unknown as typeof node.when);
     compiledNodes[nodeId] =
       node.config === undefined
-        ? compiledNode
-        : { ...compiledNode, config: cloneJsonValue(node.config) };
+        ? when === undefined
+          ? compiledNode
+          : { ...compiledNode, when }
+        : {
+            ...compiledNode,
+            config: cloneJsonValue(node.config),
+            ...(when === undefined ? {} : { when }),
+          };
   }
 
   return {

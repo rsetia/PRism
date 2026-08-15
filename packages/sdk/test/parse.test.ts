@@ -46,10 +46,11 @@ describe("parseGraph", () => {
     }
   });
 
-  test("rejects version !== literal 1 with UNSUPPORTED_VERSION", () => {
-    expect(failErrors({ ...validGraph, version: 2 })).toContainEqual({
+  test("rejects versions other than literals 1 and 2 with UNSUPPORTED_VERSION", () => {
+    expect(parseGraph({ ...validGraph, version: 2 }).ok).toBe(true);
+    expect(failErrors({ ...validGraph, version: 3 })).toContainEqual({
       code: "UNSUPPORTED_VERSION",
-      found: 2,
+      found: 3,
     });
     expect(failErrors({ ...validGraph, version: "1" })).toContainEqual({
       code: "UNSUPPORTED_VERSION",
@@ -149,6 +150,51 @@ describe("parseGraph", () => {
     expect(result.ok).toBe(true);
     if (!result.ok) return;
     expect(result.graph.nodes["only"]?.config).toEqual(config);
+  });
+
+  test("parses only declarative version-2 evidence conditions", () => {
+    const result = parseGraph({
+      version: 2,
+      nodes: {
+        gate: {
+          executor: "noop",
+          when: {
+            all: [
+              { predicate: "changed_path", matches: "frontend/**" },
+              { predicate: "diff_present", equals: true },
+            ],
+          },
+        },
+      },
+    });
+    expect(result.ok).toBe(true);
+    if (result.ok) expect(result.graph.nodes["gate"]?.when).toBeDefined();
+    expect(
+      failErrors({
+        version: 2,
+        nodes: {
+          gate: {
+            executor: "noop",
+            when: { predicate: "command", equals: true },
+          },
+        },
+      }),
+    ).toContainEqual({
+      code: "INVALID_CONDITION",
+      nodeId: "gate",
+      path: "when",
+    });
+    expect(
+      failCodes({
+        version: 1,
+        nodes: {
+          gate: {
+            executor: "noop",
+            when: { predicate: "diff_present", equals: true },
+          },
+        },
+      }),
+    ).toContain("CONDITION_REQUIRES_VERSION_2");
   });
 
   test("collects all errors in one pass, not just the first", () => {

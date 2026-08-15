@@ -124,6 +124,40 @@ describe("createEngine", () => {
     });
   });
 
+  test("skips a false evidence gate and allows its dependent to run", async () => {
+    const graph = buildGraph({
+      version: 2,
+      nodes: {
+        proof: {
+          executor: "constant",
+          config: {
+            value: {
+              proof: {
+                version: 1,
+                changedPaths: ["backend/api.ts"],
+                hasDiff: true,
+              },
+            },
+          },
+        },
+        frontend: {
+          executor: "constant",
+          dependsOn: ["proof"],
+          config: { value: "not run" },
+          when: { predicate: "changed_path", matches: "frontend/**" },
+        },
+        final: { executor: "passthrough", dependsOn: ["frontend"] },
+      },
+      finalNode: "final",
+    });
+    const handle = engineWith().run(graph);
+    expect(await eventSummary(handle)).toContain("node_skipped:frontend");
+    await expect(handle.result).resolves.toEqual({
+      status: "succeeded",
+      output: null,
+    });
+  });
+
   test("inputs arrive in dependsOn order, not topo order", async () => {
     const build = (dependsOn: readonly string[]) =>
       buildGraph({
