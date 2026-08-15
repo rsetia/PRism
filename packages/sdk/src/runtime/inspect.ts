@@ -1,4 +1,5 @@
 import type { PersistedRunEvent } from "./events.js";
+import type { NodePhase } from "./events.js";
 import { reduceNodeState } from "./transitions.js";
 import type { Clock, RunStore } from "./ports.js";
 import type { NodeFailure, NodeState } from "./types.js";
@@ -14,6 +15,29 @@ import type { NodeFailure, NodeState } from "./types.js";
 export interface NodeInspection {
   readonly nodeId: string;
   readonly state: NodeState;
+  /** Null when this node has no events or includes legacy timestamp-free data. */
+  readonly timing: NodeTiming | null;
+}
+
+export type NodeTimingPhase =
+  | "dependency_wait"
+  | "scheduler_queue"
+  | "retry_wait"
+  | "recovery_wait"
+  | NodePhase;
+
+export interface PhaseDuration {
+  readonly phase: NodeTimingPhase;
+  readonly durationMs: number;
+}
+
+export interface NodeTiming {
+  readonly startedAtMs: number;
+  readonly completedAtMs: number | null;
+  readonly totalDurationMs: number;
+  readonly attributedDurationMs: number;
+  readonly unattributedDurationMs: number;
+  readonly phases: readonly PhaseDuration[];
 }
 
 export interface RunInspection {
@@ -118,6 +142,7 @@ async function inspectRunSnapshot(
 
   const failureByNode = new Map<string, NodeFailure>();
   const events = await readEventSnapshot(store, runId, stored.revision);
+  const timings = calculateNodeTimings(stored.graph.order, events);
   for (const event of events) {
     const previous = states.get(event.nodeId);
     if (previous === undefined) {
@@ -146,7 +171,11 @@ async function inspectRunSnapshot(
     if (state === undefined) {
       throw new Error(`compiled graph order contains unknown node "${nodeId}"`);
     }
-    return Object.freeze({ nodeId, state });
+    return Object.freeze({
+      nodeId,
+      state,
+      timing: timings.get(nodeId) ?? null,
+    });
   });
 
   return Object.freeze({
@@ -155,6 +184,158 @@ async function inspectRunSnapshot(
     nodes: Object.freeze(nodes),
     failures: Object.freeze(failures),
   });
+}
+
+interface MutableTiming {
+  available: boolean;
+  hasEvents: boolean;
+  activePhase: NodeTimingPhase | null;
+  activeSinceMs: number;
+  completedAtMs: number | null;
+  lastTimestampMs: number;
+  readonly totals: Map<NodeTimingPhase, number>;
+}
+
+function calculateNodeTimings(
+  nodeIds: readonly string[],
+  events: readonly PersistedRunEvent[],
+): ReadonlyMap<string, NodeTiming> {
+  // A single missing timestamp breaks at least one interval and the run start
+  // boundary, so legacy logs fail closed instead of reporting partial totals.
+  if (events.some((event) => event.timestampMs === null)) {
+    return new Map();
+  }
+  const firstTimestampMs = events.find(
+    (event) => event.timestampMs !== null,
+  )?.timestampMs;
+  if (firstTimestampMs === undefined || firstTimestampMs === null) {
+    return new Map();
+  }
+
+  const mutable = new Map<string, MutableTiming>();
+  for (const nodeId of nodeIds) {
+    mutable.set(nodeId, {
+      available: true,
+      hasEvents: false,
+      activePhase: "dependency_wait",
+      activeSinceMs: firstTimestampMs,
+      completedAtMs: null,
+      lastTimestampMs: firstTimestampMs,
+      totals: new Map(),
+    });
+  }
+
+  for (const event of events) {
+    const timing = mutable.get(event.nodeId);
+    if (timing === undefined) continue;
+    timing.hasEvents = true;
+    if (event.timestampMs === null) {
+      timing.available = false;
+      continue;
+    }
+    const timestampMs = event.timestampMs;
+    timing.lastTimestampMs = timestampMs;
+    switch (event.kind) {
+      case "node_ready":
+        changePhase(timing, "scheduler_queue", timestampMs);
+        break;
+      case "node_started":
+        changePhase(timing, "execution", timestampMs);
+        break;
+      case "node_phase_changed":
+        changePhase(timing, event.phase, timestampMs);
+        break;
+      case "node_retry_wait":
+        changePhase(timing, "retry_wait", timestampMs);
+        break;
+      case "node_reset":
+        changePhase(timing, "recovery_wait", timestampMs);
+        timing.completedAtMs = null;
+        break;
+      case "node_succeeded":
+      case "node_failed":
+      case "node_blocked":
+      case "node_cancelled":
+        completeTiming(timing, timestampMs);
+        break;
+      case "node_cancelling":
+        break;
+      default: {
+        const unhandled: never = event;
+        throw new Error(`unhandled timing event: ${JSON.stringify(unhandled)}`);
+      }
+    }
+  }
+
+  // The run's latest observed timestamp, not the node's own: an in-progress
+  // node may have been silent for hours, and its active phase owns all of
+  // that time.
+  const observedAtMs = events.reduce(
+    (max, event) => Math.max(max, event.timestampMs ?? max),
+    firstTimestampMs,
+  );
+
+  const result = new Map<string, NodeTiming>();
+  for (const [nodeId, timing] of mutable) {
+    if (!timing.available || !timing.hasEvents) continue;
+    if (timing.completedAtMs === null) {
+      closeActivePhase(timing, observedAtMs);
+      timing.lastTimestampMs = observedAtMs;
+    }
+    const completedAtMs = timing.completedAtMs;
+    const totalDurationMs = Math.max(
+      0,
+      (completedAtMs ?? timing.lastTimestampMs) - firstTimestampMs,
+    );
+    const phases = [...timing.totals.entries()].map(([phase, durationMs]) =>
+      Object.freeze({ phase, durationMs }),
+    );
+    const attributedDurationMs = phases.reduce(
+      (total, phase) => total + phase.durationMs,
+      0,
+    );
+    result.set(
+      nodeId,
+      Object.freeze({
+        startedAtMs: firstTimestampMs,
+        completedAtMs,
+        totalDurationMs,
+        attributedDurationMs,
+        unattributedDurationMs: Math.max(
+          0,
+          totalDurationMs - attributedDurationMs,
+        ),
+        phases: Object.freeze(phases),
+      }),
+    );
+  }
+  return result;
+}
+
+function changePhase(
+  timing: MutableTiming,
+  phase: NodeTimingPhase,
+  timestampMs: number,
+): void {
+  closeActivePhase(timing, timestampMs);
+  timing.activePhase = phase;
+  timing.activeSinceMs = timestampMs;
+}
+
+function completeTiming(timing: MutableTiming, timestampMs: number): void {
+  closeActivePhase(timing, timestampMs);
+  timing.completedAtMs = timestampMs;
+  timing.activePhase = null;
+}
+
+function closeActivePhase(timing: MutableTiming, timestampMs: number): void {
+  if (timing.activePhase === null) return;
+  const durationMs = Math.max(0, timestampMs - timing.activeSinceMs);
+  timing.totals.set(
+    timing.activePhase,
+    (timing.totals.get(timing.activePhase) ?? 0) + durationMs,
+  );
+  timing.activeSinceMs = timestampMs;
 }
 
 async function readEventSnapshot(

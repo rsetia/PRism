@@ -171,6 +171,7 @@ export function createMergePrExecutor(
 
       let prNumber: number;
       try {
+        await context.reportPhase("pull_request");
         const firstLookup = await runGh(
           runner,
           gh,
@@ -265,6 +266,9 @@ export function createMergePrExecutor(
           }
         }
 
+        if ((config.validationCommands?.length ?? 0) > 0) {
+          await context.reportPhase("validation");
+        }
         for (const commandLine of config.validationCommands ?? []) {
           let command: ParsedCommand;
           try {
@@ -290,6 +294,7 @@ export function createMergePrExecutor(
           }
         }
 
+        await context.reportPhase("merge");
         const merged = await runGh(
           runner,
           gh,
@@ -359,6 +364,7 @@ export function createBeadsUpdateExecutor(
 
       let result: CommandResult;
       try {
+        await context.reportPhase("tracker_update");
         result = await runner.run(bd, args, {
           cwd: config.beadsRepo ?? defaultCwd,
           signal: context.signal,

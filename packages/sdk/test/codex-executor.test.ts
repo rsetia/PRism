@@ -13,6 +13,7 @@ import type {
   CompiledGraph,
   ExecutionContext,
   JsonValue,
+  NodePhase,
 } from "../src/index.js";
 import {
   createCodexExecutor,
@@ -116,6 +117,7 @@ function context(
     config: implementConfig,
     signal: new AbortController().signal,
     ...overrides,
+    reportPhase: overrides.reportPhase ?? (() => Promise.resolve()),
   };
 }
 
@@ -192,6 +194,56 @@ describe("createCodexExecutor", () => {
     ]);
     // The engine ran in the provisioned worktree.
     expect(inputs[0]?.worktreeDir).toBe(provisioned[0]);
+  });
+
+  test("reports worktree, implementation, and cleanup phases", async () => {
+    const { engine } = fakeEngine({ status: "succeeded", output: null });
+    const { provisioner } = fakeProvisioner();
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      provisioner,
+      nodeDirBase: tempDir,
+    });
+    const phases: NodePhase[] = [];
+
+    await executor.execute(
+      context([], {
+        reportPhase(phase) {
+          phases.push(phase);
+          return Promise.resolve();
+        },
+      }),
+    );
+
+    expect(phases).toEqual([
+      "worktree_setup",
+      "implementation",
+      "workspace_cleanup",
+    ]);
+  });
+
+  test("a failed cleanup phase report never overturns a succeeded outcome", async () => {
+    const { engine } = fakeEngine({ status: "succeeded", output: null });
+    const { provisioner } = fakeProvisioner();
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      provisioner,
+      nodeDirBase: tempDir,
+    });
+
+    const outcome = await executor.execute(
+      context([], {
+        reportPhase(phase) {
+          return phase === "workspace_cleanup"
+            ? Promise.reject(new Error("store append failed"))
+            : Promise.resolve();
+        },
+      }),
+    );
+
+    expect(outcome).toEqual({ status: "succeeded", output: null });
   });
 
   test("persists combined Codex worker output", async () => {

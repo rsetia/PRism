@@ -1085,7 +1085,7 @@ describe("prism CLI: persisted runs", () => {
       version: number;
       runId: string;
       finished: boolean;
-      nodes: { nodeId: string; state: string }[];
+      nodes: { nodeId: string; state: string; timing: unknown }[];
     };
     expect(parsed.version).toBe(1);
     expect(parsed.runId).toBe("r2");
@@ -1094,6 +1094,7 @@ describe("prism CLI: persisted runs", () => {
       "succeeded",
       "succeeded",
     ]);
+    expect(parsed.nodes.every((node) => node.timing !== null)).toBe(true);
   });
 
   test("events lists the persisted event log in order", async () => {
@@ -1118,6 +1119,7 @@ describe("prism CLI: persisted runs", () => {
         seq: number;
         kind: string;
         nodeId: string;
+        timestampMs: number | null;
         output?: unknown;
       }[];
     };
@@ -1125,6 +1127,9 @@ describe("prism CLI: persisted runs", () => {
     expect(parsed.runId).toBe("r4");
     expect(parsed.events.map((event) => event.seq)).toEqual(
       parsed.events.map((_event, index) => index),
+    );
+    expect(parsed.events.every((event) => event.timestampMs !== null)).toBe(
+      true,
     );
     expect(parsed.events.at(-1)).toMatchObject({
       kind: "node_succeeded",

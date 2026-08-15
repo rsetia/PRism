@@ -30,6 +30,7 @@ export class IllegalTransitionError extends Error {
  *   pending  + node_ready     -> ready
  *   pending  + node_blocked   -> blocked
  *   ready    + node_started   -> running
+ *   running | cancelling + node_phase_changed -> unchanged
  *   running  + node_succeeded -> succeeded
  *   running  + node_failed    -> failed
  *   running  + node_retry_wait -> retry_wait
@@ -57,6 +58,12 @@ export function reduceNodeState(
     case "node_started":
       if (previous === "ready") {
         return "running";
+      }
+      break;
+
+    case "node_phase_changed":
+      if (previous === "running" || previous === "cancelling") {
+        return previous;
       }
       break;
 
