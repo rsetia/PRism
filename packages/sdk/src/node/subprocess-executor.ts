@@ -250,6 +250,10 @@ async function supervise(
                 };
               }
               if (assessment.decision.action === "escalate") {
+                // The executor always releases a provisioned worktree after
+                // this attempt. Stop the worker first so cleanup cannot
+                // remove its current working directory while it is running.
+                await backend.terminate(handle);
                 return {
                   status: "failed",
                   cause: stallCause("AGENT_STALLED", assessment.decision),

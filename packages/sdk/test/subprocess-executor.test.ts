@@ -215,6 +215,8 @@ describe("createSubprocessExecutor", () => {
     });
     expect(decisions).toHaveLength(1);
     expect(states).toEqual(["active", "stalled"]);
-    expect(terminated).toBe(false);
+    // Escalation is terminal for the attempt.  This prevents a provisioner
+    // from deleting the active worker's worktree during executor cleanup.
+    expect(terminated).toBe(true);
   });
 });
