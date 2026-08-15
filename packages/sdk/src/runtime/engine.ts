@@ -1081,6 +1081,19 @@ async function executeRun(
                 applyEvents([{ kind: "node_agent_progress", nodeId, state }]),
               submitProposal,
             );
+          } catch (error: unknown) {
+            // Executor setup (for example, reconstructing dependency inputs)
+            // happens before invokeExecutor's executor-level catch. Keep such
+            // invariant failures scoped to this node rather than letting an
+            // in-flight promise reject out of the scheduler loop.
+            result = {
+              kind: "node_completion",
+              nodeId,
+              outcome: {
+                status: "failed",
+                cause: normalizeThrownCause(error),
+              },
+            };
           } finally {
             clearInterval(renewalTimer);
           }

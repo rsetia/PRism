@@ -45,7 +45,11 @@ async function seed(
 function engineOn(
   store: RunStore,
   extraExecutors: readonly ExecutorDefinition[] = [],
-  options: { retryPolicy?: RetryPolicy; clock?: ManualClock } = {},
+  options: {
+    retryPolicy?: RetryPolicy;
+    clock?: ManualClock;
+    maxConcurrency?: number;
+  } = {},
 ): Engine {
   return createEngine({
     store,
@@ -100,6 +104,33 @@ const transientRetry = (): RetryPolicy => ({
 });
 
 describe("engine resume", () => {
+  test("fails a malformed ready node instead of rejecting the scheduler", async () => {
+    const store = createMemoryStore();
+    const graph = linearGraph();
+    // This represents corrupt/incomplete persisted state: b was marked ready
+    // but its dependency output was never recorded. The engine must surface a
+    // normal node failure rather than abandon the entire scheduler promise.
+    await seed(store, "missing-dependency", graph, [
+      { kind: "node_ready", nodeId: "b" },
+    ]);
+
+    await expect(
+      engineOn(store, [], { maxConcurrency: 2 }).resume("missing-dependency")
+        .result,
+    ).resolves.toEqual({
+      status: "failed",
+      failures: [
+        {
+          nodeId: "b",
+          cause: {
+            name: "Error",
+            message: 'node "b" is missing output from dependency "a"',
+          },
+        },
+      ],
+    });
+  });
+
   test("restores null output for a previously skipped dependency", async () => {
     const store = createMemoryStore();
     const graph = buildGraph({
