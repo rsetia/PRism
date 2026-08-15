@@ -1,5 +1,6 @@
 import type { JsonValue } from "../graph/types.js";
 import type { NodeFailure } from "./types.js";
+import type { AgentProgressState } from "../node/agent-progress.js";
 
 /** Stable phase names used for per-node wall-time attribution. */
 export const NODE_PHASES = Object.freeze([
@@ -73,6 +74,12 @@ export type RunEvent =
       readonly nodeId: string;
       readonly attempt: number;
       readonly usage: UsageReport;
+    }
+  | {
+      /** Latest agent-progress classification, separately from liveness. */
+      readonly kind: "node_agent_progress";
+      readonly nodeId: string;
+      readonly state: AgentProgressState;
     }
   | {
       readonly kind: "node_succeeded";

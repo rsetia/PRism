@@ -166,6 +166,16 @@ async function supervise(
   workspace: WorkspaceHandle | undefined,
 ): Promise<NodeExecutionOutcome> {
   let handle: WorkerHandle | undefined;
+  let reportedProgress:
+    "active" | "waiting" | "stalled" | "unobservable" | undefined;
+  const reportProgress = async (
+    state: "active" | "waiting" | "stalled" | "unobservable",
+  ): Promise<void> => {
+    if (reportedProgress !== state) {
+      reportedProgress = state;
+      await context.reportAgentProgress?.(state);
+    }
+  };
   try {
     if (context.signal.aborted) {
       return cancellationFailure();
@@ -175,6 +185,9 @@ async function supervise(
       workspace === undefined
         ? await backend.launch(spec)
         : await backend.launch(spec, { cwd: workspace.dir });
+    if (!isProgressReportingExecutionBackend(backend)) {
+      await reportProgress("unobservable");
+    }
 
     while (true) {
       if (context.signal.aborted) {
@@ -221,6 +234,7 @@ async function supervise(
               clock.now(),
               stallPolicy,
             );
+            await reportProgress(assessment.state);
             if (assessment.decision !== null) {
               await backend.recordStallDecision(handle, assessment.decision);
               if (assessment.decision.action === "restart") {

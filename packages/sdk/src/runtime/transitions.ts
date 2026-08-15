@@ -73,6 +73,7 @@ export function reduceNodeState(
       break;
 
     case "node_phase_changed":
+    case "node_agent_progress":
       if (previous === "running" || previous === "cancelling") {
         return previous;
       }
