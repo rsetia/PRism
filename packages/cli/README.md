@@ -117,6 +117,10 @@ commands) with no sandbox — see
 [SECURITY.md](https://github.com/rsetia/PRism/blob/main/SECURITY.md) before
 running graphs you didn't write.
 
+`npm run eval` at the repository root validates orchestration with fake or
+recorded backends only. Live Codex/GitHub smoke testing is opt-in and is not a
+public CI requirement.
+
 Full documentation: **https://github.com/rsetia/PRism**
 
 MIT

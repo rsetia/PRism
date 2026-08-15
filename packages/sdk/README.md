@@ -151,6 +151,10 @@ complete trust model.
 Full docs, the CLI, and the Beads integration:
 **https://github.com/rsetia/PRism**
 
+For release validation, run `npm run eval` from the repository root. The suite
+uses fake executors and in-memory stores; a Codex/GitHub smoke is opt-in and
+never required by public CI.
+
 ### Audited graph expansion
 
 Use `submitGraphProposal(store, runId, proposal, policy)` to append follow-up

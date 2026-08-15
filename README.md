@@ -131,4 +131,18 @@ See [SECURITY.md](SECURITY.md) for details.
 
 SDK documentation is in [packages/sdk/README.md](packages/sdk/README.md).
 
+## Release validation
+
+`npm run eval` runs Prism's deterministic orchestration regression suite. It
+uses fake executors and in-memory stores, so CI never needs model credits,
+GitHub credentials, or a live backend. The checked-in machine-readable
+baseline at `fixtures/evals/orchestration.baseline.json` defines thresholds for
+completion, validation/review, safety, operator intervention, duration, and
+estimated cost. `npm run verify` includes this suite along with package smoke
+and compatibility coverage for older graphs and stores.
+
+Maintainers can opt into a Codex/GitHub smoke test against a disposable
+repository, but it is deliberately outside required public CI: it exercises
+the privileged backend boundary rather than the deterministic orchestrator.
+
 Status: `0.1.0-alpha.0` (unpublished).
