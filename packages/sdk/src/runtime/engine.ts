@@ -891,14 +891,28 @@ async function executeRun(
       inFlight.set(
         nodeId,
         (async () => {
-          const nodeLease = await store.acquireNodeLease(
+          let nodeLease = await store.acquireNodeLease(
             runId,
             nodeId,
             leaseOwner,
             leaseDurationMs,
           );
+          let renewalFailure: unknown;
+          const renewalTimer = setInterval(
+            () => {
+              void store
+                .renewLease(nodeLease, leaseDurationMs)
+                .then((renewed) => {
+                  nodeLease = renewed;
+                })
+                .catch((error: unknown) => {
+                  renewalFailure ??= error;
+                });
+            },
+            Math.max(1, Math.floor(leaseDurationMs / 2)),
+          );
           try {
-            return await invokeExecutor(
+            const result = await invokeExecutor(
               runId,
               getNode(graph, nodeId),
               executor,
@@ -908,7 +922,10 @@ async function executeRun(
               (phase) =>
                 applyEvents([{ kind: "node_phase_changed", nodeId, phase }]),
             );
+            if (renewalFailure !== undefined) throw renewalFailure;
+            return result;
           } finally {
+            clearInterval(renewalTimer);
             await store.releaseLease(nodeLease);
           }
         })(),

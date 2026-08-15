@@ -1181,6 +1181,7 @@ async function inspectCommand(
           nodes: inspection.nodes,
           failures: inspection.failures,
           timing: inspection.timing,
+          leases: inspection.leases,
         }),
       );
     } else {
@@ -1583,6 +1584,7 @@ function printWatchSnapshot(
         finished: inspection.finished,
         nodes: inspection.nodes,
         failures: inspection.failures,
+        leases: inspection.leases,
       }),
     );
     return;
