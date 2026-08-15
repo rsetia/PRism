@@ -228,6 +228,10 @@ export function createCodexExecutor(
                   spec,
                   nodeDir,
                   worktreeDir,
+                  sandbox:
+                    contract.dangerouslyBypassApprovalsAndSandbox === true
+                      ? "danger-full-access"
+                      : (contract.sandbox ?? "workspace-write"),
                   prompt: buildCodexPrompt({
                     spec,
                     nodeDir,

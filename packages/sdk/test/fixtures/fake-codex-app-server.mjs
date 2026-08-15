@@ -13,6 +13,9 @@ lines.on("line", async (line) => {
     return;
   }
   if (message.method === "thread/start" || message.method === "thread/resume") {
+    if (message.params.sandbox !== "read-only") {
+      throw new Error(`unexpected sandbox: ${message.params.sandbox}`);
+    }
     const threadId = message.params.threadId ?? "thread-1";
     send({ id: message.id, result: { thread: { id: threadId } } });
     return;

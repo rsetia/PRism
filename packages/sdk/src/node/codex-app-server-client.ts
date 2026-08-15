@@ -273,7 +273,7 @@ export function createCodexAppServerStdioClient(
       const result = await request("thread/start", {
         cwd: input.worktreeDir,
         approvalPolicy: "never",
-        sandbox: "danger-full-access",
+        sandbox: input.sandbox ?? "workspace-write",
         ...(options.model === undefined ? {} : { model: options.model }),
         ...(options.reasoningEffort === undefined
           ? {}
@@ -291,7 +291,7 @@ export function createCodexAppServerStdioClient(
         threadId: session.id,
         cwd: input.worktreeDir,
         approvalPolicy: "never",
-        sandbox: "danger-full-access",
+        sandbox: input.sandbox ?? "workspace-write",
         ...(options.model === undefined ? {} : { model: options.model }),
       });
       return beginTurn(input, session.id);

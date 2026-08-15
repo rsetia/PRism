@@ -24,6 +24,8 @@ export interface AgentSessionInput {
   readonly nodeDir: string;
   readonly worktreeDir: string;
   readonly prompt: string;
+  /** Resolved executor sandbox; defaults to workspace-write for compatibility. */
+  readonly sandbox?: "read-only" | "workspace-write" | "danger-full-access";
 }
 
 export type AgentSessionEvent =

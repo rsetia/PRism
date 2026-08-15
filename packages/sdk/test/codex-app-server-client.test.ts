@@ -47,6 +47,7 @@ test("runs a worker through the selectable Codex App Server stdio transport", as
       nodeDir: join(root, "node"),
       worktreeDir: root,
       prompt: `- On success, write ${join(root, "node", "result.json")} as JSON:`,
+      sandbox: "read-only",
     },
     { backend, onOutput: (text) => output.push(text) },
   );
