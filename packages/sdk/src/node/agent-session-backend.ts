@@ -110,7 +110,9 @@ export function createFileAgentSessionStore(
 }
 
 function safePathPart(value: string): string {
-  return encodeURIComponent(value).replaceAll("%", "_");
+  // Hex preserves every UTF-8 byte and uses only portable filename bytes.
+  // The prefix also makes an empty identifier a non-empty directory name.
+  return `utf8-${Buffer.from(value, "utf8").toString("hex")}`;
 }
 
 export interface AgentSessionEngineOptions {

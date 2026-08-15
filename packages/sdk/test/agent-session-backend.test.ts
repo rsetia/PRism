@@ -133,3 +133,44 @@ test("uses the durable run, node, and attempt identity to isolate sessions", asy
   );
   expect(calls).toEqual(["start:1", "resume:session-1", "start:2"]);
 });
+
+test("does not collide path-safe session identities", async () => {
+  const nodeDir = mkdtempSync(join(tmpdir(), "prism-session-"));
+  directories.push(nodeDir);
+  const calls: string[] = [];
+  const backend: AgentSessionBackend = {
+    name: "fake",
+    async start(input) {
+      calls.push(`start:${input.key.runId}`);
+      return { id: input.key.runId, state: null };
+    },
+    async resume(_input, session) {
+      calls.push(`resume:${session.id}`);
+      return session;
+    },
+    async steer() {},
+    async interrupt() {},
+    async *events() {
+      yield {
+        kind: "result",
+        result: { status: "succeeded", output: null },
+      } as const;
+    },
+  };
+  await runAgentSession(
+    { ...input(nodeDir), key: { runId: "a b", nodeId: "node", attempt: 1 } },
+    { backend },
+  );
+  await runAgentSession(
+    {
+      ...input(nodeDir),
+      key: { runId: "a_20b", nodeId: "node", attempt: 1 },
+    },
+    { backend },
+  );
+  await runAgentSession(
+    { ...input(nodeDir), key: { runId: "a b", nodeId: "node", attempt: 1 } },
+    { backend },
+  );
+  expect(calls).toEqual(["start:a b", "start:a_20b", "resume:a b"]);
+});
