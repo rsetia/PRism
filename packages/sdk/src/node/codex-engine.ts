@@ -400,7 +400,7 @@ function captureChildOutput(
         finished = true;
         const finalText = streamRedactor.end(decoder.end());
         if (finalText.length > 0) {
-          onOutput(redact(finalText));
+          onOutput(finalText);
         }
         remaining -= 1;
         if (remaining === 0) {
@@ -410,7 +410,7 @@ function captureChildOutput(
       stream.on("data", (chunk: Buffer) => {
         const text = streamRedactor.write(decoder.write(chunk));
         if (text.length > 0) {
-          onOutput(redact(text));
+          onOutput(text);
         }
       });
       stream.once("end", finish);
@@ -424,6 +424,9 @@ function createStreamingRedactor(redactor: SecretRedactor): {
   write(value: string): string;
   end(value: string): string;
 } {
+  if (redactor.secrets.length === 0) {
+    return { write: (value) => value, end: (value) => value };
+  }
   let buffer = "";
   const longest = redactor.secrets[0]?.length ?? 0;
   const drain = (flush: boolean): string => {
