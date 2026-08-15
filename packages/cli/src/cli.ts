@@ -1184,6 +1184,7 @@ async function inspectCommand(
           finished: inspection.finished,
           nodes: inspection.nodes,
           failures: inspection.failures,
+          graphRevisions: inspection.graphRevisions ?? [],
           timing: inspection.timing,
           leases: inspection.leases,
         }),
@@ -1204,6 +1205,11 @@ async function inspectCommand(
       }
       for (const failure of inspection.failures) {
         io.stdout(`failure ${failure.nodeId}: ${stringifyJson(failure.cause)}`);
+      }
+      for (const revision of inspection.graphRevisions ?? []) {
+        io.stdout(
+          `graph revision ${String(revision.graphRevision)}: ${revision.decision.status} · ${revision.proposal.proposer} · ${revision.addedNodeIds.join(", ") || "no nodes"}`,
+        );
       }
       if (inspection.timing === null) {
         io.stdout("timing: unavailable (empty or legacy event log)");

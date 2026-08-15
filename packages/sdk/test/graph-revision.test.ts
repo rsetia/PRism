@@ -2,6 +2,8 @@ import { describe, expect, test } from "vitest";
 import {
   compileGraph,
   createMemoryStore,
+  createEngine,
+  createExecutorRegistry,
   inspectRun,
   parseGraph,
   submitGraphProposal,
@@ -59,5 +61,50 @@ describe("audited graph expansion", () => {
     expect(cycle.status).toBe("rejected");
     expect((await store.getRun("r"))?.graph.order).toEqual(["start"]);
     expect((await store.listGraphRevisions?.("r"))?.map((entry) => entry.decision.status)).toEqual(["rejected", "rejected"]);
+  });
+
+  test("rejects attempts to replace an existing node definition", async () => {
+    const store = createMemoryStore();
+    await store.createRun({ runId: "r", graph: graph() });
+    const result = await submitGraphProposal(
+      store,
+      "r",
+      { id: "replace", proposer: "operator", nodes: { start: { executor: "other", dependsOn: [] } } },
+      () => ({ status: "accepted", policy: "automatic" }),
+    );
+    expect(result.status).toBe("rejected");
+    expect((await store.getRun("r"))?.graph.nodes["start"]?.executor).toBe("constant");
+  });
+
+  test("an executor proposal is dispatched by the live scheduler", async () => {
+    const store = createMemoryStore();
+    const seen: string[] = [];
+    const registry = createExecutorRegistry([
+      {
+        name: "proposer",
+        async execute(context) {
+          await context.submitGraphProposal?.({
+            id: "during-run",
+            proposer: context.nodeId,
+            nodes: { follow: { executor: "follow", dependsOn: [context.nodeId] } },
+            finalNode: "follow",
+          });
+          return { status: "succeeded", output: "start" };
+        },
+      },
+      { name: "follow", execute() { seen.push("follow"); return { status: "succeeded", output: "done" }; } },
+    ]);
+    const parsed = parseGraph({ version: 1, nodes: { start: { executor: "proposer" } }, finalNode: "start" });
+    if (!parsed.ok) throw new Error("fixture parse failed");
+    const compiled = compileGraph(parsed.graph);
+    if (!compiled.ok) throw new Error("fixture compile failed");
+
+    const outcome = await createEngine({
+      store,
+      registry,
+      graphProposalPolicy: () => ({ status: "accepted", policy: "test" }),
+    }).run(compiled.graph).result;
+    expect(outcome).toEqual({ status: "succeeded", output: "done" });
+    expect(seen).toEqual(["follow"]);
   });
 });

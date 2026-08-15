@@ -28,6 +28,10 @@ import {
 } from "./retry.js";
 import { reduceNodeState } from "./transitions.js";
 import type { NodeFailure, NodeState, RunOutcome } from "./types.js";
+import {
+  submitGraphProposal,
+  type GraphProposalPolicy,
+} from "./graph-revision.js";
 
 export interface EngineOptions {
   readonly store: RunStore;
@@ -61,6 +65,8 @@ export interface EngineOptions {
   readonly leaseOwner?: string;
   /** Lease lifetime in milliseconds. Renewed before every authoritative write. */
   readonly leaseDurationMs?: number;
+  /** Policy used for executor-originated graph expansion proposals. */
+  readonly graphProposalPolicy?: GraphProposalPolicy;
 }
 
 export interface RunOptions {
@@ -255,6 +261,7 @@ async function invokeExecutor(
   signal: AbortSignal,
   attempt: number,
   reportPhase: ExecutionContext["reportPhase"],
+  submitProposal: NonNullable<ExecutionContext["submitGraphProposal"]>,
 ): Promise<SchedulerEvent> {
   const inputs = Object.freeze(
     node.dependsOn.map((dependencyId) => {
@@ -276,6 +283,7 @@ async function invokeExecutor(
           inputs,
           signal,
           reportPhase,
+          submitGraphProposal: submitProposal,
         }
       : {
           runId,
@@ -286,6 +294,7 @@ async function invokeExecutor(
           config: node.config,
           signal,
           reportPhase,
+          submitGraphProposal: submitProposal,
         },
   );
 
@@ -608,7 +617,7 @@ async function readEventSnapshot(
 }
 
 async function executeRun(
-  graph: CompiledGraph,
+  initialGraph: CompiledGraph,
   runId: string,
   store: RunStore,
   registry: ExecutorRegistry,
@@ -622,7 +631,13 @@ async function executeRun(
   coordinatorLease?: RunLease,
   leaseOwner = "engine",
   leaseDurationMs = 30_000,
+  graphProposalPolicy: GraphProposalPolicy = () => ({
+    status: "rejected",
+    policy: "disabled",
+    reason: "dynamic graph expansion is not enabled for this engine",
+  }),
 ): Promise<RunOutcome> {
+  let graph = initialGraph;
   const executors = new Map<string, ExecutorDefinition>();
   const preflightFailures: NodeFailure[] = [];
 
@@ -682,6 +697,43 @@ async function executeRun(
   let revision = initialRevision;
   let appendTail = Promise.resolve();
   let currentCoordinatorLease = coordinatorLease;
+
+  async function submitProposal(
+    proposal: import("./graph-revision.js").GraphExpansionProposal,
+  ) {
+    const result = await submitGraphProposal(
+      store,
+      runId,
+      proposal,
+      async (candidate, context) => {
+        for (const node of Object.values(candidate.nodes)) {
+          if (!registry.has(node.executor)) {
+            return {
+              status: "rejected" as const,
+              policy: "executor-preflight",
+              reason: `unknown executor \"${node.executor}\"`,
+            };
+          }
+        }
+        return graphProposalPolicy(candidate, context);
+      },
+    );
+    if (result.status === "accepted" && result.revision.graph !== undefined) {
+      graph = result.revision.graph;
+      for (const nodeId of graph.order) {
+        if (!states.has(nodeId)) {
+          states.set(nodeId, "pending");
+          const node = getNode(graph, nodeId);
+          const executor = registry.get(node.executor);
+          if (executor === undefined)
+            throw new Error(`preflight lost executor for node "${nodeId}"`);
+          executor.validateConfig?.(node.config);
+          executors.set(nodeId, executor);
+        }
+      }
+    }
+    return result;
+  }
 
   function applyEvents(events: readonly RunEvent[]): Promise<void> {
     if (events.length === 0) {
@@ -981,6 +1033,7 @@ async function executeRun(
               attempt,
               (phase) =>
                 applyEvents([{ kind: "node_phase_changed", nodeId, phase }]),
+              submitProposal,
             );
             if (renewalFailure !== undefined) {
               throw renewalFailure instanceof Error
@@ -1334,7 +1387,7 @@ export function createEngine(options: EngineOptions): Engine {
     );
   }
 
-  const { store, registry, clock } = options;
+  const { store, registry, clock, graphProposalPolicy } = options;
   const leaseDurationMs = options.leaseDurationMs ?? 30_000;
   if (!Number.isFinite(leaseDurationMs) || leaseDurationMs <= 0) {
     throw new Error("leaseDurationMs must be a finite number greater than 0");
@@ -1420,6 +1473,7 @@ export function createEngine(options: EngineOptions): Engine {
             lease,
             leaseOwner,
             leaseDurationMs,
+            graphProposalPolicy,
           );
           lease = await store.renewLease(lease, leaseDurationMs);
           await store.finishRun(runId, outcome, lease);
@@ -1469,6 +1523,7 @@ export function createEngine(options: EngineOptions): Engine {
             lease,
             leaseOwner,
             leaseDurationMs,
+            graphProposalPolicy,
           );
           lease = await store.renewLease(lease, leaseDurationMs);
           await store.finishRun(runId, outcome, lease);

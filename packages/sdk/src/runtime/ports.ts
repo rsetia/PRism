@@ -1,5 +1,9 @@
 import type { CompiledGraph, JsonValue, NodeKind } from "../graph/types.js";
 import type { GraphRevision } from "./graph-revision.js";
+import type {
+  GraphExpansionProposal,
+  GraphProposalResult,
+} from "./graph-revision.js";
 import type { PersistedRunEvent, RunEvent } from "./events.js";
 import type { NodePhase } from "./events.js";
 import type { FailureClass } from "./types.js";
@@ -48,6 +52,10 @@ export interface ExecutionContext {
   readonly signal: AbortSignal;
   /** Persist a transition to a named execution phase for timing attribution. */
   readonly reportPhase: (phase: NodePhase) => Promise<void>;
+  /** Propose an append-only graph expansion through the engine's policy gate. */
+  readonly submitGraphProposal?: (
+    proposal: GraphExpansionProposal,
+  ) => Promise<GraphProposalResult>;
 }
 
 /**
