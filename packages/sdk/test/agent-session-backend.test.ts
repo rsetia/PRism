@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, expect, test } from "vitest";
 import {
   runAgentSession,
   type AgentSessionBackend,
@@ -38,20 +38,25 @@ test("starts, observes, steers, interrupts, and resumes a durable backend sessio
   const backend: AgentSessionBackend = {
     name: "fake",
     async start() {
+      await Promise.resolve();
       calls.push("start");
       return { id: "s-1", state: { cursor: 1 } };
     },
     async resume(_input, session) {
+      await Promise.resolve();
       calls.push(`resume:${session.id}`);
       return session;
     },
     async steer(_session, message) {
+      await Promise.resolve();
       calls.push(`steer:${message}`);
     },
     async interrupt() {
+      await Promise.resolve();
       calls.push("interrupt");
     },
     async *events() {
+      await Promise.resolve();
       if (pass++ === 0)
         yield { kind: "result", result: { status: "succeeded", output: null } };
       else
@@ -83,14 +88,17 @@ test("classifies backend protocol errors", async () => {
   const backend: AgentSessionBackend = {
     name: "fake",
     async start() {
+      await Promise.resolve();
       return { id: "s", state: null };
     },
     async resume(_input, session) {
+      await Promise.resolve();
       return session;
     },
     async steer() {},
     async interrupt() {},
     async *events() {
+      await Promise.resolve();
       yield { kind: "protocol_error", error: "bad frame" } as const;
     },
   };
@@ -109,16 +117,19 @@ test("uses the durable run, node, and attempt identity to isolate sessions", asy
   const backend: AgentSessionBackend = {
     name: "fake",
     async start(input) {
+      await Promise.resolve();
       calls.push(`start:${input.key.attempt}`);
       return { id: `session-${String(input.key.attempt)}`, state: null };
     },
     async resume(_input, session) {
+      await Promise.resolve();
       calls.push(`resume:${session.id}`);
       return session;
     },
     async steer() {},
     async interrupt() {},
     async *events() {
+      await Promise.resolve();
       yield {
         kind: "result",
         result: { status: "succeeded", output: null },
@@ -141,16 +152,19 @@ test("does not collide path-safe session identities", async () => {
   const backend: AgentSessionBackend = {
     name: "fake",
     async start(input) {
+      await Promise.resolve();
       calls.push(`start:${input.key.runId}`);
       return { id: input.key.runId, state: null };
     },
     async resume(_input, session) {
+      await Promise.resolve();
       calls.push(`resume:${session.id}`);
       return session;
     },
     async steer() {},
     async interrupt() {},
     async *events() {
+      await Promise.resolve();
       yield {
         kind: "result",
         result: { status: "succeeded", output: null },

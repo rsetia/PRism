@@ -160,18 +160,21 @@ describe("createCodexExecutor", () => {
     const backend: AgentSessionBackend = {
       name: "fake-session",
       async start(input) {
+        await Promise.resolve();
         calls.push(
           `start:${input.key.runId}:${input.key.nodeId}:${String(input.key.attempt)}`,
         );
         return { id: "session-1", state: null };
       },
       async resume(_input, session) {
+        await Promise.resolve();
         calls.push(`resume:${session.id}`);
         return session;
       },
       async steer() {},
       async interrupt() {},
       async *events() {
+        await Promise.resolve();
         yield { kind: "phase", phase: "validation" } as const;
         yield {
           kind: "result",
@@ -190,6 +193,7 @@ describe("createCodexExecutor", () => {
       executor.execute(
         context([], {
           reportPhase: async (phase) => {
+            await Promise.resolve();
             phases.push(phase);
           },
         }),

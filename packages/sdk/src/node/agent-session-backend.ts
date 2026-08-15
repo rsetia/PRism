@@ -103,7 +103,7 @@ export function createFileAgentSessionStore(
       await writeFile(temporary, JSON.stringify({ key, session }), "utf8");
       await rename(temporary, path);
     },
-    async remove(_key) {
+    async remove() {
       // Completion is intentionally retained. It is evidence of the backend
       // identity for incident recovery and prevents an engine restart from
       // silently starting a different conversation for the same attempt.
