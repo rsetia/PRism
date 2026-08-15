@@ -1228,6 +1228,8 @@ async function inspectCommand(
           graphRevisions: inspection.graphRevisions ?? [],
           timing: inspection.timing,
           leases: inspection.leases,
+          usage: inspection.usage ?? null,
+          scheduler: inspection.scheduler ?? null,
         }),
       );
     } else {
@@ -1244,6 +1246,23 @@ async function inspectCommand(
           io.stdout(`  evidence: ${formatEvidenceSummary(node.evidence)}`);
         }
       }
+      const usage = inspection.usage;
+      if (usage !== undefined && usage !== null) {
+        io.stdout(
+          `usage: ${usage.inputTokens ?? "unknown"} input tokens · ${usage.outputTokens ?? "unknown"} output tokens · ${usage.costUsd === null ? "cost unknown" : `$${usage.costUsd.toFixed(4)} ${usage.costKind}`}`,
+        );
+      }
+      io.stdout(
+        `realized concurrency: ${String(inspection.scheduler?.maximumRealizedNodeConcurrency ?? 0)}`,
+      );
+      const resourceLockUtilization =
+        inspection.scheduler?.resourceLockUtilization;
+      io.stdout(
+        resourceLockUtilization === null ||
+          resourceLockUtilization === undefined
+          ? "resource-lock utilization: unknown"
+          : `resource-lock utilization: ${(resourceLockUtilization * 100).toFixed(1)}%`,
+      );
       for (const failure of inspection.failures) {
         io.stdout(`failure ${failure.nodeId}: ${stringifyJson(failure.cause)}`);
       }

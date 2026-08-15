@@ -61,14 +61,18 @@ export type { RetryPolicy } from "./runtime/retry.js";
 export { createManualClock, createSystemClock } from "./adapters/clock.js";
 export type { ManualClock } from "./adapters/clock.js";
 export { inspectRun, watchRun } from "./runtime/inspect.js";
+export { summarizeUsage } from "./runtime/usage.js";
+export type { AttemptUsage, UsageTotals } from "./runtime/usage.js";
 export type {
   CriticalPathTiming,
+  InspectRunOptions,
   NodeInspection,
   NodeTiming,
   NodeTimingPhase,
   PhaseDuration,
   RunInspection,
   RunTiming,
+  SchedulerUtilization,
   WatchRunOptions,
 } from "./runtime/inspect.js";
 export { submitGraphProposal } from "./runtime/graph-revision.js";
@@ -85,9 +89,11 @@ export type {
   NodePhase,
   PersistedRunEvent,
   RunEvent,
+  UsageReport,
   WorkerPhase,
 } from "./runtime/events.js";
 export { NODE_PHASES, WORKER_PHASES } from "./runtime/events.js";
+export type { UsagePriceMetadata } from "./runtime/usage.js";
 export type {
   Clock,
   CreateRunInput,

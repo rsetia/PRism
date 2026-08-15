@@ -68,6 +68,13 @@ export type RunEvent =
       readonly phase: NodePhase;
     }
   | {
+      /** Normalized, append-only usage observed during a particular attempt. */
+      readonly kind: "node_usage_reported";
+      readonly nodeId: string;
+      readonly attempt: number;
+      readonly usage: UsageReport;
+    }
+  | {
       readonly kind: "node_succeeded";
       readonly nodeId: string;
       readonly output: JsonValue;
@@ -111,6 +118,21 @@ export type RunEvent =
       readonly kind: "node_reset";
       readonly nodeId: string;
     };
+
+/** Provider-neutral counters. Missing fields are deliberately unknown. */
+export interface UsageReport {
+  readonly provider?: string;
+  readonly model?: string;
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly cachedTokens?: number;
+  readonly agentTurns?: number;
+  readonly toolCalls?: number;
+  /** A provider may supply this without exposing its sensitive limit values. */
+  readonly rateLimited?: boolean;
+  /** Authoritative provider cost, if available; otherwise pricing is estimated. */
+  readonly costUsd?: number;
+}
 
 /**
  * An event as the store returns it. `seq` and `timestampMs` are assigned by

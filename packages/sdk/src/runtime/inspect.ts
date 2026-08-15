@@ -4,6 +4,7 @@ import type { NodePhase } from "./events.js";
 import { reduceNodeState } from "./transitions.js";
 import type { Clock, RunLeaseStatus, RunStore } from "./ports.js";
 import type { NodeFailure, NodeState } from "./types.js";
+import { summarizeUsage, type UsageTotals } from "./usage.js";
 import { tryParseProofOfWork, type ProofOfWorkV1 } from "./proof-of-work.js";
 import type { JsonValue } from "../graph/types.js";
 import type { GraphRevision } from "./graph-revision.js";
@@ -60,6 +61,20 @@ export interface RunInspection {
   readonly timing: RunTiming | null;
   /** Current non-expired ownership, without exposing owner identities. */
   readonly leases?: readonly RunLeaseStatus[];
+  readonly usage?: UsageTotals | null;
+  readonly scheduler?: SchedulerUtilization;
+}
+
+export interface SchedulerUtilization {
+  readonly maximumRealizedNodeConcurrency: number;
+  readonly resourceWaitMs: number | null;
+  readonly totalNodeTimeMs: number | null;
+  /** Portion of observed node time spent blocked on resource locks; null when timing is unavailable. */
+  readonly resourceLockUtilization: number | null;
+}
+
+export interface InspectRunOptions {
+  readonly prices?: readonly import("./usage.js").UsagePriceMetadata[];
 }
 
 export interface CriticalPathTiming {
@@ -109,8 +124,9 @@ export interface WatchRunOptions {
 export function inspectRun(
   store: RunStore,
   runId: string,
+  options: InspectRunOptions = {},
 ): Promise<RunInspection> {
-  return inspectRunSnapshot(store, runId);
+  return inspectRunSnapshot(store, runId, options);
 }
 
 /**
@@ -155,6 +171,7 @@ async function* watchRunSnapshots(
 async function inspectRunSnapshot(
   store: RunStore,
   runId: string,
+  options: InspectRunOptions = {},
 ): Promise<RunInspection> {
   const stored = await store.getRun(runId);
   if (stored === undefined) {
@@ -233,7 +250,57 @@ async function inspectRunSnapshot(
         ? Object.freeze([])
         : await store.listGraphRevisions(runId),
     timing,
+    usage: summarizeUsage(events, options.prices),
+    scheduler: calculateSchedulerUtilization(events, timings),
     leases,
+  });
+}
+
+function calculateSchedulerUtilization(
+  events: readonly PersistedRunEvent[],
+  timings: ReadonlyMap<string, NodeTiming>,
+): SchedulerUtilization {
+  const active = new Set<string>();
+  let maximumRealizedNodeConcurrency = 0;
+  for (const event of events) {
+    if (event.kind === "node_started") active.add(event.nodeId);
+    if (
+      event.kind === "node_succeeded" ||
+      event.kind === "node_failed" ||
+      event.kind === "node_retry_wait" ||
+      event.kind === "node_cancelled"
+    )
+      active.delete(event.nodeId);
+    maximumRealizedNodeConcurrency = Math.max(
+      maximumRealizedNodeConcurrency,
+      active.size,
+    );
+  }
+  const timingValues = [...timings.values()];
+  if (timingValues.length === 0)
+    return Object.freeze({
+      maximumRealizedNodeConcurrency,
+      resourceWaitMs: null,
+      totalNodeTimeMs: null,
+      resourceLockUtilization: null,
+    });
+  const resourceWaitMs = timingValues.reduce(
+    (total, timing) =>
+      total +
+      (timing.phases.find((phase) => phase.phase === "resource_contention")
+        ?.durationMs ?? 0),
+    0,
+  );
+  const totalNodeTimeMs = timingValues.reduce(
+    (total, timing) => total + timing.totalDurationMs,
+    0,
+  );
+  return Object.freeze({
+    maximumRealizedNodeConcurrency,
+    resourceWaitMs,
+    totalNodeTimeMs,
+    resourceLockUtilization:
+      totalNodeTimeMs === 0 ? 0 : resourceWaitMs / totalNodeTimeMs,
   });
 }
 
@@ -452,6 +519,7 @@ function calculateNodeTimings(
         completeTiming(timing, timestampMs);
         break;
       case "node_cancelling":
+      case "node_usage_reported":
         break;
       default: {
         const unhandled: never = event;
