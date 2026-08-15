@@ -1,4 +1,9 @@
 import type { CompiledGraph, JsonValue, NodeKind } from "../graph/types.js";
+import type { GraphRevision } from "./graph-revision.js";
+import type {
+  GraphExpansionProposal,
+  GraphProposalResult,
+} from "./graph-revision.js";
 import type { PersistedRunEvent, RunEvent } from "./events.js";
 import type { NodePhase } from "./events.js";
 import type { FailureClass } from "./types.js";
@@ -47,6 +52,10 @@ export interface ExecutionContext {
   readonly signal: AbortSignal;
   /** Persist a transition to a named execution phase for timing attribution. */
   readonly reportPhase: (phase: NodePhase) => Promise<void>;
+  /** Propose an append-only graph expansion through the engine's policy gate. */
+  readonly submitGraphProposal?: (
+    proposal: GraphExpansionProposal,
+  ) => Promise<GraphProposalResult>;
 }
 
 /**
@@ -107,6 +116,8 @@ interface StoredRunBase {
   readonly graph: CompiledGraph;
   /** Next event sequence; an optimistic revision for resume appends. */
   readonly revision: number;
+  /** Revision of the graph snapshot currently dispatched by the scheduler. */
+  readonly graphRevision: number;
 }
 
 /**
@@ -209,6 +220,18 @@ export interface RunStore {
   releaseLease(lease: RunLease): Promise<void>;
   /** Returns current non-expired ownership without exposing owner identities. */
   getRunLeases(runId: string): Promise<readonly RunLeaseStatus[]>;
+  /**
+   * Atomically records an audited graph decision. Accepted revisions replace
+   * the run's graph snapshot; rejected revisions deliberately leave it alone.
+   * Re-submitting the same proposal id is idempotent.
+   */
+  appendGraphRevision?(
+    runId: string,
+    revision: GraphRevision,
+    expectedGraphRevision: number,
+  ): Promise<GraphRevision>;
+  /** Durable audit trail, including rejected proposals, in decision order. */
+  listGraphRevisions?(runId: string): Promise<readonly GraphRevision[]>;
   close?(): Promise<void>;
 }
 

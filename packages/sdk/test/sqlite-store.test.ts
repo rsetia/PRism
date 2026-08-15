@@ -164,6 +164,12 @@ describe("sqlite durability", () => {
     expect(untouched.prepare("SELECT schema_version FROM runs").get()).toEqual({
       schema_version: 1,
     });
+    expect(
+      untouched
+        .prepare("PRAGMA table_info(runs)")
+        .all()
+        .map((column) => column["name"]),
+    ).not.toContain("graph_revision");
     untouched.close();
   });
 

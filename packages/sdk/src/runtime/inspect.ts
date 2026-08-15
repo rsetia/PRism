@@ -6,6 +6,7 @@ import type { Clock, RunLeaseStatus, RunStore } from "./ports.js";
 import type { NodeFailure, NodeState } from "./types.js";
 import { tryParseProofOfWork, type ProofOfWorkV1 } from "./proof-of-work.js";
 import type { JsonValue } from "../graph/types.js";
+import type { GraphRevision } from "./graph-revision.js";
 
 /**
  * A read-only snapshot of a run, rebuilt from its persisted events (plan
@@ -53,6 +54,8 @@ export interface RunInspection {
   readonly nodes: readonly NodeInspection[];
   /** Originating failures observed so far. */
   readonly failures: readonly NodeFailure[];
+  /** Accepted and rejected expansion decisions, in durable decision order. */
+  readonly graphRevisions?: readonly GraphRevision[];
   /** Null for empty or legacy timestamp-free event logs. */
   readonly timing: RunTiming | null;
   /** Current non-expired ownership, without exposing owner identities. */
@@ -225,6 +228,10 @@ async function inspectRunSnapshot(
     finished: stored.finished,
     nodes: Object.freeze(nodes),
     failures: Object.freeze(failures),
+    graphRevisions:
+      store.listGraphRevisions === undefined
+        ? Object.freeze([])
+        : await store.listGraphRevisions(runId),
     timing,
     leases,
   });
