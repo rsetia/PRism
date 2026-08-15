@@ -1255,6 +1255,14 @@ async function inspectCommand(
       io.stdout(
         `realized concurrency: ${String(inspection.scheduler?.maximumRealizedNodeConcurrency ?? 0)}`,
       );
+      const resourceLockUtilization =
+        inspection.scheduler?.resourceLockUtilization;
+      io.stdout(
+        resourceLockUtilization === null ||
+          resourceLockUtilization === undefined
+          ? "resource-lock utilization: unknown"
+          : `resource-lock utilization: ${(resourceLockUtilization * 100).toFixed(1)}%`,
+      );
       for (const failure of inspection.failures) {
         io.stdout(`failure ${failure.nodeId}: ${stringifyJson(failure.cause)}`);
       }
