@@ -80,6 +80,8 @@ export {
 } from "./agent-session-backend.js";
 export type { CodexAppServerClient } from "./codex-app-server-backend.js";
 export { createCodexAppServerBackend } from "./codex-app-server-backend.js";
+export type { CodexAppServerStdioClientOptions } from "./codex-app-server-client.js";
+export { createCodexAppServerStdioClient } from "./codex-app-server-client.js";
 export type {
   FinalizePrConfig,
   ImplementConfig,

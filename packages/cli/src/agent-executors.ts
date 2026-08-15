@@ -7,6 +7,8 @@ import {
 } from "@rsetia/prism";
 import {
   createBeadsUpdateExecutor,
+  createCodexAppServerBackend,
+  createCodexAppServerStdioClient,
   createCodexEngine,
   createCodexExecutor,
   createFileAgentSessionStore,
@@ -33,6 +35,8 @@ export interface AgentExecutorRegistryOptions {
   readonly codexModel?: string;
   /** Codex reasoning effort. Default medium. */
   readonly codexReasoningEffort?: string;
+  /** Worker transport. Default "exec"; "app-server" enables durable threads. */
+  readonly codexBackend?: "exec" | "app-server";
   /** Selects a structured backend when embedding the CLI registry. */
   readonly sessionBackend?: AgentSessionBackend;
 }
@@ -66,6 +70,20 @@ export function createAgentExecutorRegistry(
     reasoningEffort:
       options.codexReasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT,
   });
+  const sessionBackend =
+    options.sessionBackend ??
+    (options.codexBackend === "app-server"
+      ? createCodexAppServerBackend(
+          createCodexAppServerStdioClient({
+            ...(options.codexCommand === undefined
+              ? {}
+              : { command: options.codexCommand }),
+            model: options.codexModel ?? DEFAULT_CODEX_MODEL,
+            reasoningEffort:
+              options.codexReasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT,
+          }),
+        )
+      : undefined);
   const provisioner = createGitWorktreeProvisioner({
     repoDir,
     baseDir: worktreeBaseDir,
@@ -74,10 +92,10 @@ export function createAgentExecutorRegistry(
   const codexExecutor = (name: "implement" | "merge_resolve" | "finalize_pr") =>
     createCodexExecutor({
       name,
-      ...(options.sessionBackend === undefined
+      ...(sessionBackend === undefined
         ? { engine: codexEngine }
-        : { sessionBackend: options.sessionBackend }),
-      ...(options.sessionBackend === undefined
+        : { sessionBackend }),
+      ...(sessionBackend === undefined
         ? {}
         : {
             // Session records must outlive both a provisioned worktree and

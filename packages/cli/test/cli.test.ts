@@ -138,6 +138,7 @@ describe("prism CLI", () => {
     expect(result.code).toBe(0);
     expect(result.stdout).toContain("--codex-model <id>");
     expect(result.stdout).toContain("--codex-reasoning-effort <level>");
+    expect(result.stdout).toContain("--codex-backend exec|app-server");
     expect(result.stdout).toContain("gpt-5.6-terra");
     expect(result.stdout).toContain(
       "Codex reasoning effort                medium",
@@ -226,6 +227,27 @@ describe("prism CLI", () => {
     );
     expect(result.code).toBe(0);
     expect(result.stdout.trim()).toBe('"hello"');
+  });
+
+  test("run accepts the Codex App Server backend selector", async () => {
+    const result = await cli(
+      "run",
+      fixture("valid.json"),
+      "--codex-backend",
+      "app-server",
+    );
+    expect(result.code).toBe(0);
+    expect(result.stdout.trim()).toBe('"hello"');
+  });
+
+  test("run rejects an unknown Codex backend", async () => {
+    const result = await cli(
+      "run",
+      fixture("valid.json"),
+      "--codex-backend",
+      "other",
+    );
+    expect(result.code).toBe(2);
   });
 
   test("run: graph failure is exit 1 with empty stdout", async () => {
