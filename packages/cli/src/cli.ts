@@ -26,6 +26,7 @@ import type {
   GraphCompileError,
   GraphParseError,
   NodeFailure,
+  ProofOfWorkV1,
   PhaseDuration,
   PersistedRunEvent,
   LogBackend,
@@ -1192,6 +1193,9 @@ async function inspectCommand(
             `  time: ${formatDuration(node.timing.totalDurationMs)} · ${formatPhaseSummary(node.timing.phases)}`,
           );
         }
+        if (node.evidence !== null) {
+          io.stdout(`  evidence: ${formatEvidenceSummary(node.evidence)}`);
+        }
       }
       for (const failure of inspection.failures) {
         io.stdout(`failure ${failure.nodeId}: ${stringifyJson(failure.cause)}`);
@@ -1221,6 +1225,13 @@ async function inspectCommand(
   } finally {
     await store?.close?.();
   }
+}
+
+function formatEvidenceSummary(evidence: ProofOfWorkV1): string {
+  const passed = evidence.validations.filter(
+    (validation) => validation.status === "passed",
+  ).length;
+  return `${evidence.summary} · ${String(evidence.commits.length)} commit(s) · ${String(evidence.pullRequests.length)} PR(s) · ${String(passed)}/${String(evidence.validations.length)} validation(s) passed · ${String(evidence.unresolvedRisks.length)} unresolved risk(s)`;
 }
 
 function formatPhaseSummary(phases: readonly PhaseDuration[]): string {
