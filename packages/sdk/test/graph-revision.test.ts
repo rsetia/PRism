@@ -47,20 +47,32 @@ describe("audited graph expansion", () => {
     const rejected = await submitGraphProposal(
       store,
       "r",
-      { id: "no", proposer: "operator", nodes: { later: { executor: "constant", dependsOn: [] } } },
+      {
+        id: "no",
+        proposer: "operator",
+        nodes: { later: { executor: "constant", dependsOn: [] } },
+      },
       () => ({ status: "rejected", policy: "operator", reason: "not now" }),
     );
     const cycle = await submitGraphProposal(
       store,
       "r",
-      { id: "cycle", proposer: "operator", nodes: { loop: { executor: "constant", dependsOn: ["loop"] } } },
+      {
+        id: "cycle",
+        proposer: "operator",
+        nodes: { loop: { executor: "constant", dependsOn: ["loop"] } },
+      },
       () => ({ status: "accepted", policy: "automatic" }),
     );
 
     expect(rejected.status).toBe("rejected");
     expect(cycle.status).toBe("rejected");
     expect((await store.getRun("r"))?.graph.order).toEqual(["start"]);
-    expect((await store.listGraphRevisions?.("r"))?.map((entry) => entry.decision.status)).toEqual(["rejected", "rejected"]);
+    expect(
+      (await store.listGraphRevisions?.("r"))?.map(
+        (entry) => entry.decision.status,
+      ),
+    ).toEqual(["rejected", "rejected"]);
   });
 
   test("rejects attempts to replace an existing node definition", async () => {
@@ -69,11 +81,17 @@ describe("audited graph expansion", () => {
     const result = await submitGraphProposal(
       store,
       "r",
-      { id: "replace", proposer: "operator", nodes: { start: { executor: "other", dependsOn: [] } } },
+      {
+        id: "replace",
+        proposer: "operator",
+        nodes: { start: { executor: "other", dependsOn: [] } },
+      },
       () => ({ status: "accepted", policy: "automatic" }),
     );
     expect(result.status).toBe("rejected");
-    expect((await store.getRun("r"))?.graph.nodes["start"]?.executor).toBe("constant");
+    expect((await store.getRun("r"))?.graph.nodes["start"]?.executor).toBe(
+      "constant",
+    );
   });
 
   test("an executor proposal is dispatched by the live scheduler", async () => {
@@ -86,15 +104,27 @@ describe("audited graph expansion", () => {
           await context.submitGraphProposal?.({
             id: "during-run",
             proposer: context.nodeId,
-            nodes: { follow: { executor: "follow", dependsOn: [context.nodeId] } },
+            nodes: {
+              follow: { executor: "follow", dependsOn: [context.nodeId] },
+            },
             finalNode: "follow",
           });
           return { status: "succeeded", output: "start" };
         },
       },
-      { name: "follow", execute() { seen.push("follow"); return { status: "succeeded", output: "done" }; } },
+      {
+        name: "follow",
+        execute() {
+          seen.push("follow");
+          return { status: "succeeded", output: "done" };
+        },
+      },
     ]);
-    const parsed = parseGraph({ version: 1, nodes: { start: { executor: "proposer" } }, finalNode: "start" });
+    const parsed = parseGraph({
+      version: 1,
+      nodes: { start: { executor: "proposer" } },
+      finalNode: "start",
+    });
     if (!parsed.ok) throw new Error("fixture parse failed");
     const compiled = compileGraph(parsed.graph);
     if (!compiled.ok) throw new Error("fixture compile failed");
@@ -105,6 +135,48 @@ describe("audited graph expansion", () => {
       graphProposalPolicy: () => ({ status: "accepted", policy: "test" }),
     }).run(compiled.graph).result;
     expect(outcome).toEqual({ status: "succeeded", output: "done" });
+    expect(seen).toEqual(["follow"]);
+  });
+
+  test("dispatches independent accepted work when its proposer fails", async () => {
+    const store = createMemoryStore();
+    const seen: string[] = [];
+    const registry = createExecutorRegistry([
+      {
+        name: "proposer",
+        async execute(context) {
+          await context.submitGraphProposal?.({
+            id: "independent-during-failure",
+            proposer: context.nodeId,
+            nodes: { follow: { executor: "follow", dependsOn: [] } },
+            finalNode: "follow",
+          });
+          return { status: "failed", cause: "expected" } as const;
+        },
+      },
+      {
+        name: "follow",
+        execute() {
+          seen.push("follow");
+          return { status: "succeeded", output: "done" } as const;
+        },
+      },
+    ]);
+    const parsed = parseGraph({
+      version: 1,
+      nodes: { start: { executor: "proposer" } },
+      finalNode: "start",
+    });
+    if (!parsed.ok) throw new Error("fixture parse failed");
+    const compiled = compileGraph(parsed.graph);
+    if (!compiled.ok) throw new Error("fixture compile failed");
+
+    const outcome = await createEngine({
+      store,
+      registry,
+      graphProposalPolicy: () => ({ status: "accepted", policy: "test" }),
+    }).run(compiled.graph).result;
+    expect(outcome).toMatchObject({ status: "failed" });
     expect(seen).toEqual(["follow"]);
   });
 });

@@ -1,5 +1,9 @@
 import { compileGraph } from "../graph/compile.js";
-import type { GraphDefinition, JsonValue, NodeDefinition } from "../graph/types.js";
+import type {
+  GraphDefinition,
+  JsonValue,
+  NodeDefinition,
+} from "../graph/types.js";
 import type { RunStore } from "./ports.js";
 
 /** A proposed append-only change to a running graph. */
@@ -18,7 +22,11 @@ export interface GraphExpansionProposal {
 
 export type GraphProposalDecision =
   | { readonly status: "accepted"; readonly policy: string }
-  | { readonly status: "rejected"; readonly policy: string; readonly reason: string };
+  | {
+      readonly status: "rejected";
+      readonly policy: string;
+      readonly reason: string;
+    };
 
 /** Persisted decision. `graph` exists only for accepted decisions. */
 export interface GraphRevision {
@@ -71,22 +79,37 @@ export async function submitGraphProposal(
   try {
     candidate = compileExpansion(run.graph, proposal);
   } catch (error: unknown) {
-    rejection = error instanceof Error ? error.message : "invalid graph proposal";
+    rejection =
+      error instanceof Error ? error.message : "invalid graph proposal";
   }
-  const decision = rejection === undefined
-    ? await policy(proposal, { runId, graphRevision: run.graphRevision })
-    : { status: "rejected" as const, policy: "graph-validation", reason: rejection };
+  const decision =
+    rejection === undefined
+      ? await policy(proposal, { runId, graphRevision: run.graphRevision })
+      : {
+          status: "rejected" as const,
+          policy: "graph-validation",
+          reason: rejection,
+        };
 
   const revision: GraphRevision = {
     sequence: -1,
-    graphRevision: decision.status === "accepted" ? run.graphRevision + 1 : run.graphRevision,
+    graphRevision:
+      decision.status === "accepted"
+        ? run.graphRevision + 1
+        : run.graphRevision,
     timestampMs: 0,
     proposal,
     decision,
     addedNodeIds: Object.keys(proposal.nodes).sort(),
-    ...(decision.status === "accepted" && candidate !== undefined ? { graph: candidate } : {}),
+    ...(decision.status === "accepted" && candidate !== undefined
+      ? { graph: candidate }
+      : {}),
   };
-  const persisted = await store.appendGraphRevision(runId, revision, run.graphRevision);
+  const persisted = await store.appendGraphRevision(
+    runId,
+    revision,
+    run.graphRevision,
+  );
   return resultFor(persisted);
 }
 
@@ -109,7 +132,7 @@ function compileExpansion(
   graph: import("../graph/types.js").CompiledGraph,
   proposal: GraphExpansionProposal,
 ): import("../graph/types.js").CompiledGraph {
-  const nodes: Record<string, NodeDefinition> = Object.create(null);
+  const nodes: Record<string, NodeDefinition> = {};
   for (const nodeId of graph.order) {
     const node = graph.nodes[nodeId];
     if (node === undefined) continue;
@@ -136,7 +159,9 @@ function compileExpansion(
   };
   const compiled = compileGraph(definition);
   if (!compiled.ok) {
-    throw new Error(`graph proposal rejected by compiler: ${compiled.errors.map((e) => e.code).join(", ")}`);
+    throw new Error(
+      `graph proposal rejected by compiler: ${compiled.errors.map((e) => e.code).join(", ")}`,
+    );
   }
   return compiled.graph;
 }

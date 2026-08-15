@@ -151,16 +151,10 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
       token INTEGER PRIMARY KEY AUTOINCREMENT
     ) STRICT;
   `);
-  const runColumns = db.prepare("PRAGMA table_info(runs)").all();
-  if (
-    !runColumns.some(
-      (column) => readString(column, "name") === "graph_revision",
-    )
-  ) {
-    db.exec(
-      "ALTER TABLE runs ADD COLUMN graph_revision INTEGER NOT NULL DEFAULT 0",
-    );
-  }
+  let hasGraphRevision = db
+    .prepare("PRAGMA table_info(runs)")
+    .all()
+    .some((column) => readString(column, "name") === "graph_revision");
 
   const newestRun = db
     .prepare("SELECT MAX(schema_version) AS schema_version FROM runs")
@@ -177,12 +171,31 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   // previous release can still open it after a rollback.
   let stampedVersion = storedVersion >= schemaVersion;
 
+  let selectRun = prepareSelectRun(hasGraphRevision);
+
+  function prepareSelectRun(includeGraphRevision: boolean) {
+    return db.prepare(
+      `SELECT run_id, graph_json, finished, schema_version, outcome_json, ${
+        includeGraphRevision ? "graph_revision" : "0 AS graph_revision"
+      },
+       (SELECT COUNT(*) FROM events WHERE events.run_id = runs.run_id) AS revision
+     FROM runs WHERE run_id = ?`,
+    );
+  }
+
   function ensureSchemaCurrent(): void {
-    if (stampedVersion) {
+    if (stampedVersion && hasGraphRevision) {
       return;
     }
     db.exec("BEGIN IMMEDIATE");
     try {
+      if (!hasGraphRevision) {
+        db.exec(
+          "ALTER TABLE runs ADD COLUMN graph_revision INTEGER NOT NULL DEFAULT 0",
+        );
+        hasGraphRevision = true;
+        selectRun = prepareSelectRun(true);
+      }
       db.prepare(
         "UPDATE runs SET schema_version = ? WHERE schema_version < ?",
       ).run(schemaVersion, schemaVersion);
@@ -199,11 +212,6 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
 
   const insertRun = db.prepare(
     "INSERT INTO runs (run_id, graph_json, schema_version) VALUES (?, ?, ?)",
-  );
-  const selectRun = db.prepare(
-    `SELECT run_id, graph_json, finished, schema_version, outcome_json, graph_revision,
-       (SELECT COUNT(*) FROM events WHERE events.run_id = runs.run_id) AS revision
-     FROM runs WHERE run_id = ?`,
   );
   const selectRuns = db.prepare(
     "SELECT run_id, finished FROM runs ORDER BY rowid DESC",
@@ -252,9 +260,6 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   );
   const selectGraphRevisionCount = db.prepare(
     "SELECT COUNT(*) AS count FROM graph_revisions WHERE run_id = ?",
-  );
-  const updateGraphRevision = db.prepare(
-    "UPDATE runs SET graph_json = ?, graph_revision = ? WHERE run_id = ?",
   );
 
   function assertOpen(): void {
@@ -583,11 +588,9 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
           JSON.stringify(persisted),
         );
         if (accepted && persisted.graph !== undefined) {
-          updateGraphRevision.run(
-            JSON.stringify(persisted.graph),
-            current + 1,
-            runId,
-          );
+          db.prepare(
+            "UPDATE runs SET graph_json = ?, graph_revision = ? WHERE run_id = ?",
+          ).run(JSON.stringify(persisted.graph), current + 1, runId);
         }
         db.exec("COMMIT");
         return persisted;
@@ -766,15 +769,15 @@ function decodeGraphRevision(json: string): GraphRevision {
     typeof value.timestampMs !== "number" ||
     typeof value.proposal?.id !== "string" ||
     typeof value.proposal.proposer !== "string" ||
-    (value.decision.status !== "accepted" &&
-      value.decision.status !== "rejected") ||
+    (value.decision?.status !== "accepted" &&
+      value.decision?.status !== "rejected") ||
     !Array.isArray(value.addedNodeIds)
   ) {
     throw new Error("invalid persisted graph revision");
   }
   return Object.freeze({
     ...value,
-    addedNodeIds: Object.freeze([...value.addedNodeIds]),
+    addedNodeIds: Object.freeze([...(value.addedNodeIds as readonly string[])]),
     ...(value.graph === undefined
       ? {}
       : { graph: decodeGraph(JSON.stringify(value.graph)) }),

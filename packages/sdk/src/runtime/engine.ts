@@ -928,6 +928,10 @@ async function executeRun(
     retryDelays.delete(nodeId);
     originatingFailures.set(nodeId, failure);
     await propagateBlockedNodes();
+    // A proposal can add work unrelated to the node that just failed. It
+    // still has to be promoted here; otherwise the scheduler may conclude
+    // with that accepted node left pending.
+    await promoteReadyNodes();
   }
 
   async function dispatchReadyNodes(): Promise<void> {
