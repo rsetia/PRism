@@ -4,7 +4,7 @@ import type {
   GraphExpansionProposal,
   GraphProposalResult,
 } from "./graph-revision.js";
-import type { PersistedRunEvent, RunEvent } from "./events.js";
+import type { PersistedRunEvent, RunEvent, UsageReport } from "./events.js";
 import type { NodePhase } from "./events.js";
 import type { FailureClass } from "./types.js";
 import type { RunOutcome } from "./types.js";
@@ -53,9 +53,7 @@ export interface ExecutionContext {
   /** Persist a transition to a named execution phase for timing attribution. */
   readonly reportPhase: (phase: NodePhase) => Promise<void>;
   /** Append normalized provider usage for this attempt. */
-  readonly reportUsage?: (
-    usage: import("./events.js").UsageReport,
-  ) => Promise<void>;
+  readonly reportUsage?: (usage: UsageReport) => Promise<void>;
   /** Propose an append-only graph expansion through the engine's policy gate. */
   readonly submitGraphProposal?: (
     proposal: GraphExpansionProposal,

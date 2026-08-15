@@ -78,6 +78,9 @@ export function summarizeUsage(
       (usage.cachedTokens === undefined ||
         price.cachedPerMillion !== undefined);
     if (!priced || price === undefined) {
+      // A run-level cost is a total, not a lower bound. Preserve the known
+      // per-attempt event, but fail closed rather than presenting a partial
+      // authoritative amount as the run cost.
       return totalsWithUnknownCost(attempts, total);
     }
     priceVersion =

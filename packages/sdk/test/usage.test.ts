@@ -42,4 +42,12 @@ describe("summarizeUsage", () => {
     ]);
     expect(result).toMatchObject({ costUsd: null, costKind: "unknown" });
   });
+
+  test("does not present an authoritative lower bound as the run cost", () => {
+    const result = summarizeUsage([
+      usage(1, { costUsd: 0.5 }),
+      usage(2, { provider: "unknown", inputTokens: 1 }),
+    ]);
+    expect(result).toMatchObject({ costUsd: null, costKind: "unknown" });
+  });
 });
