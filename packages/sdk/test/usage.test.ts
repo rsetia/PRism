@@ -1,11 +1,8 @@
 import { describe, expect, test } from "vitest";
 import { summarizeUsage } from "../src/runtime/usage.js";
-import type { PersistedRunEvent } from "../src/index.js";
+import type { PersistedRunEvent, UsageReport } from "../src/index.js";
 
-function usage(
-  attempt: number,
-  report: Record<string, unknown>,
-): PersistedRunEvent {
+function usage(attempt: number, report: UsageReport): PersistedRunEvent {
   return {
     kind: "node_usage_reported",
     nodeId: "work",
@@ -13,7 +10,7 @@ function usage(
     usage: report,
     seq: attempt,
     timestampMs: attempt,
-  } as PersistedRunEvent;
+  };
 }
 
 describe("summarizeUsage", () => {
