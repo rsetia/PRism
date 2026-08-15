@@ -41,18 +41,28 @@ export function summarizeUsage(
   );
   if (attempts.length === 0) return null;
   const total = (key: keyof UsageReport): number | null => {
-    const values = attempts
-      .map(({ usage }) => usage[key])
-      .filter((value): value is number => typeof value === "number");
-    return values.length === 0
-      ? null
-      : values.reduce((sum, value) => sum + value, 0);
+    const values = attempts.map(({ usage }) => usage[key]);
+    return values.every((value): value is number => typeof value === "number")
+      ? values.reduce((sum, value) => sum + value, 0)
+      : null;
   };
-  const costUsd = total("costUsd");
-  let estimatedCost = 0;
+  let costUsd = 0;
+  let costKind: UsageTotals["costKind"] = "authoritative";
   let priceVersion: string | null = null;
-  let hasTokenUsage = false;
+  let hasPricedWork = false;
   for (const { usage } of attempts) {
+    if (usage.costUsd !== undefined) {
+      costUsd += usage.costUsd;
+      hasPricedWork = true;
+      continue;
+    }
+    const hasTokenUsage =
+      usage.inputTokens !== undefined ||
+      usage.outputTokens !== undefined ||
+      usage.cachedTokens !== undefined;
+    // An agent/tool-only event does not represent model-token cost and must
+    // not prevent a priceable model attempt from being estimated.
+    if (!hasTokenUsage) continue;
     const price = prices.find(
       (candidate) =>
         (candidate.provider === undefined ||
@@ -68,42 +78,47 @@ export function summarizeUsage(
       (usage.cachedTokens === undefined ||
         price.cachedPerMillion !== undefined);
     if (!priced || price === undefined) {
-      priceVersion = null;
-      hasTokenUsage = false;
-      break;
+      return totalsWithUnknownCost(attempts, total);
     }
-    if (priceVersion !== null && priceVersion !== price.version) {
-      priceVersion = null;
-      hasTokenUsage = false;
-      break;
-    }
-    priceVersion = price.version;
-    hasTokenUsage ||=
-      usage.inputTokens !== undefined ||
-      usage.outputTokens !== undefined ||
-      usage.cachedTokens !== undefined;
-    estimatedCost +=
+    priceVersion =
+      priceVersion === null || priceVersion === price.version
+        ? price.version
+        : null;
+    costKind = "estimated";
+    hasPricedWork = true;
+    costUsd +=
       ((usage.inputTokens ?? 0) * (price.inputPerMillion ?? 0) +
         (usage.outputTokens ?? 0) * (price.outputPerMillion ?? 0) +
         (usage.cachedTokens ?? 0) * (price.cachedPerMillion ?? 0)) /
       1_000_000;
   }
-  const derivedCost =
-    hasTokenUsage && priceVersion !== null ? estimatedCost : null;
+  if (!hasPricedWork) return totalsWithUnknownCost(attempts, total);
   return Object.freeze({
     inputTokens: total("inputTokens"),
     outputTokens: total("outputTokens"),
     cachedTokens: total("cachedTokens"),
     agentTurns: total("agentTurns"),
     toolCalls: total("toolCalls"),
-    costUsd: costUsd ?? derivedCost,
-    costKind:
-      costUsd === null
-        ? derivedCost === null
-          ? "unknown"
-          : "estimated"
-        : "authoritative",
-    priceVersion: costUsd === null ? priceVersion : null,
+    costUsd,
+    costKind,
+    priceVersion: costKind === "estimated" ? priceVersion : null,
     attempts: Object.freeze(attempts),
+  });
+}
+
+function totalsWithUnknownCost(
+  attempts: readonly AttemptUsage[],
+  total: (key: keyof UsageReport) => number | null,
+): UsageTotals {
+  return Object.freeze({
+    inputTokens: total("inputTokens"),
+    outputTokens: total("outputTokens"),
+    cachedTokens: total("cachedTokens"),
+    agentTurns: total("agentTurns"),
+    toolCalls: total("toolCalls"),
+    costUsd: null,
+    costKind: "unknown",
+    priceVersion: null,
+    attempts: Object.freeze([...attempts]),
   });
 }

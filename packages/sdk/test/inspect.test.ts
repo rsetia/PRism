@@ -443,9 +443,9 @@ describe("inspectRun", () => {
     expect(inspection.usage).toMatchObject({
       inputTokens: 30,
       outputTokens: 5,
-      cachedTokens: 5,
+      cachedTokens: null,
       agentTurns: 2,
-      toolCalls: 1,
+      toolCalls: null,
       costKind: "estimated",
       priceVersion: "fake-2026",
     });

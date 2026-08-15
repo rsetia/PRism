@@ -35,6 +35,7 @@ export class IllegalTransitionError extends Error {
  *   ready | resource_wait + node_resource_wait -> resource_wait
  *   ready | resource_wait + node_started -> running
  *   running | cancelling + node_phase_changed -> unchanged
+ *   running | cancelling + node_usage_reported -> unchanged
  *   running  + node_succeeded -> succeeded
  *   running  + node_failed    -> failed
  *   running  + node_retry_wait -> retry_wait
