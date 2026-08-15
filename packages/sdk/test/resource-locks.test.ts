@@ -14,10 +14,14 @@ import type {
   RunHandle,
 } from "../src/index.js";
 
-function graph(nodes: Record<string, unknown>, finalNode = "a"): CompiledGraph {
+function graph(
+  nodes: Record<string, unknown>,
+  finalNode = "a",
+  resources: Record<string, { capacity: number }> = { shared: { capacity: 1 } },
+): CompiledGraph {
   const parsed = parseGraph({
     version: 1,
-    resources: { shared: { capacity: 1 } },
+    resources,
     nodes,
     finalNode,
   });
@@ -175,5 +179,41 @@ describe("scheduler resources", () => {
     expect(await kinds(handle)).toEqual(
       expect.arrayContaining(["node_resource_wait", "node_cancelled"]),
     );
+  });
+
+  test("refreshes a wait reason only when the contended resources change", async () => {
+    const executor = controlled();
+    const handle = createEngine({
+      store: createMemoryStore(),
+      registry: createExecutorRegistry([executor.definition]),
+      maxConcurrency: 3,
+    }).run(
+      graph(
+        {
+          holdA: { executor: "controlled", resources: ["a"] },
+          holdB: { executor: "controlled", resources: ["b"] },
+          waiter: { executor: "controlled", resources: ["a", "b"] },
+        },
+        "waiter",
+        { a: { capacity: 1 }, b: { capacity: 1 } },
+      ),
+    );
+    const holdA = await executor.next();
+    const holdB = await executor.next();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    holdB.succeed();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    holdA.succeed();
+    const waiter = await executor.next();
+    waiter.succeed("done");
+    await handle.result;
+
+    const waits = [] as Array<readonly string[]>;
+    for await (const event of handle.events) {
+      if (event.kind === "node_resource_wait" && event.nodeId === "waiter") {
+        waits.push(event.resourceIds);
+      }
+    }
+    expect(waits).toEqual([["a"], ["a", "b"], ["a"]]);
   });
 });

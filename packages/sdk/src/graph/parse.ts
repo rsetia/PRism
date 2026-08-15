@@ -204,6 +204,7 @@ export function parseGraph(input: unknown): ParseResult {
         : undefined;
       if (hasWhen && input["version"] === 1) {
         errors.push({ code: "CONDITION_REQUIRES_VERSION_2", nodeId });
+      }
 
       const requestedResources: string[] = [];
       let requestedResourcesAreValid = true;
