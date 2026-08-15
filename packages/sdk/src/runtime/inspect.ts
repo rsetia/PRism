@@ -2,7 +2,7 @@ import type { CompiledGraph } from "../graph/types.js";
 import type { PersistedRunEvent } from "./events.js";
 import type { NodePhase } from "./events.js";
 import { reduceNodeState } from "./transitions.js";
-import type { Clock, RunStore } from "./ports.js";
+import type { Clock, RunLeaseStatus, RunStore } from "./ports.js";
 import type { NodeFailure, NodeState } from "./types.js";
 import { tryParseProofOfWork, type ProofOfWorkV1 } from "./proof-of-work.js";
 import type { JsonValue } from "../graph/types.js";
@@ -55,6 +55,8 @@ export interface RunInspection {
   readonly failures: readonly NodeFailure[];
   /** Null for empty or legacy timestamp-free event logs. */
   readonly timing: RunTiming | null;
+  /** Current non-expired ownership, without exposing owner identities. */
+  readonly leases?: readonly RunLeaseStatus[];
 }
 
 export interface CriticalPathTiming {
@@ -216,6 +218,7 @@ async function inspectRunSnapshot(
     events,
     timings,
   );
+  const leases = await store.getRunLeases(runId);
 
   return Object.freeze({
     runId,
@@ -223,6 +226,7 @@ async function inspectRunSnapshot(
     nodes: Object.freeze(nodes),
     failures: Object.freeze(failures),
     timing,
+    leases,
   });
 }
 

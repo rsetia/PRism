@@ -129,6 +129,26 @@ export interface RunSummary {
   readonly finished: boolean;
 }
 
+/** A time-bounded exclusive claim on either a run coordinator or one node. */
+export interface RunLease {
+  readonly kind: "coordinator" | "node";
+  readonly runId: string;
+  readonly nodeId?: string;
+  /** Opaque caller identity; stores never expose it to observers. */
+  readonly owner: string;
+  /** Monotonically increasing generation used to fence replaced owners. */
+  readonly fencingToken: number;
+  readonly expiresAtMs: number;
+}
+
+/** Safe ownership information suitable for status and inspect output. */
+export interface RunLeaseStatus {
+  readonly kind: RunLease["kind"];
+  readonly nodeId?: string;
+  readonly fencingToken: number;
+  readonly expiresAtMs: number;
+}
+
 /**
  * Persistence port. Contract (plan §4, decided):
  * - createRun rejects a duplicate runId.
@@ -159,12 +179,36 @@ export interface RunStore {
     runId: string,
     events: readonly RunEvent[],
     expectedRevision?: number,
+    lease?: RunLease,
   ): Promise<readonly PersistedRunEvent[]>;
   readEvents(runId: string, fromSeq?: number): AsyncIterable<PersistedRunEvent>;
   getRun(runId: string): Promise<StoredRun | undefined>;
   listRuns(): Promise<readonly RunSummary[]>;
-  finishRun(runId: string, outcome: RunOutcome): Promise<void>;
-  reopenRun(runId: string): Promise<void>;
+  finishRun(
+    runId: string,
+    outcome: RunOutcome,
+    lease?: RunLease,
+  ): Promise<void>;
+  reopenRun(runId: string, lease?: RunLease): Promise<void>;
+  /** Acquire an exclusive renewable coordinator lease, or reject on conflict. */
+  acquireCoordinatorLease(
+    runId: string,
+    owner: string,
+    durationMs: number,
+  ): Promise<RunLease>;
+  /** Acquire an exclusive renewable per-node lease, or reject on conflict. */
+  acquireNodeLease(
+    runId: string,
+    nodeId: string,
+    owner: string,
+    durationMs: number,
+  ): Promise<RunLease>;
+  /** Extend a lease only when its fencing token remains current. */
+  renewLease(lease: RunLease, durationMs: number): Promise<RunLease>;
+  /** Idempotently release a current lease. Stale releases cannot release a successor. */
+  releaseLease(lease: RunLease): Promise<void>;
+  /** Returns current non-expired ownership without exposing owner identities. */
+  getRunLeases(runId: string): Promise<readonly RunLeaseStatus[]>;
   close?(): Promise<void>;
 }
 

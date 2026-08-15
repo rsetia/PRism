@@ -97,6 +97,8 @@ export type {
   NodeExecutionOutcome,
   PutArtifactInput,
   RunStore,
+  RunLease,
+  RunLeaseStatus,
   StoredRun,
 } from "./runtime/ports.js";
 export { createEngine } from "./runtime/engine.js";

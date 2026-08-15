@@ -16,6 +16,7 @@ import type {
   ExecutorDefinition,
   ExecutorRegistry,
   NodeExecutionOutcome,
+  RunLease,
   RunStore,
 } from "./ports.js";
 import {
@@ -56,6 +57,10 @@ export interface EngineOptions {
    * retries; tests pass a manual clock so backoff is instant.
    */
   readonly clock?: Clock;
+  /** Opaque identity used for durable coordinator and node ownership. */
+  readonly leaseOwner?: string;
+  /** Lease lifetime in milliseconds. Renewed before every authoritative write. */
+  readonly leaseDurationMs?: number;
 }
 
 export interface RunOptions {
@@ -614,6 +619,9 @@ async function executeRun(
   clock: Clock | undefined,
   initialState?: RunExecutionState,
   initialRevision = 0,
+  coordinatorLease?: RunLease,
+  leaseOwner = "engine",
+  leaseDurationMs = 30_000,
 ): Promise<RunOutcome> {
   const executors = new Map<string, ExecutorDefinition>();
   const preflightFailures: NodeFailure[] = [];
@@ -673,6 +681,7 @@ async function executeRun(
   let cancellationReason: JsonValue = null;
   let revision = initialRevision;
   let appendTail = Promise.resolve();
+  let currentCoordinatorLease = coordinatorLease;
 
   function applyEvents(events: readonly RunEvent[]): Promise<void> {
     if (events.length === 0) {
@@ -680,6 +689,12 @@ async function executeRun(
     }
 
     const append = appendTail.then(async () => {
+      if (currentCoordinatorLease !== undefined) {
+        currentCoordinatorLease = await store.renewLease(
+          currentCoordinatorLease,
+          leaseDurationMs,
+        );
+      }
       const stagedStates = new Map<string, NodeState>();
       const persistable: RunEvent[] = [];
       for (const event of events) {
@@ -706,7 +721,12 @@ async function executeRun(
         return;
       }
 
-      const persisted = await store.appendEvents(runId, persistable, revision);
+      const persisted = await store.appendEvents(
+        runId,
+        persistable,
+        revision,
+        currentCoordinatorLease,
+      );
       if (persisted.length !== persistable.length) {
         throw new Error("store persisted a different number of events");
       }
@@ -930,16 +950,51 @@ async function executeRun(
       cancellation.register(nodeId, controller);
       inFlight.set(
         nodeId,
-        invokeExecutor(
-          runId,
-          getNode(graph, nodeId),
-          executor,
-          outputs,
-          controller.signal,
-          attempt,
-          (phase) =>
-            applyEvents([{ kind: "node_phase_changed", nodeId, phase }]),
-        ),
+        (async () => {
+          let nodeLease = await store.acquireNodeLease(
+            runId,
+            nodeId,
+            leaseOwner,
+            leaseDurationMs,
+          );
+          let renewalFailure: unknown;
+          const renewalTimer = setInterval(
+            () => {
+              void store
+                .renewLease(nodeLease, leaseDurationMs)
+                .then((renewed) => {
+                  nodeLease = renewed;
+                })
+                .catch((error: unknown) => {
+                  renewalFailure ??= error;
+                });
+            },
+            Math.max(1, Math.floor(leaseDurationMs / 2)),
+          );
+          try {
+            const result = await invokeExecutor(
+              runId,
+              getNode(graph, nodeId),
+              executor,
+              outputs,
+              controller.signal,
+              attempt,
+              (phase) =>
+                applyEvents([{ kind: "node_phase_changed", nodeId, phase }]),
+            );
+            if (renewalFailure !== undefined) {
+              throw renewalFailure instanceof Error
+                ? renewalFailure
+                : new Error("node lease renewal failed", {
+                    cause: renewalFailure,
+                  });
+            }
+            return result;
+          } finally {
+            clearInterval(renewalTimer);
+            await store.releaseLease(nodeLease);
+          }
+        })(),
       );
     }
   }
@@ -1280,6 +1335,12 @@ export function createEngine(options: EngineOptions): Engine {
   }
 
   const { store, registry, clock } = options;
+  const leaseDurationMs = options.leaseDurationMs ?? 30_000;
+  if (!Number.isFinite(leaseDurationMs) || leaseDurationMs <= 0) {
+    throw new Error("leaseDurationMs must be a finite number greater than 0");
+  }
+  const leaseOwner =
+    options.leaseOwner ?? `engine-${Math.random().toString(36).slice(2)}`;
   let nextRunNumber = 1;
 
   function createHandle(
@@ -1338,19 +1399,34 @@ export function createEngine(options: EngineOptions): Engine {
       );
       const result = (async (): Promise<RunOutcome> => {
         await creation;
-        const outcome = await executeRun(
-          graph,
+        let lease = await store.acquireCoordinatorLease(
           runId,
-          store,
-          registry,
-          maxConcurrency,
-          cancelGracePeriodMs,
-          cancellation,
-          retryPolicy,
-          clock,
+          leaseOwner,
+          leaseDurationMs,
         );
-        await store.finishRun(runId, outcome);
-        return outcome;
+        try {
+          const outcome = await executeRun(
+            graph,
+            runId,
+            store,
+            registry,
+            maxConcurrency,
+            cancelGracePeriodMs,
+            cancellation,
+            retryPolicy,
+            clock,
+            undefined,
+            0,
+            lease,
+            leaseOwner,
+            leaseDurationMs,
+          );
+          lease = await store.renewLease(lease, leaseDurationMs);
+          await store.finishRun(runId, outcome, lease);
+          return outcome;
+        } finally {
+          await store.releaseLease(lease);
+        }
       })();
       return createHandle(runId, creation, result, cancellation);
     },
@@ -1372,22 +1448,34 @@ export function createEngine(options: EngineOptions): Engine {
         if (stored.finished) {
           return stored.outcome;
         }
-
-        const outcome = await executeRun(
-          stored.graph,
+        let lease = await store.acquireCoordinatorLease(
           runId,
-          store,
-          registry,
-          maxConcurrency,
-          cancelGracePeriodMs,
-          cancellation,
-          retryPolicy,
-          clock,
-          execution,
-          stored.revision,
+          leaseOwner,
+          leaseDurationMs,
         );
-        await store.finishRun(runId, outcome);
-        return outcome;
+        try {
+          const outcome = await executeRun(
+            stored.graph,
+            runId,
+            store,
+            registry,
+            maxConcurrency,
+            cancelGracePeriodMs,
+            cancellation,
+            retryPolicy,
+            clock,
+            execution,
+            stored.revision,
+            lease,
+            leaseOwner,
+            leaseDurationMs,
+          );
+          lease = await store.renewLease(lease, leaseDurationMs);
+          await store.finishRun(runId, outcome, lease);
+          return outcome;
+        } finally {
+          await store.releaseLease(lease);
+        }
       })();
       return createHandle(runId, ready, result, cancellation);
     },
