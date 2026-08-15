@@ -60,7 +60,7 @@ async function recordedEvents(handle: RunHandle): Promise<PersistedRunEvent[]> {
 }
 
 function engine(executors: readonly ExecutorDefinition[] = []) {
-  const store = createMemoryStore({ now: () => 100 });
+  const store = tickingStore();
   return {
     store,
     engine: createEngine({
@@ -69,6 +69,12 @@ function engine(executors: readonly ExecutorDefinition[] = []) {
       maxConcurrency: 3,
     }),
   };
+}
+
+/** Event timestamps advance deterministically, making duration thresholds real. */
+function tickingStore() {
+  let now = 100;
+  return createMemoryStore({ now: () => now++ });
 }
 
 /** A no-I/O worker used by every deterministic evaluation fixture. */
@@ -90,6 +96,11 @@ function worker(effects: string[]): ExecutorDefinition {
 function assertHistory(events: readonly PersistedRunEvent[]): void {
   expect(events.some((event) => event.kind === "node_started")).toBe(true);
   expect(events.some((event) => event.timestampMs !== null)).toBe(true);
+  expect(
+    events.some((event) =>
+      ["node_succeeded", "node_failed", "node_cancelled"].includes(event.kind),
+    ),
+  ).toBe(true);
 }
 
 describe("deterministic production orchestration evaluations", () => {
@@ -195,7 +206,7 @@ describe("deterministic production orchestration evaluations", () => {
     {
       let attempts = 0;
       const clock = createManualClock();
-      const store = createMemoryStore({ now: () => 100 });
+      const store = tickingStore();
       const subject = createEngine({
         store,
         clock,
@@ -270,7 +281,7 @@ describe("deterministic production orchestration evaluations", () => {
 
     // Resume and stale-takeover rely on durable history and fenced leases.
     {
-      const store = createMemoryStore({ now: () => 100 });
+      const store = tickingStore();
       const input = graph({
         version: 1,
         nodes: { work: { executor: "constant", config: { value: "ok" } } },
@@ -288,13 +299,17 @@ describe("deterministic production orchestration evaluations", () => {
       const handle = subject.resume("crashed");
       await expect(handle.result).resolves.toMatchObject({ status: "failed" });
       record("crash/resume", await recordedEvents(handle));
-      const lease = await store.acquireCoordinatorLease("crashed", "old", 1);
+      const lease = await store.acquireCoordinatorLease(
+        "crashed",
+        "old",
+        1_000,
+      );
       await expect(
-        store.acquireCoordinatorLease("crashed", "new", 1),
+        store.acquireCoordinatorLease("crashed", "new", 1_000),
       ).rejects.toThrow("ownership conflict");
       await store.releaseLease(lease);
       await expect(
-        store.acquireCoordinatorLease("crashed", "new", 1),
+        store.acquireCoordinatorLease("crashed", "new", 1_000),
       ).resolves.toMatchObject({ owner: "new" });
       completed.push("stale lease takeover");
       validated.push("stale lease takeover");
@@ -304,7 +319,7 @@ describe("deterministic production orchestration evaluations", () => {
 
     // Both dynamic decisions are persisted, even when rejected by policy.
     {
-      const store = createMemoryStore({ now: () => 100 });
+      const store = tickingStore();
       await store.createRun({
         runId: "proposal",
         graph: graph({
