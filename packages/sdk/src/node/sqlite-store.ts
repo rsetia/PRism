@@ -136,6 +136,9 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
       PRIMARY KEY (run_id, kind, node_id),
       FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
     ) STRICT;
+    CREATE TABLE IF NOT EXISTS lease_fencing_tokens (
+      token INTEGER PRIMARY KEY AUTOINCREMENT
+    ) STRICT;
   `);
 
   const newestRun = db
@@ -202,8 +205,8 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   const selectLease = db.prepare(
     "SELECT owner, fencing_token, expires_at_ms FROM run_leases WHERE run_id = ? AND kind = ? AND node_id = ?",
   );
-  const maxFencingToken = db.prepare(
-    "SELECT COALESCE(MAX(fencing_token), 0) + 1 AS token FROM run_leases",
+  const allocateFencingToken = db.prepare(
+    "INSERT INTO lease_fencing_tokens DEFAULT VALUES",
   );
   const upsertLease = db.prepare(
     "INSERT INTO run_leases (run_id, kind, node_id, owner, fencing_token, expires_at_ms) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(run_id, kind, node_id) DO UPDATE SET owner = excluded.owner, fencing_token = excluded.fencing_token, expires_at_ms = excluded.expires_at_ms",
@@ -473,7 +476,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
           readString(current, "owner") !== owner
         )
           throw new Error(`lease ownership conflict for run: "${runId}"`);
-        const token = readNumber(maxFencingToken.get(), "token");
+        const token = Number(allocateFencingToken.run().lastInsertRowid);
         const expiresAtMs = now() + durationMs;
         upsertLease.run(runId, kind, key, owner, token, expiresAtMs);
         db.exec("COMMIT");
@@ -540,18 +543,16 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   function getRunLeases(runId: string): Promise<readonly RunLeaseStatus[]> {
     return capture(() =>
       Object.freeze(
-        selectRunLeases
-          .all(runId, now())
-          .map((row) =>
-            Object.freeze({
-              kind: readString(row, "kind") as RunLease["kind"],
-              ...(readString(row, "node_id") === ""
-                ? {}
-                : { nodeId: readString(row, "node_id") }),
-              fencingToken: readNumber(row, "fencing_token"),
-              expiresAtMs: readNumber(row, "expires_at_ms"),
-            }),
-          ),
+        selectRunLeases.all(runId, now()).map((row) =>
+          Object.freeze({
+            kind: readString(row, "kind") as RunLease["kind"],
+            ...(readString(row, "node_id") === ""
+              ? {}
+              : { nodeId: readString(row, "node_id") }),
+            fencingToken: readNumber(row, "fencing_token"),
+            expiresAtMs: readNumber(row, "expires_at_ms"),
+          }),
+        ),
       ),
     );
   }
