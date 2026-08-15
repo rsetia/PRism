@@ -99,4 +99,49 @@ describe("createLocalExecutionBackend file protocol", () => {
       output: "workspace",
     });
   });
+
+  test("uses a filtered environment by default", async () => {
+    process.env["PRISM_BACKEND_UNDECLARED"] = "host-secret";
+    const instance = backend();
+    try {
+      const handle = await instance.launch(
+        spec({ config: { mode: "echo", captureEnvironment: true } }),
+      );
+      await waitForExit(instance, handle);
+      if (handle.nodeDir === undefined) throw new Error("missing node dir");
+      const environment = JSON.parse(
+        readFileSync(join(handle.nodeDir, "captured-env.json"), "utf8"),
+      ) as Record<string, string>;
+      expect(environment["PRISM_BACKEND_UNDECLARED"]).toBeUndefined();
+      expect(environment["PRISM_NODE_DIR"]).toBe(handle.nodeDir);
+    } finally {
+      delete process.env["PRISM_BACKEND_UNDECLARED"];
+    }
+  });
+
+  test("redacts configured secrets in collected and persisted errors", async () => {
+    const secret = "backend-secret-value";
+    const instance = createLocalExecutionBackend({
+      command: process.execPath,
+      args: [WORKER],
+      baseDir: join(tempDir, "redaction"),
+      executionPolicy: {
+        mode: "isolated",
+        environment: { redactValues: [secret] },
+      },
+    });
+    const handle = await instance.launch(
+      spec({ config: { mode: "fail", error: `failed: ${secret}` } }),
+    );
+    await waitForExit(instance, handle);
+    const result = await instance.collect(handle);
+    expect(result).toEqual({
+      status: "failed",
+      error: "failed: [REDACTED]",
+    });
+    if (handle.nodeDir === undefined) throw new Error("missing node dir");
+    expect(
+      JSON.parse(readFileSync(join(handle.nodeDir, "result.json"), "utf8")),
+    ).toEqual(result);
+  });
 });

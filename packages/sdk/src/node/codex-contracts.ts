@@ -348,6 +348,7 @@ Result:
 
   return freezeContract({
     instructions,
+    requiredExecutionMode: "trusted-local",
     dangerouslyBypassApprovalsAndSandbox: true,
     allowsGitMutation: true,
     allowsGitHubIo: true,
@@ -395,6 +396,7 @@ Result:
 
   return freezeContract({
     instructions,
+    requiredExecutionMode: "trusted-local",
     dangerouslyBypassApprovalsAndSandbox: true,
     allowsGitMutation: true,
     allowsGitHubIo: true,
@@ -456,6 +458,7 @@ Result:
 
   return freezeContract({
     instructions,
+    requiredExecutionMode: "trusted-local",
     dangerouslyBypassApprovalsAndSandbox: true,
     allowsGitMutation: true,
     allowsGitHubIo: true,
