@@ -1228,6 +1228,7 @@ async function inspectCommand(
           graphRevisions: inspection.graphRevisions ?? [],
           timing: inspection.timing,
           leases: inspection.leases,
+          usage: inspection.usage ?? null,
         }),
       );
     } else {
@@ -1243,6 +1244,12 @@ async function inspectCommand(
         if (node.evidence !== null) {
           io.stdout(`  evidence: ${formatEvidenceSummary(node.evidence)}`);
         }
+      }
+      const usage = inspection.usage;
+      if (usage !== undefined && usage !== null) {
+        io.stdout(
+          `usage: ${usage.inputTokens ?? "unknown"} input tokens · ${usage.outputTokens ?? "unknown"} output tokens · ${usage.costUsd === null ? "cost unknown" : `$${usage.costUsd.toFixed(4)} ${usage.costKind}`}`,
+        );
       }
       for (const failure of inspection.failures) {
         io.stdout(`failure ${failure.nodeId}: ${stringifyJson(failure.cause)}`);

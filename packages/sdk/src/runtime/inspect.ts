@@ -4,6 +4,7 @@ import type { NodePhase } from "./events.js";
 import { reduceNodeState } from "./transitions.js";
 import type { Clock, RunLeaseStatus, RunStore } from "./ports.js";
 import type { NodeFailure, NodeState } from "./types.js";
+import { summarizeUsage, type UsageTotals } from "./usage.js";
 import { tryParseProofOfWork, type ProofOfWorkV1 } from "./proof-of-work.js";
 import type { JsonValue } from "../graph/types.js";
 import type { GraphRevision } from "./graph-revision.js";
@@ -60,6 +61,7 @@ export interface RunInspection {
   readonly timing: RunTiming | null;
   /** Current non-expired ownership, without exposing owner identities. */
   readonly leases?: readonly RunLeaseStatus[];
+  readonly usage?: UsageTotals | null;
 }
 
 export interface CriticalPathTiming {
@@ -233,6 +235,7 @@ async function inspectRunSnapshot(
         ? Object.freeze([])
         : await store.listGraphRevisions(runId),
     timing,
+    usage: summarizeUsage(events),
     leases,
   });
 }
@@ -452,6 +455,7 @@ function calculateNodeTimings(
         completeTiming(timing, timestampMs);
         break;
       case "node_cancelling":
+      case "node_usage_reported":
         break;
       default: {
         const unhandled: never = event;

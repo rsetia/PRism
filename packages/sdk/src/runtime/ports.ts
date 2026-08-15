@@ -52,6 +52,10 @@ export interface ExecutionContext {
   readonly signal: AbortSignal;
   /** Persist a transition to a named execution phase for timing attribution. */
   readonly reportPhase: (phase: NodePhase) => Promise<void>;
+  /** Append normalized provider usage for this attempt. */
+  readonly reportUsage?: (
+    usage: import("./events.js").UsageReport,
+  ) => Promise<void>;
   /** Propose an append-only graph expansion through the engine's policy gate. */
   readonly submitGraphProposal?: (
     proposal: GraphExpansionProposal,

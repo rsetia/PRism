@@ -261,6 +261,7 @@ async function invokeExecutor(
   signal: AbortSignal,
   attempt: number,
   reportPhase: ExecutionContext["reportPhase"],
+  reportUsage: NonNullable<ExecutionContext["reportUsage"]>,
   submitProposal: NonNullable<ExecutionContext["submitGraphProposal"]>,
 ): Promise<SchedulerEvent> {
   const inputs = Object.freeze(
@@ -283,6 +284,7 @@ async function invokeExecutor(
           inputs,
           signal,
           reportPhase,
+          reportUsage,
           submitGraphProposal: submitProposal,
         }
       : {
@@ -294,6 +296,7 @@ async function invokeExecutor(
           config: node.config,
           signal,
           reportPhase,
+          reportUsage,
           submitGraphProposal: submitProposal,
         },
   );
@@ -575,6 +578,7 @@ function replayExecutionState(
       case "node_blocked":
       case "node_cancelling":
       case "node_skipped":
+      case "node_usage_reported":
         break;
       default: {
         const unhandledEvent: never = event;
@@ -1037,6 +1041,10 @@ async function executeRun(
               attempt,
               (phase) =>
                 applyEvents([{ kind: "node_phase_changed", nodeId, phase }]),
+              (usage) =>
+                applyEvents([
+                  { kind: "node_usage_reported", nodeId, attempt, usage },
+                ]),
               submitProposal,
             );
             if (renewalFailure !== undefined) {

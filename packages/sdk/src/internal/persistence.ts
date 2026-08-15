@@ -150,6 +150,15 @@ export function snapshotRunEvent(
         ...persisted,
       });
 
+    case "node_usage_reported":
+      return Object.freeze({
+        kind: event.kind,
+        nodeId: event.nodeId,
+        attempt: event.attempt,
+        usage: Object.freeze({ ...event.usage }),
+        ...persisted,
+      });
+
     case "node_blocked":
       return Object.freeze({
         kind: event.kind,

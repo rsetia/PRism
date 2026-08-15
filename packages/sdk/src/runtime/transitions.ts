@@ -77,6 +77,10 @@ export function reduceNodeState(
       }
       break;
 
+    case "node_usage_reported":
+      if (previous === "running" || previous === "cancelling") return previous;
+      break;
+
     case "node_succeeded":
       if (previous === "running") {
         return "succeeded";
