@@ -22,6 +22,13 @@ export interface NodeInspection {
   readonly timing: NodeTiming | null;
   /** Structured agent evidence; null for generic and legacy outputs. */
   readonly evidence: ProofOfWorkV1 | null;
+  /** Current node ownership without exposing the opaque owner identity. */
+  readonly lease?: LeaseInspection | null;
+}
+
+export interface LeaseInspection {
+  readonly expiresAtMs: number;
+  readonly fencingToken: number;
 }
 
 export type NodeTimingPhase =
@@ -54,6 +61,8 @@ export interface RunInspection {
   readonly failures: readonly NodeFailure[];
   /** Null for empty or legacy timestamp-free event logs. */
   readonly timing: RunTiming | null;
+  /** Current coordinator ownership without host or owner metadata. */
+  readonly coordinatorLease?: LeaseInspection | null;
 }
 
 export interface CriticalPathTiming {
@@ -195,7 +204,20 @@ async function inspectRunSnapshot(
       ? stored.outcome.failures
       : eventFailures;
 
-  const nodes = stored.graph.order.map((nodeId) => {
+  const leaseView = (
+    lease: { expiresAtMs: number; fencingToken: number } | undefined,
+  ): LeaseInspection | null =>
+    lease === undefined
+      ? null
+      : Object.freeze({
+          expiresAtMs: lease.expiresAtMs,
+          fencingToken: lease.fencingToken,
+        });
+  const coordinatorLease = await store.getLease?.(runId);
+  const nodeLeases = await Promise.all(
+    stored.graph.order.map((nodeId) => store.getLease?.(runId, nodeId)),
+  );
+  const nodes = stored.graph.order.map((nodeId, index) => {
     const state = states.get(nodeId);
     if (state === undefined) {
       throw new Error(`compiled graph order contains unknown node "${nodeId}"`);
@@ -207,6 +229,9 @@ async function inspectRunSnapshot(
       evidence: outputByNode.has(nodeId)
         ? tryParseProofOfWork(outputByNode.get(nodeId) as JsonValue)
         : null,
+      ...(leaseView(nodeLeases[index]) === null
+        ? {}
+        : { lease: leaseView(nodeLeases[index]) }),
     });
   });
   const timing = calculateRunTiming(
@@ -222,6 +247,9 @@ async function inspectRunSnapshot(
     nodes: Object.freeze(nodes),
     failures: Object.freeze(failures),
     timing,
+    ...(leaseView(coordinatorLease) === null
+      ? {}
+      : { coordinatorLease: leaseView(coordinatorLease) }),
   });
 }
 

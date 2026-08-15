@@ -110,10 +110,10 @@ describe("sqlite durability", () => {
     await store.close?.();
 
     // The append above is a write, so only now is the file stamped as
-    // version 2.
+    // version 3 (which includes the backwards-compatible lease table).
     const stamped = new DatabaseSync(path);
     expect(stamped.prepare("PRAGMA user_version").get()).toEqual({
-      user_version: 2,
+      user_version: 3,
     });
     stamped.close();
   });

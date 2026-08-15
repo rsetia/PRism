@@ -7,7 +7,14 @@ import {
   snapshotRunOutcome,
 } from "../internal/persistence.js";
 import type { PersistedRunEvent, RunEvent } from "../runtime/events.js";
-import type { RunStore, RunSummary, StoredRun } from "../runtime/ports.js";
+import type {
+  AcquireLeaseInput,
+  LeaseFence,
+  RunLease,
+  RunStore,
+  RunSummary,
+  StoredRun,
+} from "../runtime/ports.js";
 import type { RunOutcome } from "../runtime/types.js";
 
 export interface SqliteStoreOptions {
@@ -83,7 +90,7 @@ function openDatabase(path: string): Database {
  * persisted runs and events unchanged — that is what makes resume work.
  */
 export function createSqliteStore(options: SqliteStoreOptions): RunStore {
-  const schemaVersion = 2;
+  const schemaVersion = 3;
   const db = openDatabase(options.path);
   const now = options.now ?? Date.now;
   let closed = false;
@@ -118,6 +125,15 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
       seq INTEGER NOT NULL CHECK (seq >= 0),
       event_json TEXT NOT NULL,
       PRIMARY KEY (run_id, seq),
+      FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS run_leases (
+      run_id TEXT NOT NULL,
+      node_id TEXT NOT NULL DEFAULT '',
+      owner TEXT NOT NULL,
+      expires_at_ms INTEGER NOT NULL,
+      fencing_token INTEGER NOT NULL CHECK (fencing_token > 0),
+      PRIMARY KEY (run_id, node_id),
       FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
     ) STRICT;
   `);
@@ -183,6 +199,44 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   const reopenRunStatement = db.prepare(
     "UPDATE runs SET finished = 0, outcome_json = NULL WHERE run_id = ?",
   );
+  const selectLease = db.prepare(
+    "SELECT run_id, node_id, owner, expires_at_ms, fencing_token FROM run_leases WHERE run_id = ? AND node_id = ?",
+  );
+  const upsertLease = db.prepare(
+    `INSERT INTO run_leases (run_id, node_id, owner, expires_at_ms, fencing_token)
+     VALUES (?, ?, ?, ?, ?)
+     ON CONFLICT(run_id, node_id) DO UPDATE SET owner = excluded.owner, expires_at_ms = excluded.expires_at_ms, fencing_token = excluded.fencing_token`,
+  );
+  const deleteLease = db.prepare(
+    "DELETE FROM run_leases WHERE run_id = ? AND node_id = ? AND owner = ? AND fencing_token = ?",
+  );
+
+  const nodeKey = (nodeId: string | undefined): string => nodeId ?? "";
+  const toLease = (row: Record<string, unknown>): RunLease =>
+    Object.freeze({
+      runId: readString(row, "run_id"),
+      ...(readString(row, "node_id") === ""
+        ? {}
+        : { nodeId: readString(row, "node_id") }),
+      owner: readString(row, "owner"),
+      expiresAtMs: readNumber(row, "expires_at_ms"),
+      fencingToken: readNumber(row, "fencing_token"),
+    });
+  function assertFence(runId: string, fence: LeaseFence | undefined): void {
+    if (fence === undefined) return;
+    if (fence.runId !== runId)
+      throw new Error(`lease fence targets another run: "${fence.runId}"`);
+    const row = selectLease.get(runId, nodeKey(fence.nodeId));
+    if (row === undefined)
+      throw new Error(`lease fencing conflict for run "${runId}"`);
+    const current = toLease(row);
+    if (
+      current.owner !== fence.owner ||
+      current.fencingToken !== fence.fencingToken ||
+      current.expiresAtMs <= now()
+    )
+      throw new Error(`lease fencing conflict for run "${runId}"`);
+  }
 
   function assertOpen(): void {
     if (closed) {
@@ -228,6 +282,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     runId: string,
     events: readonly RunEvent[],
     expectedRevision?: number,
+    fence?: LeaseFence,
   ): Promise<readonly PersistedRunEvent[]> {
     return capture(() => {
       assertOpen();
@@ -241,6 +296,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
         if (readNumber(run, "finished") === 1) {
           throw new Error(`run is already finished: "${runId}"`);
         }
+        assertFence(runId, fence);
 
         const nextSequenceRow = selectNextSequence.get(runId);
         let sequence = readNumber(nextSequenceRow, "next_seq");
@@ -347,7 +403,11 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     });
   }
 
-  function finishRun(runId: string, outcome: RunOutcome): Promise<void> {
+  function finishRun(
+    runId: string,
+    outcome: RunOutcome,
+    fence?: LeaseFence,
+  ): Promise<void> {
     return capture(() => {
       assertOpen();
       ensureSchemaCurrent();
@@ -358,16 +418,18 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
       if (readNumber(run, "finished") === 1) {
         return;
       }
+      assertFence(runId, fence);
       const persistedOutcome = snapshotRunOutcome(outcome);
       finishRunStatement.run(JSON.stringify(persistedOutcome), runId);
       wakeReaders(runId);
     });
   }
 
-  function reopenRun(runId: string): Promise<void> {
+  function reopenRun(runId: string, fence?: LeaseFence): Promise<void> {
     return capture(() => {
       assertOpen();
       ensureSchemaCurrent();
+      assertFence(runId, fence);
       const result = reopenRunStatement.run(runId);
       if (result.changes === 0) {
         throw new Error(`unknown run: "${runId}"`);
@@ -385,6 +447,105 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
         }),
       );
       return Object.freeze(summaries);
+    });
+  }
+
+  function acquireLease(input: AcquireLeaseInput): Promise<RunLease> {
+    return capture(() => {
+      assertOpen();
+      if (
+        !Number.isSafeInteger(input.ttlMs) ||
+        input.ttlMs <= 0 ||
+        input.owner.length === 0
+      )
+        throw new Error("lease owner and ttlMs must be non-empty and positive");
+      ensureSchemaCurrent();
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        if (selectRun.get(input.runId) === undefined)
+          throw new Error(`unknown run: "${input.runId}"`);
+        const row = selectLease.get(input.runId, nodeKey(input.nodeId));
+        const current = row === undefined ? undefined : toLease(row);
+        const at = now();
+        if (
+          current !== undefined &&
+          current.expiresAtMs > at &&
+          current.owner !== input.owner
+        )
+          throw new Error(`lease ownership conflict for run "${input.runId}"`);
+        const lease: RunLease = Object.freeze({
+          runId: input.runId,
+          ...(input.nodeId === undefined ? {} : { nodeId: input.nodeId }),
+          owner: input.owner,
+          expiresAtMs: at + input.ttlMs,
+          fencingToken:
+            current === undefined
+              ? 1
+              : current.fencingToken + (current.owner === input.owner ? 0 : 1),
+        });
+        upsertLease.run(
+          lease.runId,
+          nodeKey(lease.nodeId),
+          lease.owner,
+          lease.expiresAtMs,
+          lease.fencingToken,
+        );
+        db.exec("COMMIT");
+        return lease;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  function renewLease(lease: RunLease, ttlMs: number): Promise<RunLease> {
+    return capture(() => {
+      assertOpen();
+      if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0)
+        throw new Error("lease ttlMs must be a positive integer");
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        assertFence(lease.runId, lease);
+        const renewed = Object.freeze({ ...lease, expiresAtMs: now() + ttlMs });
+        upsertLease.run(
+          renewed.runId,
+          nodeKey(renewed.nodeId),
+          renewed.owner,
+          renewed.expiresAtMs,
+          renewed.fencingToken,
+        );
+        db.exec("COMMIT");
+        return renewed;
+      } catch (error) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  function releaseLease(lease: RunLease): Promise<void> {
+    return capture(() => {
+      assertOpen();
+      deleteLease.run(
+        lease.runId,
+        nodeKey(lease.nodeId),
+        lease.owner,
+        lease.fencingToken,
+      );
+    });
+  }
+
+  function getLease(
+    runId: string,
+    nodeId?: string,
+  ): Promise<RunLease | undefined> {
+    return capture(() => {
+      assertOpen();
+      const row = selectLease.get(runId, nodeKey(nodeId));
+      if (row === undefined) return undefined;
+      const lease = toLease(row);
+      return lease.expiresAtMs <= now() ? undefined : lease;
     });
   }
 
@@ -409,6 +570,10 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     listRuns,
     finishRun,
     reopenRun,
+    acquireLease,
+    renewLease,
+    releaseLease,
+    getLease,
     close,
   });
 }

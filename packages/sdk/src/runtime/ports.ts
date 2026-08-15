@@ -102,6 +102,30 @@ export interface CreateRunInput {
   readonly graph: CompiledGraph;
 }
 
+/** A renewable, fenced claim to coordinate a run or execute one node. */
+export interface RunLease {
+  readonly runId: string;
+  /** Omitted for the run-wide coordinator lease. */
+  readonly nodeId?: string;
+  readonly owner: string;
+  readonly expiresAtMs: number;
+  /** Increases on every takeover; stale owners can never become current again. */
+  readonly fencingToken: number;
+}
+
+export interface AcquireLeaseInput {
+  readonly runId: string;
+  readonly nodeId?: string;
+  readonly owner: string;
+  readonly ttlMs: number;
+}
+
+/** A write fence is deliberately the lease itself, not just its token. */
+export type LeaseFence = Pick<
+  RunLease,
+  "runId" | "nodeId" | "owner" | "fencingToken"
+>;
+
 interface StoredRunBase {
   readonly runId: string;
   readonly graph: CompiledGraph;
@@ -159,12 +183,25 @@ export interface RunStore {
     runId: string,
     events: readonly RunEvent[],
     expectedRevision?: number,
+    fence?: LeaseFence,
   ): Promise<readonly PersistedRunEvent[]>;
   readEvents(runId: string, fromSeq?: number): AsyncIterable<PersistedRunEvent>;
   getRun(runId: string): Promise<StoredRun | undefined>;
   listRuns(): Promise<readonly RunSummary[]>;
-  finishRun(runId: string, outcome: RunOutcome): Promise<void>;
-  reopenRun(runId: string): Promise<void>;
+  finishRun(
+    runId: string,
+    outcome: RunOutcome,
+    fence?: LeaseFence,
+  ): Promise<void>;
+  reopenRun(runId: string, fence?: LeaseFence): Promise<void>;
+  /** Atomically acquire a coordinator (no nodeId) or node lease. */
+  acquireLease?(input: AcquireLeaseInput): Promise<RunLease>;
+  /** Extend a current lease. Rejects expiry, takeover, and stale fencing. */
+  renewLease?(lease: RunLease, ttlMs: number): Promise<RunLease>;
+  /** Best-effort release; a stale lease cannot release its replacement. */
+  releaseLease?(lease: RunLease): Promise<void>;
+  /** Current unexpired ownership, for status/inspect without host metadata. */
+  getLease?(runId: string, nodeId?: string): Promise<RunLease | undefined>;
   close?(): Promise<void>;
 }
 

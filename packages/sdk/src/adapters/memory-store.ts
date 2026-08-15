@@ -4,7 +4,14 @@ import {
   snapshotRunOutcome,
 } from "../internal/persistence.js";
 import type { PersistedRunEvent, RunEvent } from "../runtime/events.js";
-import type { RunStore, RunSummary, StoredRun } from "../runtime/ports.js";
+import type {
+  AcquireLeaseInput,
+  LeaseFence,
+  RunLease,
+  RunStore,
+  RunSummary,
+  StoredRun,
+} from "../runtime/ports.js";
 import type { RunOutcome } from "../runtime/types.js";
 
 interface MemoryRun {
@@ -47,7 +54,25 @@ export interface MemoryStoreOptions {
 
 export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
   const runs = new Map<string, MemoryRun>();
+  const leases = new Map<string, RunLease>();
   const now = options.now ?? Date.now;
+
+  const leaseKey = (runId: string, nodeId?: string): string =>
+    `${runId}\u0000${nodeId ?? ""}`;
+  const assertFence = (runId: string, fence: LeaseFence | undefined): void => {
+    if (fence === undefined) return;
+    if (fence.runId !== runId)
+      throw new Error(`lease fence targets another run: "${fence.runId}"`);
+    const current = leases.get(leaseKey(runId, fence.nodeId));
+    if (
+      current === undefined ||
+      current.owner !== fence.owner ||
+      current.fencingToken !== fence.fencingToken ||
+      current.expiresAtMs <= now()
+    ) {
+      throw new Error(`lease fencing conflict for run "${runId}"`);
+    }
+  };
 
   function createRun(input: {
     readonly runId: string;
@@ -72,6 +97,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     runId: string,
     events: readonly RunEvent[],
     expectedRevision?: number,
+    fence?: LeaseFence,
   ): Promise<readonly PersistedRunEvent[]> {
     const run = runs.get(runId);
     if (run === undefined) {
@@ -80,6 +106,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     if (run.finished) {
       return Promise.reject(new Error(`run is already finished: "${runId}"`));
     }
+    assertFence(runId, fence);
     if (
       expectedRevision !== undefined &&
       expectedRevision !== run.events.length
@@ -176,13 +203,22 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     return Promise.resolve(Object.freeze({ ...base, finished: false }));
   }
 
-  function finishRun(runId: string, outcome: RunOutcome): Promise<void> {
+  function finishRun(
+    runId: string,
+    outcome: RunOutcome,
+    fence?: LeaseFence,
+  ): Promise<void> {
     const run = runs.get(runId);
     if (run === undefined) {
       return Promise.reject(new Error(`unknown run: "${runId}"`));
     }
     if (run.finished) {
       return Promise.resolve();
+    }
+    try {
+      assertFence(runId, fence);
+    } catch (error) {
+      return Promise.reject(error);
     }
 
     try {
@@ -199,10 +235,15 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     return Promise.resolve();
   }
 
-  function reopenRun(runId: string): Promise<void> {
+  function reopenRun(runId: string, fence?: LeaseFence): Promise<void> {
     const run = runs.get(runId);
     if (run === undefined) {
       return Promise.reject(new Error(`unknown run: "${runId}"`));
+    }
+    try {
+      assertFence(runId, fence);
+    } catch (error) {
+      return Promise.reject(error);
     }
     run.finished = false;
     run.outcome = undefined;
@@ -218,6 +259,79 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     return Promise.resolve(Object.freeze(summaries));
   }
 
+  function acquireLease(input: AcquireLeaseInput): Promise<RunLease> {
+    if (
+      !Number.isSafeInteger(input.ttlMs) ||
+      input.ttlMs <= 0 ||
+      input.owner.length === 0
+    ) {
+      return Promise.reject(
+        new Error("lease owner and ttlMs must be non-empty and positive"),
+      );
+    }
+    if (!runs.has(input.runId))
+      return Promise.reject(new Error(`unknown run: "${input.runId}"`));
+    const key = leaseKey(input.runId, input.nodeId);
+    const current = leases.get(key);
+    const at = now();
+    if (
+      current !== undefined &&
+      current.expiresAtMs > at &&
+      current.owner !== input.owner
+    ) {
+      return Promise.reject(
+        new Error(`lease ownership conflict for run "${input.runId}"`),
+      );
+    }
+    const lease = Object.freeze({
+      runId: input.runId,
+      ...(input.nodeId === undefined ? {} : { nodeId: input.nodeId }),
+      owner: input.owner,
+      expiresAtMs: at + input.ttlMs,
+      fencingToken:
+        current === undefined
+          ? 1
+          : current.fencingToken + (current.owner === input.owner ? 0 : 1),
+    });
+    leases.set(key, lease);
+    return Promise.resolve(lease);
+  }
+
+  function renewLease(lease: RunLease, ttlMs: number): Promise<RunLease> {
+    if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0)
+      return Promise.reject(
+        new Error("lease ttlMs must be a positive integer"),
+      );
+    try {
+      assertFence(lease.runId, lease);
+      const renewed = Object.freeze({ ...lease, expiresAtMs: now() + ttlMs });
+      leases.set(leaseKey(lease.runId, lease.nodeId), renewed);
+      return Promise.resolve(renewed);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
+  function releaseLease(lease: RunLease): Promise<void> {
+    const current = leases.get(leaseKey(lease.runId, lease.nodeId));
+    if (
+      current?.owner === lease.owner &&
+      current.fencingToken === lease.fencingToken
+    )
+      leases.delete(leaseKey(lease.runId, lease.nodeId));
+    return Promise.resolve();
+  }
+
+  function getLease(
+    runId: string,
+    nodeId?: string,
+  ): Promise<RunLease | undefined> {
+    const lease = leases.get(leaseKey(runId, nodeId));
+    return Promise.resolve(
+      lease === undefined || lease.expiresAtMs <= now() ? undefined : lease,
+    );
+  }
+
   return Object.freeze({
     createRun,
     appendEvents,
@@ -226,5 +340,9 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     listRuns,
     finishRun,
     reopenRun,
+    acquireLease,
+    renewLease,
+    releaseLease,
+    getLease,
   });
 }
