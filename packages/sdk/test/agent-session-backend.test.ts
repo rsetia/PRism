@@ -101,3 +101,35 @@ test("classifies backend protocol errors", async () => {
     failureClass: "transient_infra",
   });
 });
+
+test("uses the durable run, node, and attempt identity to isolate sessions", async () => {
+  const nodeDir = mkdtempSync(join(tmpdir(), "prism-session-"));
+  directories.push(nodeDir);
+  const calls: string[] = [];
+  const backend: AgentSessionBackend = {
+    name: "fake",
+    async start(input) {
+      calls.push(`start:${input.key.attempt}`);
+      return { id: `session-${String(input.key.attempt)}`, state: null };
+    },
+    async resume(_input, session) {
+      calls.push(`resume:${session.id}`);
+      return session;
+    },
+    async steer() {},
+    async interrupt() {},
+    async *events() {
+      yield {
+        kind: "result",
+        result: { status: "succeeded", output: null },
+      } as const;
+    },
+  };
+  await runAgentSession(input(nodeDir), { backend });
+  await runAgentSession(input(nodeDir), { backend });
+  await runAgentSession(
+    { ...input(nodeDir), key: { runId: "run", nodeId: "node", attempt: 2 } },
+    { backend },
+  );
+  expect(calls).toEqual(["start:1", "resume:session-1", "start:2"]);
+});

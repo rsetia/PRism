@@ -9,6 +9,7 @@ import {
   createBeadsUpdateExecutor,
   createCodexEngine,
   createCodexExecutor,
+  createFileAgentSessionStore,
   createFileLogBackend,
   createGitWorktreeProvisioner,
   createMergePrExecutor,
@@ -76,6 +77,16 @@ export function createAgentExecutorRegistry(
       ...(options.sessionBackend === undefined
         ? { engine: codexEngine }
         : { sessionBackend: options.sessionBackend }),
+      ...(options.sessionBackend === undefined
+        ? {}
+        : {
+            // Session records must outlive both a provisioned worktree and
+            // the process that created this registry. Logs are already kept
+            // in the project-scoped durable Prism directory.
+            sessionStore: createFileAgentSessionStore(
+              join(logBaseDir, "agent-sessions"),
+            ),
+          }),
       provisioner,
       logBackend,
     });

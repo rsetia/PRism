@@ -56,13 +56,25 @@ export interface AgentSessionStore {
 
 const SESSION_FILE = "agent-session.json";
 
-/** A node-directory store: its location is already durable/auditable worker state. */
+/**
+ * A durable store rooted outside transient worker directories. Session files
+ * are partitioned by the complete attempt identity so a new engine instance
+ * can locate the same backend conversation without colliding with a retry.
+ */
 export function createFileAgentSessionStore(
-  nodeDir: string,
+  baseDir: string,
 ): AgentSessionStore {
-  const path = join(nodeDir, SESSION_FILE);
+  const pathFor = (key: AgentSessionKey): string =>
+    join(
+      baseDir,
+      safePathPart(key.runId),
+      safePathPart(key.nodeId),
+      `attempt-${String(key.attempt)}`,
+      SESSION_FILE,
+    );
   return {
     async load(key) {
+      const path = pathFor(key);
       try {
         const value = JSON.parse(await readFile(path, "utf8")) as {
           key?: AgentSessionKey;
@@ -83,17 +95,22 @@ export function createFileAgentSessionStore(
       }
     },
     async save(key, session) {
+      const path = pathFor(key);
       await mkdir(dirname(path), { recursive: true });
       const temporary = `${path}.${process.pid}.${Date.now()}.tmp`;
       await writeFile(temporary, JSON.stringify({ key, session }), "utf8");
       await rename(temporary, path);
     },
-    async remove() {
+    async remove(_key) {
       // Completion is intentionally retained. It is evidence of the backend
       // identity for incident recovery and prevents an engine restart from
       // silently starting a different conversation for the same attempt.
     },
   };
+}
+
+function safePathPart(value: string): string {
+  return encodeURIComponent(value).replaceAll("%", "_");
 }
 
 export interface AgentSessionEngineOptions {
