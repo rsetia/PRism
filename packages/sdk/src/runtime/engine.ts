@@ -724,6 +724,38 @@ async function executeRun(
   let revision = initialRevision;
   let appendTail = Promise.resolve();
   let currentCoordinatorLease = coordinatorLease;
+  let coordinatorRenewalTail = Promise.resolve();
+  let coordinatorRenewalFailure: Error | undefined;
+
+  function renewCoordinatorLease(): Promise<void> {
+    if (currentCoordinatorLease === undefined) return Promise.resolve();
+    const renewal = coordinatorRenewalTail.then(async () => {
+      if (coordinatorRenewalFailure !== undefined) {
+        throw coordinatorRenewalFailure;
+      }
+      currentCoordinatorLease = await store.renewLease(
+        currentCoordinatorLease as RunLease,
+        leaseDurationMs,
+      );
+    });
+    coordinatorRenewalTail = renewal.catch((error: unknown) => {
+      coordinatorRenewalFailure ??=
+        error instanceof Error
+          ? error
+          : new Error("coordinator lease renewal failed", { cause: error });
+    });
+    return renewal;
+  }
+
+  const coordinatorRenewalTimer =
+    currentCoordinatorLease === undefined
+      ? undefined
+      : setInterval(
+          () => {
+            void renewCoordinatorLease().catch(() => undefined);
+          },
+          Math.max(1, Math.floor(leaseDurationMs / 2)),
+        );
 
   async function submitProposal(
     proposal: import("./graph-revision.js").GraphExpansionProposal,
@@ -734,11 +766,23 @@ async function executeRun(
       proposal,
       async (candidate, context) => {
         for (const node of Object.values(candidate.nodes)) {
-          if (!registry.has(node.executor)) {
+          const executor = registry.get(node.executor);
+          if (executor === undefined) {
             return {
               status: "rejected" as const,
               policy: "executor-preflight",
               reason: `unknown executor \"${node.executor}\"`,
+            };
+          }
+          try {
+            executor.validateConfig?.(node.config);
+          } catch (error: unknown) {
+            return {
+              status: "rejected" as const,
+              policy: "executor-preflight",
+              reason: `invalid config for executor \"${node.executor}\": ${
+                error instanceof Error ? error.message : String(error)
+              }`,
             };
           }
         }
@@ -768,12 +812,7 @@ async function executeRun(
     }
 
     const append = appendTail.then(async () => {
-      if (currentCoordinatorLease !== undefined) {
-        currentCoordinatorLease = await store.renewLease(
-          currentCoordinatorLease,
-          leaseDurationMs,
-        );
-      }
+      await renewCoordinatorLease();
       const stagedStates = new Map<string, NodeState>();
       const persistable: RunEvent[] = [];
       for (const event of events) {
@@ -1047,9 +1086,11 @@ async function executeRun(
           }
 
           let renewalFailure: unknown;
+          let renewalInFlight: Promise<void> | undefined;
           const renewalTimer = setInterval(
             () => {
-              void store
+              if (renewalInFlight !== undefined) return;
+              const renewal = store
                 .renewLease(nodeLease, leaseDurationMs)
                 .then((renewed) => {
                   nodeLease = renewed;
@@ -1058,6 +1099,10 @@ async function executeRun(
                   renewalFailure ??= error;
                   controller.abort({ code: "NODE_LEASE_LOST" });
                 });
+              const tracked = renewal.finally(() => {
+                if (renewalInFlight === tracked) renewalInFlight = undefined;
+              });
+              renewalInFlight = tracked;
             },
             Math.max(1, Math.floor(leaseDurationMs / 2)),
           );
@@ -1097,6 +1142,8 @@ async function executeRun(
           } finally {
             clearInterval(renewalTimer);
           }
+
+          await renewalInFlight;
 
           try {
             await store.releaseLease(nodeLease);
@@ -1169,185 +1216,200 @@ async function executeRun(
     return true;
   }
 
-  if (initialState !== undefined) {
-    for (const nodeId of graph.order) {
-      const state = states.get(nodeId);
-      if (state === "running" || state === "cancelling") {
-        await processNodeFailure(nodeId, {
-          cause: { code: "INTERRUPTED" },
-          failureClass: "transient_infra",
-        });
+  try {
+    if (initialState !== undefined) {
+      for (const nodeId of graph.order) {
+        const state = states.get(nodeId);
+        if (state === "running" || state === "cancelling") {
+          await processNodeFailure(nodeId, {
+            cause: { code: "INTERRUPTED" },
+            failureClass: "transient_infra",
+          });
+        }
+      }
+
+      for (const nodeId of graph.order) {
+        if (states.get(nodeId) !== "retry_wait") {
+          continue;
+        }
+        const delayMs = retryDelays.get(nodeId);
+        if (delayMs === undefined) {
+          throw new Error(
+            `node "${nodeId}" is retry_wait without a stored retry delay`,
+          );
+        }
+        startRetryTimer(nodeId, delayMs);
       }
     }
 
-    for (const nodeId of graph.order) {
-      if (states.get(nodeId) !== "retry_wait") {
+    await propagateBlockedNodes();
+    await skipUnmatchedNodes();
+    await promoteReadyNodes();
+
+    while (true) {
+      if (!cancellation.isRequested()) {
+        await dispatchReadyNodes();
+      }
+
+      if (
+        inFlight.size === 0 &&
+        (!cancellation.isRequested() || cancellationObserved)
+      ) {
+        break;
+      }
+
+      const candidates = [...inFlight.values()];
+      if (!cancellationObserved) {
+        candidates.push(cancellation.requested);
+      }
+      if (candidates.length === 0) {
+        break;
+      }
+
+      const schedulerEvent = await Promise.race(candidates);
+      if (schedulerEvent.kind === "cancellation_requested") {
+        cancellationObserved = true;
+        cancellationAccepted = await acceptCancellation(schedulerEvent);
         continue;
       }
-      const delayMs = retryDelays.get(nodeId);
-      if (delayMs === undefined) {
+
+      if (!inFlight.delete(schedulerEvent.nodeId)) {
         throw new Error(
-          `node "${nodeId}" is retry_wait without a stored retry delay`,
+          `settlement targets node that is not running: "${schedulerEvent.nodeId}"`,
         );
       }
-      startRetryTimer(nodeId, delayMs);
-    }
-  }
+      cancellation.remove(schedulerEvent.nodeId);
 
-  await propagateBlockedNodes();
-  await skipUnmatchedNodes();
-  await promoteReadyNodes();
-
-  while (true) {
-    if (!cancellation.isRequested()) {
-      await dispatchReadyNodes();
-    }
-
-    if (
-      inFlight.size === 0 &&
-      (!cancellation.isRequested() || cancellationObserved)
-    ) {
-      break;
-    }
-
-    const candidates = [...inFlight.values()];
-    if (!cancellationObserved) {
-      candidates.push(cancellation.requested);
-    }
-    if (candidates.length === 0) {
-      break;
-    }
-
-    const schedulerEvent = await Promise.race(candidates);
-    if (schedulerEvent.kind === "cancellation_requested") {
-      cancellationObserved = true;
-      cancellationAccepted = await acceptCancellation(schedulerEvent);
-      continue;
-    }
-
-    if (!inFlight.delete(schedulerEvent.nodeId)) {
-      throw new Error(
-        `settlement targets node that is not running: "${schedulerEvent.nodeId}"`,
-      );
-    }
-    cancellation.remove(schedulerEvent.nodeId);
-
-    const state = states.get(schedulerEvent.nodeId);
-    if (state === undefined) {
-      throw new Error(
-        `settlement targets unknown node "${schedulerEvent.nodeId}"`,
-      );
-    }
-
-    if (schedulerEvent.kind === "retry_cancelled") {
-      if (!cancellation.isRequested()) {
+      const state = states.get(schedulerEvent.nodeId);
+      if (state === undefined) {
         throw new Error(
-          `retry timer for node "${schedulerEvent.nodeId}" was cancelled without a run cancellation`,
+          `settlement targets unknown node "${schedulerEvent.nodeId}"`,
         );
       }
-      if (!cancellationObserved) {
-        cancellationObserved = true;
-        cancellationAccepted = await acceptCancellation(
-          await cancellation.requested,
-        );
+
+      if (schedulerEvent.kind === "retry_cancelled") {
+        if (!cancellation.isRequested()) {
+          throw new Error(
+            `retry timer for node "${schedulerEvent.nodeId}" was cancelled without a run cancellation`,
+          );
+        }
+        if (!cancellationObserved) {
+          cancellationObserved = true;
+          cancellationAccepted = await acceptCancellation(
+            await cancellation.requested,
+          );
+        }
+        continue;
       }
-      continue;
-    }
 
-    if (schedulerEvent.kind === "retry_ready") {
-      if (state !== "retry_wait") {
-        throw new Error(
-          `retry timer for node "${schedulerEvent.nodeId}" settled in state "${state}"`,
-        );
-      }
-      await applyEvents([
-        { kind: "node_ready", nodeId: schedulerEvent.nodeId },
-      ]);
-      retryDelays.delete(schedulerEvent.nodeId);
-      continue;
-    }
-
-    if (state === "cancelling") {
-      await applyEvents([
-        { kind: "node_cancelled", nodeId: schedulerEvent.nodeId },
-      ]);
-      continue;
-    }
-    if (schedulerEvent.kind === "cancellation_timeout") {
-      throw new Error(
-        `cancellation timeout targeted non-cancelling node "${schedulerEvent.nodeId}"`,
-      );
-    }
-    if (state !== "running") {
-      throw new Error(
-        `node "${schedulerEvent.nodeId}" settled in state "${state}"`,
-      );
-    }
-
-    switch (schedulerEvent.outcome.status) {
-      case "succeeded": {
+      if (schedulerEvent.kind === "retry_ready") {
+        if (state !== "retry_wait") {
+          throw new Error(
+            `retry timer for node "${schedulerEvent.nodeId}" settled in state "${state}"`,
+          );
+        }
         await applyEvents([
-          {
-            kind: "node_succeeded",
-            nodeId: schedulerEvent.nodeId,
-            output: schedulerEvent.outcome.output,
-          },
+          { kind: "node_ready", nodeId: schedulerEvent.nodeId },
         ]);
-        outputs.set(schedulerEvent.nodeId, schedulerEvent.outcome.output);
-        await skipUnmatchedNodes();
-        await promoteReadyNodes();
-        break;
+        retryDelays.delete(schedulerEvent.nodeId);
+        continue;
       }
 
-      case "failed": {
-        await processNodeFailure(schedulerEvent.nodeId, schedulerEvent.outcome);
-        break;
+      if (state === "cancelling") {
+        await applyEvents([
+          { kind: "node_cancelled", nodeId: schedulerEvent.nodeId },
+        ]);
+        continue;
       }
-
-      default: {
-        const unhandledOutcome: never = schedulerEvent.outcome;
+      if (schedulerEvent.kind === "cancellation_timeout") {
         throw new Error(
-          `executor for node "${schedulerEvent.nodeId}" returned an invalid outcome`,
-          { cause: unhandledOutcome },
+          `cancellation timeout targeted non-cancelling node "${schedulerEvent.nodeId}"`,
+        );
+      }
+      if (state !== "running") {
+        throw new Error(
+          `node "${schedulerEvent.nodeId}" settled in state "${state}"`,
+        );
+      }
+
+      switch (schedulerEvent.outcome.status) {
+        case "succeeded": {
+          await applyEvents([
+            {
+              kind: "node_succeeded",
+              nodeId: schedulerEvent.nodeId,
+              output: schedulerEvent.outcome.output,
+            },
+          ]);
+          outputs.set(schedulerEvent.nodeId, schedulerEvent.outcome.output);
+          await skipUnmatchedNodes();
+          await promoteReadyNodes();
+          break;
+        }
+
+        case "failed": {
+          await processNodeFailure(
+            schedulerEvent.nodeId,
+            schedulerEvent.outcome,
+          );
+          break;
+        }
+
+        default: {
+          const unhandledOutcome: never = schedulerEvent.outcome;
+          throw new Error(
+            `executor for node "${schedulerEvent.nodeId}" returned an invalid outcome`,
+            { cause: unhandledOutcome },
+          );
+        }
+      }
+    }
+
+    for (const [nodeId, state] of states) {
+      if (
+        state !== "succeeded" &&
+        state !== "failed" &&
+        state !== "blocked" &&
+        state !== "skipped" &&
+        state !== "cancelled"
+      ) {
+        throw new Error(
+          `run stopped with node "${nodeId}" in state "${state}"`,
         );
       }
     }
-  }
 
-  for (const [nodeId, state] of states) {
-    if (
-      state !== "succeeded" &&
-      state !== "failed" &&
-      state !== "blocked" &&
-      state !== "skipped" &&
-      state !== "cancelled"
-    ) {
-      throw new Error(`run stopped with node "${nodeId}" in state "${state}"`);
+    const failures = graph.order.flatMap((nodeId) => {
+      const failure = originatingFailures.get(nodeId);
+      return failure === undefined ? [] : [failure];
+    });
+    if (cancellationAccepted) {
+      return {
+        status: "cancelled",
+        reason: cancellationReason,
+        failures,
+      };
+    }
+    if (failures.length > 0) {
+      return { status: "failed", failures };
+    }
+
+    if (!outputs.has(graph.finalNode)) {
+      throw new Error(`final node "${graph.finalNode}" has no output`);
+    }
+    return {
+      status: "succeeded",
+      output: outputs.get(graph.finalNode) as JsonValue,
+    };
+  } finally {
+    if (coordinatorRenewalTimer !== undefined) {
+      clearInterval(coordinatorRenewalTimer);
+    }
+    await coordinatorRenewalTail;
+    if (coordinatorRenewalFailure !== undefined) {
+      throw coordinatorRenewalFailure;
     }
   }
-
-  const failures = graph.order.flatMap((nodeId) => {
-    const failure = originatingFailures.get(nodeId);
-    return failure === undefined ? [] : [failure];
-  });
-  if (cancellationAccepted) {
-    return {
-      status: "cancelled",
-      reason: cancellationReason,
-      failures,
-    };
-  }
-  if (failures.length > 0) {
-    return { status: "failed", failures };
-  }
-
-  if (!outputs.has(graph.finalNode)) {
-    throw new Error(`final node "${graph.finalNode}" has no output`);
-  }
-  return {
-    status: "succeeded",
-    output: outputs.get(graph.finalNode) as JsonValue,
-  };
 }
 
 function sameResourceIds(

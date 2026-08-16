@@ -85,6 +85,29 @@ describe("abortRun", () => {
     });
   });
 
+  test("holds and passes a coordinator lease to abort mutations", async () => {
+    const base = createMemoryStore();
+    await base.createRun({ runId: "fenced-abort", graph: linear() });
+    let appendFenced = false;
+    let finishFenced = false;
+    const store: RunStore = {
+      ...base,
+      appendEvents(runId, events, expectedRevision, lease) {
+        appendFenced = lease?.kind === "coordinator";
+        return base.appendEvents(runId, events, expectedRevision, lease);
+      },
+      finishRun(runId, outcome, lease) {
+        finishFenced = lease?.kind === "coordinator";
+        return base.finishRun(runId, outcome, lease);
+      },
+    };
+
+    await abortRun(store, "fenced-abort");
+    expect(appendFenced).toBe(true);
+    expect(finishFenced).toBe(true);
+    expect(await base.getRunLeases("fenced-abort")).toEqual([]);
+  });
+
   test("rejects an abort while a coordinator owns the run", async () => {
     const store = createMemoryStore();
     await store.createRun({ runId: "owned", graph: linear() });
@@ -171,6 +194,29 @@ describe("resetRun", () => {
     const outcome = await engineOn(store, [counting]).resume("r").result;
     expect(outcome).toEqual({ status: "succeeded", output: "run-2" });
     expect(firstCalls).toBe(2);
+  });
+
+  test("holds and passes a coordinator lease to reset mutations", async () => {
+    const base = createMemoryStore();
+    await engineOn(base).run(linear(), { runId: "fenced-reset" }).result;
+    let reopenFenced = false;
+    let appendFenced = false;
+    const store: RunStore = {
+      ...base,
+      reopenRun(runId, lease) {
+        reopenFenced = lease?.kind === "coordinator";
+        return base.reopenRun(runId, lease);
+      },
+      appendEvents(runId, events, expectedRevision, lease) {
+        appendFenced = lease?.kind === "coordinator";
+        return base.appendEvents(runId, events, expectedRevision, lease);
+      },
+    };
+
+    await resetRun(store, "fenced-reset", ["first"]);
+    expect(reopenFenced).toBe(true);
+    expect(appendFenced).toBe(true);
+    expect(await base.getRunLeases("fenced-reset")).toEqual([]);
   });
 
   test("includeDownstream resets transitive dependents", async () => {

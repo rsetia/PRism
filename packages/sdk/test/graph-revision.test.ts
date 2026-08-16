@@ -138,6 +138,68 @@ describe("audited graph expansion", () => {
     expect(seen).toEqual(["follow"]);
   });
 
+  test("durably rejects a proposal with invalid executor config", async () => {
+    const store = createMemoryStore();
+    let proposalStatus: string | undefined;
+    const registry = createExecutorRegistry([
+      {
+        name: "proposer",
+        async execute(context) {
+          const result = await context.submitGraphProposal?.({
+            id: "invalid-config",
+            proposer: context.nodeId,
+            nodes: {
+              follow: { executor: "strict", dependsOn: [], config: {} },
+            },
+          });
+          proposalStatus = result?.status;
+          return { status: "succeeded", output: "done" };
+        },
+      },
+      {
+        name: "strict",
+        validateConfig(config) {
+          if (
+            typeof config !== "object" ||
+            config === null ||
+            !("required" in config)
+          ) {
+            throw new Error("required config is missing");
+          }
+        },
+        execute() {
+          return { status: "succeeded", output: null };
+        },
+      },
+    ]);
+    const parsed = parseGraph({
+      version: 1,
+      nodes: { start: { executor: "proposer" } },
+      finalNode: "start",
+    });
+    if (!parsed.ok) throw new Error("fixture parse failed");
+    const compiled = compileGraph(parsed.graph);
+    if (!compiled.ok) throw new Error("fixture compile failed");
+
+    const outcome = await createEngine({
+      store,
+      registry,
+      graphProposalPolicy: () => ({ status: "accepted", policy: "test" }),
+    }).run(compiled.graph, { runId: "invalid-proposal" }).result;
+
+    expect(outcome).toEqual({ status: "succeeded", output: "done" });
+    expect(proposalStatus).toBe("rejected");
+    expect((await store.getRun("invalid-proposal"))?.graph.order).toEqual([
+      "start",
+    ]);
+    expect(
+      (await store.listGraphRevisions?.("invalid-proposal"))?.[0]?.decision,
+    ).toMatchObject({
+      status: "rejected",
+      policy: "executor-preflight",
+    });
+  });
+
   test("dispatches independent accepted work when its proposer fails", async () => {
     const store = createMemoryStore();
     const seen: string[] = [];

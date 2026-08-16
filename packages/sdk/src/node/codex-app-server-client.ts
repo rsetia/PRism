@@ -194,9 +194,14 @@ export function createCodexAppServerStdioClient(
     if (threadId === undefined) return;
     const active = turns.get(threadId);
     if (active === undefined) return;
+    if (active.turnId.length === 0 && typeof params["turnId"] === "string") {
+      active.turnId = params["turnId"];
+    }
     if (
       notification.method === "item/agentMessage/delta" &&
-      typeof params["delta"] === "string"
+      typeof params["delta"] === "string" &&
+      (typeof params["turnId"] !== "string" ||
+        params["turnId"] === active.turnId)
     ) {
       active.events.push({ kind: "output", text: params["delta"] });
       return;
@@ -204,6 +209,19 @@ export function createCodexAppServerStdioClient(
     if (notification.method !== "turn/completed") return;
 
     const turn = isRecord(params["turn"]) ? params["turn"] : {};
+    if (active.turnId.length === 0 && typeof turn["id"] === "string") {
+      active.turnId = turn["id"];
+    }
+    if (typeof turn["id"] === "string" && turn["id"] !== active.turnId) {
+      return;
+    }
+    await completeTurn(active, turn);
+  };
+
+  const completeTurn = async (
+    active: ActiveTurn,
+    turn: Record<string, unknown>,
+  ): Promise<void> => {
     const result = await readWorkerResult(active.input).catch(
       (error: unknown) => ({
         status: "failed" as const,
@@ -295,14 +313,45 @@ export function createCodexAppServerStdioClient(
       return beginTurn(input, thread["id"]);
     },
     async resume(input, session) {
-      await request("thread/resume", {
-        threadId: session.id,
-        cwd: input.worktreeDir,
-        approvalPolicy: "never",
-        sandbox: input.sandbox ?? "workspace-write",
-        ...(options.model === undefined ? {} : { model: options.model }),
-      });
-      return beginTurn(input, session.id);
+      const turnId = sessionTurnId(session.state);
+      if (turnId === undefined || turnId.length === 0) {
+        throw new Error(`saved Codex App Server session has no turn id`);
+      }
+      const events = new EventQueue();
+      const active: ActiveTurn = { input, events, turnId };
+      turns.set(session.id, active);
+      try {
+        const result = await request("thread/resume", {
+          threadId: session.id,
+          cwd: input.worktreeDir,
+          approvalPolicy: "never",
+          sandbox: input.sandbox ?? "workspace-write",
+          ...(options.model === undefined ? {} : { model: options.model }),
+          ...(options.reasoningEffort === undefined
+            ? {}
+            : { config: { model_reasoning_effort: options.reasoningEffort } }),
+        });
+        const record = isRecord(result) ? result : {};
+        const thread = isRecord(record["thread"]) ? record["thread"] : {};
+        const turns: unknown = thread["turns"];
+        const persistedTurn: unknown = Array.isArray(turns)
+          ? (turns as unknown[]).find(
+              (turn) => isRecord(turn) && turn["id"] === turnId,
+            )
+          : undefined;
+        if (!isRecord(persistedTurn)) {
+          throw new Error(
+            `Codex App Server thread/resume did not return saved turn ${turnId}`,
+          );
+        }
+        if (persistedTurn["status"] !== "inProgress") {
+          await completeTurn(active, persistedTurn);
+        }
+        return { id: session.id, state: { turnId } };
+      } catch (error: unknown) {
+        turns.delete(session.id);
+        throw error;
+      }
     },
     async steer(session, message) {
       const active = turns.get(session.id);

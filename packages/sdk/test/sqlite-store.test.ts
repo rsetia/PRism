@@ -58,6 +58,61 @@ async function collect(
 }
 
 describe("sqlite durability", () => {
+  test("normalizes resource fields missing from legacy compiled graphs", async () => {
+    const path = tempDbPath();
+    const modern = fixtureGraph();
+    const legacyGraph = {
+      version: modern.version,
+      nodes: Object.fromEntries(
+        Object.entries(modern.nodes).map(([nodeId, node]) => [
+          nodeId,
+          { ...node, resources: undefined },
+        ]),
+      ),
+      order: modern.order,
+      finalNode: modern.finalNode,
+    };
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      PRAGMA user_version = 1;
+      CREATE TABLE runs (
+        run_id TEXT PRIMARY KEY,
+        graph_json TEXT NOT NULL,
+        finished INTEGER NOT NULL DEFAULT 0 CHECK (finished IN (0, 1)),
+        schema_version INTEGER NOT NULL,
+        outcome_json TEXT,
+        CHECK (
+          (finished = 0 AND outcome_json IS NULL) OR
+          (finished = 1 AND outcome_json IS NOT NULL)
+        )
+      ) STRICT;
+      CREATE TABLE events (
+        run_id TEXT NOT NULL,
+        seq INTEGER NOT NULL CHECK (seq >= 0),
+        event_json TEXT NOT NULL,
+        PRIMARY KEY (run_id, seq),
+        FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+      ) STRICT;
+    `);
+    legacy
+      .prepare(
+        "INSERT INTO runs (run_id, graph_json, schema_version) VALUES (?, ?, 1)",
+      )
+      .run("legacy-resume", JSON.stringify(legacyGraph));
+    legacy.close();
+
+    const store = createSqliteStore({ path });
+    const loaded = await store.getRun("legacy-resume");
+    expect(loaded?.graph.resources).toEqual({});
+    expect(loaded?.graph.nodes["only"]?.resources).toEqual([]);
+    const outcome = await createEngine({
+      store,
+      registry: createExecutorRegistry(builtinExecutors),
+    }).resume("legacy-resume").result;
+    expect(outcome).toEqual({ status: "succeeded", output: 1 });
+    await store.close?.();
+  });
+
   test("upgrades timestamp-free version 1 events without inventing times", async () => {
     const path = tempDbPath();
     const legacy = new DatabaseSync(path);

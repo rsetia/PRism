@@ -549,6 +549,9 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
       try {
         const run = selectRun.get(runId);
         if (run === undefined) throw new Error(`unknown run: "${runId}"`);
+        if (readNumber(run, "finished") === 1) {
+          throw new Error(`run is already finished: "${runId}"`);
+        }
         const duplicate = selectGraphRevisionByProposal.get(
           runId,
           revision.proposal.id,
@@ -796,8 +799,21 @@ function decodeGraph(json: string): CompiledGraph {
   ) {
     throw new Error("stored graph is invalid");
   }
-  deepFreeze(value);
-  return value as unknown as CompiledGraph;
+  const nodes = Object.fromEntries(
+    Object.entries(value["nodes"]).map(([nodeId, node]) => [
+      nodeId,
+      isPlainObject(node) && node["resources"] === undefined
+        ? { ...node, resources: [] }
+        : node,
+    ]),
+  );
+  const normalized = {
+    ...value,
+    resources: value["resources"] ?? {},
+    nodes,
+  };
+  deepFreeze(normalized);
+  return normalized as unknown as CompiledGraph;
 }
 
 function decodeEvent(json: string, seq: number): PersistedRunEvent {

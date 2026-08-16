@@ -386,6 +386,8 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     const run = runs.get(runId);
     if (run === undefined)
       return Promise.reject(new Error(`unknown run: "${runId}"`));
+    if (run.finished)
+      return Promise.reject(new Error(`run is already finished: "${runId}"`));
     const duplicate = run.graphRevisions.find(
       (entry) => entry.proposal.id === revision.proposal.id,
     );

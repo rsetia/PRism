@@ -1,5 +1,5 @@
 import type { RunEvent } from "./events.js";
-import type { RunStore } from "./ports.js";
+import type { RunLease, RunStore } from "./ports.js";
 import { reduceNodeState } from "./transitions.js";
 import { TERMINAL_NODE_STATES } from "./types.js";
 import type { NodeFailure, NodeState } from "./types.js";
@@ -75,33 +75,50 @@ export async function abortRun(store: RunStore, runId: string): Promise<void> {
   if (stored.finished) {
     return;
   }
-  await assertNoActiveCoordinatorLease(store, runId, "abort");
 
-  const { states, order, failures } = await replayStates(store, runId);
-  const events: RunEvent[] = [];
-  for (const nodeId of order) {
-    const state = states.get(nodeId);
-    if (state === undefined || TERMINAL_NODE_STATES.has(state)) {
-      continue;
-    }
-    // running/cancelling cannot go straight to cancelled — pass through
-    // cancelling first; pending/ready/retry_wait cancel directly.
-    if (state === "running") {
-      events.push({ kind: "node_cancelling", nodeId });
-    }
-    events.push({ kind: "node_cancelled", nodeId });
-  }
+  await withAdministrativeCoordinatorLease(
+    store,
+    runId,
+    "abort",
+    async (currentLease) => {
+      const locked = await store.getRun(runId);
+      if (locked === undefined) throw new Error(`unknown run: "${runId}"`);
+      if (locked.finished) return;
 
-  if (events.length > 0) {
-    await assertNoActiveCoordinatorLease(store, runId, "abort");
-    await store.appendEvents(runId, events);
-  }
-  await assertNoActiveCoordinatorLease(store, runId, "abort");
-  await store.finishRun(runId, {
-    status: "cancelled",
-    reason: null,
-    failures,
-  });
+      const { states, order, failures } = await replayStates(store, runId);
+      const events: RunEvent[] = [];
+      for (const nodeId of order) {
+        const state = states.get(nodeId);
+        if (state === undefined || TERMINAL_NODE_STATES.has(state)) {
+          continue;
+        }
+        // running/cancelling cannot go straight to cancelled — pass through
+        // cancelling first; pending/ready/retry_wait cancel directly.
+        if (state === "running") {
+          events.push({ kind: "node_cancelling", nodeId });
+        }
+        events.push({ kind: "node_cancelled", nodeId });
+      }
+
+      if (events.length > 0) {
+        await store.appendEvents(
+          runId,
+          events,
+          undefined,
+          await currentLease(),
+        );
+      }
+      await store.finishRun(
+        runId,
+        {
+          status: "cancelled",
+          reason: null,
+          failures,
+        },
+        await currentLease(),
+      );
+    },
+  );
 }
 
 export interface ResetRunOptions {
@@ -133,46 +150,112 @@ export async function resetRun(
       throw new Error(`unknown node "${nodeId}" in run "${runId}"`);
     }
   }
-  await assertNoActiveCoordinatorLease(store, runId, "reset");
-
-  const targets = new Set<string>();
-  const visit = (nodeId: string): void => {
-    if (targets.has(nodeId)) return;
-    targets.add(nodeId);
-    if (options.includeDownstream === true) {
-      for (const dependentId of graph.nodes[nodeId]?.dependents ?? []) {
-        visit(dependentId);
+  await withAdministrativeCoordinatorLease(
+    store,
+    runId,
+    "reset",
+    async (currentLease) => {
+      const locked = await store.getRun(runId);
+      if (locked === undefined) throw new Error(`unknown run: "${runId}"`);
+      const lockedGraph = locked.graph;
+      for (const nodeId of nodeIds) {
+        if (lockedGraph.nodes[nodeId] === undefined) {
+          throw new Error(`unknown node "${nodeId}" in run "${runId}"`);
+        }
       }
-    }
-  };
-  for (const nodeId of nodeIds) {
-    visit(nodeId);
-  }
 
-  // The run must accept appends; reopen it if it had finished.
-  if (stored.finished) {
-    await assertNoActiveCoordinatorLease(store, runId, "reset");
-    await store.reopenRun(runId);
-  }
+      const targets = new Set<string>();
+      const visit = (nodeId: string): void => {
+        if (targets.has(nodeId)) return;
+        targets.add(nodeId);
+        if (options.includeDownstream === true) {
+          for (const dependentId of lockedGraph.nodes[nodeId]?.dependents ??
+            []) {
+            visit(dependentId);
+          }
+        }
+      };
+      for (const nodeId of nodeIds) visit(nodeId);
 
-  const events: RunEvent[] = graph.order
-    .filter((nodeId) => targets.has(nodeId))
-    .map((nodeId) => ({ kind: "node_reset", nodeId }));
-  if (events.length > 0) {
-    await assertNoActiveCoordinatorLease(store, runId, "reset");
-    await store.appendEvents(runId, events);
-  }
+      // The run must accept appends; reopen it if it had finished.
+      if (locked.finished) {
+        await store.reopenRun(runId, await currentLease());
+      }
+
+      const events: RunEvent[] = lockedGraph.order
+        .filter((nodeId) => targets.has(nodeId))
+        .map((nodeId) => ({ kind: "node_reset", nodeId }));
+      if (events.length > 0) {
+        await store.appendEvents(
+          runId,
+          events,
+          undefined,
+          await currentLease(),
+        );
+      }
+    },
+  );
 }
 
-async function assertNoActiveCoordinatorLease(
+const ADMIN_LEASE_DURATION_MS = 30_000;
+
+async function withAdministrativeCoordinatorLease<T>(
   store: RunStore,
   runId: string,
   operation: "abort" | "reset",
-): Promise<void> {
-  const leases = await store.getRunLeases(runId);
-  if (leases.some((lease) => lease.kind === "coordinator")) {
-    throw new Error(
-      `cannot ${operation} run "${runId}" while an active coordinator lease exists`,
+  task: (currentLease: () => Promise<RunLease>) => Promise<T>,
+): Promise<T> {
+  let lease: RunLease;
+  try {
+    lease = await store.acquireCoordinatorLease(
+      runId,
+      `admin-${operation}-${Math.random().toString(36).slice(2)}`,
+      ADMIN_LEASE_DURATION_MS,
     );
+  } catch (error: unknown) {
+    const leases = await store.getRunLeases(runId).catch(() => []);
+    if (leases.some((candidate) => candidate.kind === "coordinator")) {
+      throw new Error(
+        `cannot ${operation} run "${runId}" while an active coordinator lease exists`,
+        { cause: error },
+      );
+    }
+    throw error;
+  }
+
+  let renewalTail = Promise.resolve();
+  let renewalFailure: Error | undefined;
+  const currentLease = (): Promise<RunLease> => {
+    const renewal = renewalTail.then(async () => {
+      if (renewalFailure !== undefined) throw renewalFailure;
+      lease = await store.renewLease(lease, ADMIN_LEASE_DURATION_MS);
+      return lease;
+    });
+    renewalTail = renewal.then(
+      () => undefined,
+      (error: unknown) => {
+        renewalFailure ??=
+          error instanceof Error
+            ? error
+            : new Error("administrative lease renewal failed", {
+                cause: error,
+              });
+      },
+    );
+    return renewal;
+  };
+  const renewalTimer = setInterval(() => {
+    void currentLease().catch(() => undefined);
+  }, ADMIN_LEASE_DURATION_MS / 2);
+
+  try {
+    const result = await task(currentLease);
+    await renewalTail;
+    if (renewalFailure !== undefined) throw renewalFailure;
+    return result;
+  } finally {
+    clearInterval(renewalTimer);
+    await renewalTail;
+    await store.releaseLease(lease);
   }
 }

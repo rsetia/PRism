@@ -12,6 +12,42 @@ lines.on("line", async (line) => {
     send({ id: message.id, result: {} });
     return;
   }
+  if (
+    message.method === "thread/resume" &&
+    process.argv.includes("--resume-active")
+  ) {
+    if (message.params.sandbox !== "read-only") {
+      throw new Error(`unexpected sandbox: ${message.params.sandbox}`);
+    }
+    send({
+      id: message.id,
+      result: {
+        thread: {
+          id: message.params.threadId,
+          turns: [{ id: "turn-1", status: "inProgress" }],
+        },
+      },
+    });
+    setTimeout(() => {
+      send({
+        method: "item/agentMessage/delta",
+        params: {
+          threadId: message.params.threadId,
+          turnId: "turn-1",
+          itemId: "item-1",
+          delta: "resumed",
+        },
+      });
+      send({
+        method: "turn/completed",
+        params: {
+          threadId: message.params.threadId,
+          turn: { id: "turn-1", status: "completed", error: null },
+        },
+      });
+    }, 0);
+    return;
+  }
   if (message.method === "thread/start" || message.method === "thread/resume") {
     if (message.params.sandbox !== "read-only") {
       throw new Error(`unexpected sandbox: ${message.params.sandbox}`);
@@ -21,6 +57,9 @@ lines.on("line", async (line) => {
     return;
   }
   if (message.method === "turn/start") {
+    if (process.argv.includes("--resume-active")) {
+      throw new Error("resume unexpectedly started a duplicate turn");
+    }
     const prompt = message.params.input[0].text;
     const match = prompt.match(/- On success, write (.+) as JSON:/);
     if (!match) throw new Error("result path missing from prompt");

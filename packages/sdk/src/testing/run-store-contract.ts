@@ -192,6 +192,35 @@ export function runStoreContract(
       await expect(s.appendEvents("r", [ready("a")])).rejects.toThrow();
     });
 
+    test("appendGraphRevision rejects after finishRun", async () => {
+      const s = open();
+      if (s.appendGraphRevision === undefined) return;
+      await s.createRun({ runId: "r", graph: fixtureGraph() });
+      await s.finishRun("r", cancelledOutcome());
+      await expect(
+        s.appendGraphRevision(
+          "r",
+          {
+            sequence: -1,
+            graphRevision: 0,
+            timestampMs: 0,
+            proposal: {
+              id: "too-late",
+              proposer: "test",
+              nodes: { later: { executor: "constant", dependsOn: [] } },
+            },
+            decision: {
+              status: "rejected",
+              policy: "test",
+              reason: "too late",
+            },
+            addedNodeIds: ["later"],
+          },
+          0,
+        ),
+      ).rejects.toThrow("already finished");
+    });
+
     test("readEvents for an unknown run rejects on iteration", async () => {
       const s = open();
       await expect(collect(s.readEvents("nope"), [])).rejects.toThrow();

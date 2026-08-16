@@ -1,4 +1,4 @@
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -53,6 +53,59 @@ test("runs a worker through the selectable Codex App Server stdio transport", as
     );
     expect(result).toEqual({ status: "succeeded", output: "ok" });
     expect(output).toEqual(["working"]);
+  } finally {
+    await client.close();
+  }
+});
+
+test("reconnects to a persisted active turn without starting it again", async () => {
+  const root = mkdtempSync(join(tmpdir(), "prism-app-server-resume-"));
+  directories.push(root);
+  const nodeDir = join(root, "node");
+  mkdirSync(nodeDir, { recursive: true });
+  writeFileSync(
+    join(nodeDir, "result.json"),
+    JSON.stringify({ status: "succeeded", output: "resumed-ok" }),
+  );
+  const fixture = join(
+    dirname(fileURLToPath(import.meta.url)),
+    "fixtures",
+    "fake-codex-app-server.mjs",
+  );
+  const client = createCodexAppServerStdioClient({
+    command: process.execPath,
+    commandArgs: [fixture, "--stay-alive", "--resume-active"],
+  });
+  try {
+    const session = await client.resume(
+      {
+        key: { runId: "run", nodeId: "node", attempt: 1 },
+        spec: {
+          runId: "run",
+          nodeId: "node",
+          kind: "task",
+          executor: "implement",
+          input: null,
+          config: null,
+          attempt: 1,
+        },
+        nodeDir,
+        worktreeDir: root,
+        prompt: "must not be sent again",
+        sandbox: "read-only",
+      },
+      { id: "thread-1", state: { turnId: "turn-1" } },
+    );
+    const events = [];
+    for await (const event of client.events(session)) events.push(event);
+
+    expect(events).toEqual([
+      { kind: "output", text: "resumed" },
+      {
+        kind: "result",
+        result: { status: "succeeded", output: "resumed-ok" },
+      },
+    ]);
   } finally {
     await client.close();
   }
