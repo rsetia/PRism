@@ -9,6 +9,7 @@ lines.on("line", async (line) => {
   const message = JSON.parse(line);
   if (message.method === "initialized") return;
   if (message.method === "initialize") {
+    if (process.argv.includes("--hang-initialize")) return;
     send({ id: message.id, result: {} });
     return;
   }
@@ -61,13 +62,25 @@ lines.on("line", async (line) => {
       throw new Error("resume unexpectedly started a duplicate turn");
     }
     const prompt = message.params.input[0].text;
+    if (process.argv.includes("--silent-turn")) {
+      send({ id: message.id, result: { turn: { id: "turn-1" } } });
+      return;
+    }
     const match = prompt.match(/- On success, write (.+) as JSON:/);
     if (!match) throw new Error("result path missing from prompt");
     await mkdir(dirname(match[1]), { recursive: true });
     await writeFile(
       match[1],
-      JSON.stringify({ status: "succeeded", output: "ok" }),
+      JSON.stringify({
+        status: "succeeded",
+        output: process.argv.includes("--emit-secret")
+          ? { summary: process.env.TEST_SECRET }
+          : "ok",
+      }),
     );
+    if (process.argv.includes("--emit-secret")) {
+      process.stderr.write(`${process.env.TEST_SECRET}\n`);
+    }
     send({ id: message.id, result: { turn: { id: "turn-1" } } });
     send({
       method: "item/agentMessage/delta",

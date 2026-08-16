@@ -337,6 +337,11 @@ describe("deterministic production orchestration evaluations", () => {
         ["accepted", true],
         ["rejected", false],
       ] as const) {
+        const lease = await store.acquireCoordinatorLease(
+          "proposal",
+          "evaluation",
+          30_000,
+        );
         const result = await submitGraphProposal(
           store,
           "proposal",
@@ -349,7 +354,9 @@ describe("deterministic production orchestration evaluations", () => {
             accepted
               ? { status: "accepted", policy: "evaluation" }
               : { status: "rejected", policy: "evaluation", reason: "denied" },
+          lease,
         );
+        await store.releaseLease(lease);
         expect(result.status).toBe(accepted ? "accepted" : "rejected");
       }
       expect(await store.listGraphRevisions?.("proposal")).toHaveLength(2);

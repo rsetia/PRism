@@ -196,7 +196,8 @@ export function runStoreContract(
       const s = open();
       if (s.appendGraphRevision === undefined) return;
       await s.createRun({ runId: "r", graph: fixtureGraph() });
-      await s.finishRun("r", cancelledOutcome());
+      const lease = await s.acquireCoordinatorLease("r", "test", 30_000);
+      await s.finishRun("r", cancelledOutcome(), lease);
       await expect(
         s.appendGraphRevision(
           "r",
@@ -217,6 +218,7 @@ export function runStoreContract(
             addedNodeIds: ["later"],
           },
           0,
+          lease,
         ),
       ).rejects.toThrow("already finished");
     });

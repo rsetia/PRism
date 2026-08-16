@@ -88,6 +88,13 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     }
   }
 
+  function assertCoordinatorLease(runId: string, lease: RunLease): void {
+    if (lease.kind !== "coordinator" || lease.runId !== runId) {
+      throw new Error(`lease fencing conflict for run: "${runId}"`);
+    }
+    assertCurrentLease(lease);
+  }
+
   function acquire(
     kind: RunLease["kind"],
     runId: string,
@@ -164,7 +171,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     }
     if (lease !== undefined) {
       try {
-        assertCurrentLease(lease);
+        assertCoordinatorLease(runId, lease);
       } catch (error: unknown) {
         return Promise.reject(asError(error, "lease fencing failed"));
       }
@@ -280,7 +287,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     }
     if (lease !== undefined) {
       try {
-        assertCurrentLease(lease);
+        assertCoordinatorLease(runId, lease);
       } catch (error: unknown) {
         return Promise.reject(asError(error, "lease fencing failed"));
       }
@@ -307,7 +314,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     }
     if (lease !== undefined) {
       try {
-        assertCurrentLease(lease);
+        assertCoordinatorLease(runId, lease);
       } catch (error: unknown) {
         return Promise.reject(asError(error, "lease fencing failed"));
       }
@@ -382,12 +389,18 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     runId: string,
     revision: GraphRevision,
     expectedGraphRevision: number,
+    lease: RunLease,
   ): Promise<GraphRevision> {
     const run = runs.get(runId);
     if (run === undefined)
       return Promise.reject(new Error(`unknown run: "${runId}"`));
     if (run.finished)
       return Promise.reject(new Error(`run is already finished: "${runId}"`));
+    try {
+      assertCoordinatorLease(runId, lease);
+    } catch (error: unknown) {
+      return Promise.reject(asError(error, "lease fencing failed"));
+    }
     const duplicate = run.graphRevisions.find(
       (entry) => entry.proposal.id === revision.proposal.id,
     );

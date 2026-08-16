@@ -1,6 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { readFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
+import { StringDecoder } from "node:string_decoder";
 import type { JsonValue } from "../graph/types.js";
 import type {
   AgentSession,
@@ -8,8 +9,20 @@ import type {
   AgentSessionInput,
 } from "./agent-session-backend.js";
 import type { CodexAppServerClient } from "./codex-app-server-backend.js";
-import { parseWorkerResult, WORKER_RESULT_FILE } from "./worker-protocol.js";
+import {
+  parseWorkerResult,
+  WORKER_RESULT_FILE,
+  type WorkerResult,
+} from "./worker-protocol.js";
 import { join } from "node:path";
+import {
+  buildChildEnvironment,
+  createSecretRedactor,
+  SAFE_AGENT_EXECUTION_POLICY,
+  validateAgentExecutionPolicy,
+  type AgentExecutionPolicy,
+  type SecretRedactor,
+} from "./execution-policy.js";
 
 export interface CodexAppServerStdioClientOptions {
   /** Codex executable. Default "codex". */
@@ -18,7 +31,14 @@ export interface CodexAppServerStdioClientOptions {
   readonly commandArgs?: readonly string[];
   readonly model?: string;
   readonly reasoningEffort?: string;
+  /** Host-side environment isolation and secret-redaction policy. */
+  readonly executionPolicy?: AgentExecutionPolicy;
+  /** @deprecated Use executionPolicy.environment.values. */
   readonly env?: Readonly<Record<string, string | undefined>>;
+  /** Maximum time for one JSON-RPC response. Default 60000ms. */
+  readonly requestTimeoutMs?: number;
+  /** Maximum silence while waiting for an active turn. Default 60000ms. */
+  readonly turnIdleTimeoutMs?: number;
 }
 
 interface RpcResponse {
@@ -41,6 +61,7 @@ interface ActiveTurn {
   readonly input: AgentSessionInput;
   readonly events: EventQueue;
   turnId: string;
+  timeout?: ReturnType<typeof setTimeout>;
 }
 
 class EventQueue {
@@ -79,12 +100,58 @@ class EventQueue {
 export function createCodexAppServerStdioClient(
   options: CodexAppServerStdioClientOptions = {},
 ): CodexAppServerClient {
+  const requestTimeoutMs = options.requestTimeoutMs ?? 60_000;
+  const turnIdleTimeoutMs = options.turnIdleTimeoutMs ?? 60_000;
+  validateDuration("requestTimeoutMs", requestTimeoutMs);
+  validateDuration("turnIdleTimeoutMs", turnIdleTimeoutMs);
+  const executionPolicy = mergeLegacyEnvironment(
+    options.executionPolicy ?? SAFE_AGENT_EXECUTION_POLICY,
+    options.env,
+  );
+  validateAgentExecutionPolicy(executionPolicy);
+  const redact = createSecretRedactor(executionPolicy, process.env);
   let child: ChildProcessWithoutNullStreams | undefined;
   let lineReader: ReturnType<typeof createInterface> | undefined;
   let initialization: Promise<void> | undefined;
   let nextId = 1;
   const pending = new Map<number, PendingRequest>();
   const turns = new Map<string, ActiveTurn>();
+
+  const waitForResponse = (id: number, method: string): Promise<unknown> =>
+    new Promise<unknown>((resolve, reject) => {
+      const timeout = setTimeout(() => {
+        pending.delete(id);
+        reject(
+          new Error(
+            `Codex App Server ${method} request timed out after ${String(requestTimeoutMs)}ms`,
+          ),
+        );
+      }, requestTimeoutMs);
+      timeout.unref();
+      pending.set(id, {
+        resolve(value) {
+          clearTimeout(timeout);
+          resolve(value);
+        },
+        reject(error) {
+          clearTimeout(timeout);
+          reject(error);
+        },
+      });
+    });
+
+  const armTurnTimeout = (threadId: string, active: ActiveTurn): void => {
+    if (active.timeout !== undefined) clearTimeout(active.timeout);
+    active.timeout = setTimeout(() => {
+      if (turns.get(threadId) !== active || active.events.done) return;
+      active.events.push({
+        kind: "protocol_error",
+        error: `Codex App Server turn was silent for ${String(turnIdleTimeoutMs)}ms`,
+      });
+      active.events.end();
+    }, turnIdleTimeoutMs);
+    active.timeout.unref();
+  };
 
   const send = (message: unknown): void => {
     if (child === undefined || child.stdin.destroyed) {
@@ -96,9 +163,7 @@ export function createCodexAppServerStdioClient(
   const request = async (method: string, params: unknown): Promise<unknown> => {
     await ensureInitialized();
     const id = nextId++;
-    const response = new Promise<unknown>((resolve, reject) => {
-      pending.set(id, { resolve, reject });
-    });
+    const response = waitForResponse(id, method);
     send({ method, id, params });
     return response;
   };
@@ -109,7 +174,7 @@ export function createCodexAppServerStdioClient(
         options.command ?? "codex",
         [...(options.commandArgs ?? []), "app-server"],
         {
-          env: { ...process.env, ...options.env },
+          env: buildChildEnvironment(executionPolicy, process.env),
           stdio: ["pipe", "pipe", "pipe"],
         },
       );
@@ -118,12 +183,22 @@ export function createCodexAppServerStdioClient(
       child.unref();
       lineReader = createInterface({ input: child.stdout });
       lineReader.on("line", (line) => handleMessage(line));
-      child.stderr.on("data", (chunk: Buffer) => {
-        const text = chunk.toString("utf8");
-        if (text.trim().length === 0) return;
-        for (const active of turns.values()) {
+      const stderrDecoder = new StringDecoder("utf8");
+      const stderrRedactor = createStreamingRedactor(redact);
+      const emitStderr = (text: string): void => {
+        if (text.trim().length === 0 || turns.size !== 1) return;
+        const entry = turns.entries().next().value;
+        if (entry !== undefined) {
+          const [threadId, active] = entry;
           active.events.push({ kind: "output", text });
+          armTurnTimeout(threadId, active);
         }
+      };
+      child.stderr.on("data", (chunk: Buffer) => {
+        emitStderr(stderrRedactor.write(stderrDecoder.write(chunk)));
+      });
+      child.stderr.once("end", () => {
+        emitStderr(stderrRedactor.end(stderrDecoder.end()));
       });
       child.once("error", (error) => failTransport(error));
       child.once("exit", (code, signal) => {
@@ -135,9 +210,7 @@ export function createCodexAppServerStdioClient(
       });
 
       const id = 0;
-      const initialized = new Promise<unknown>((resolve, reject) => {
-        pending.set(id, { resolve, reject });
-      });
+      const initialized = waitForResponse(id, "initialize");
       send({
         method: "initialize",
         id,
@@ -194,6 +267,7 @@ export function createCodexAppServerStdioClient(
     if (threadId === undefined) return;
     const active = turns.get(threadId);
     if (active === undefined) return;
+    armTurnTimeout(threadId, active);
     if (active.turnId.length === 0 && typeof params["turnId"] === "string") {
       active.turnId = params["turnId"];
     }
@@ -222,6 +296,7 @@ export function createCodexAppServerStdioClient(
     active: ActiveTurn,
     turn: Record<string, unknown>,
   ): Promise<void> => {
+    if (active.timeout !== undefined) clearTimeout(active.timeout);
     const result = await readWorkerResult(active.input).catch(
       (error: unknown) => ({
         status: "failed" as const,
@@ -230,7 +305,10 @@ export function createCodexAppServerStdioClient(
       }),
     );
     if (result !== undefined) {
-      active.events.push({ kind: "result", result });
+      active.events.push({
+        kind: "result",
+        result: redactWorkerResult(result, redact),
+      });
     } else {
       const status =
         typeof turn["status"] === "string" ? turn["status"] : "unknown";
@@ -259,7 +337,8 @@ export function createCodexAppServerStdioClient(
 
   const broadcastProtocolError = (error: string): void => {
     for (const active of turns.values()) {
-      active.events.push({ kind: "protocol_error", error });
+      if (active.timeout !== undefined) clearTimeout(active.timeout);
+      active.events.push({ kind: "protocol_error", error: redact(error) });
       active.events.end();
     }
   };
@@ -271,6 +350,7 @@ export function createCodexAppServerStdioClient(
     const events = new EventQueue();
     const active: ActiveTurn = { input, events, turnId: "" };
     turns.set(threadId, active);
+    armTurnTimeout(threadId, active);
     try {
       const result = await request("turn/start", {
         threadId,
@@ -320,6 +400,7 @@ export function createCodexAppServerStdioClient(
       const events = new EventQueue();
       const active: ActiveTurn = { input, events, turnId };
       turns.set(session.id, active);
+      armTurnTimeout(session.id, active);
       try {
         const result = await request("thread/resume", {
           threadId: session.id,
@@ -386,6 +467,9 @@ export function createCodexAppServerStdioClient(
           yield next.value;
         }
       } finally {
+        if (turns.get(session.id)?.timeout !== undefined) {
+          clearTimeout(turns.get(session.id)?.timeout);
+        }
         turns.delete(session.id);
       }
     },
@@ -421,6 +505,97 @@ function sessionTurnId(state: JsonValue): string | undefined {
   return isRecord(state) && typeof state["turnId"] === "string"
     ? state["turnId"]
     : undefined;
+}
+
+function mergeLegacyEnvironment(
+  policy: AgentExecutionPolicy,
+  values: Readonly<Record<string, string | undefined>> | undefined,
+): AgentExecutionPolicy {
+  if (values === undefined) return policy;
+  return {
+    ...policy,
+    environment: {
+      ...policy.environment,
+      values: { ...policy.environment?.values, ...values },
+    },
+  };
+}
+
+function createStreamingRedactor(redactor: SecretRedactor): {
+  write(value: string): string;
+  end(value: string): string;
+} {
+  if (redactor.secrets.length === 0) {
+    return { write: (value) => value, end: (value) => value };
+  }
+  let buffer = "";
+  const longest = redactor.secrets[0]?.length ?? 0;
+  const drain = (flush: boolean): string => {
+    const output: string[] = [];
+    const retained = flush ? 0 : Math.max(0, longest - 1);
+    while (buffer.length > retained) {
+      const secret = redactor.secrets.find((candidate) =>
+        buffer.startsWith(candidate),
+      );
+      if (secret !== undefined) {
+        output.push("[REDACTED]");
+        buffer = buffer.slice(secret.length);
+      } else {
+        output.push(buffer[0] ?? "");
+        buffer = buffer.slice(1);
+      }
+    }
+    return output.join("");
+  };
+  return {
+    write(value) {
+      buffer += value;
+      return drain(false);
+    },
+    end(value) {
+      buffer += value;
+      return drain(true);
+    },
+  };
+}
+
+function redactWorkerResult(
+  result: WorkerResult,
+  redact: SecretRedactor,
+): WorkerResult {
+  if (result.status === "failed") {
+    return result.error === undefined
+      ? result
+      : { ...result, error: redact(result.error) };
+  }
+  return { ...result, output: redactJsonValue(result.output, redact) };
+}
+
+function redactJsonValue(value: JsonValue, redact: SecretRedactor): JsonValue {
+  if (typeof value === "string") return redact(value);
+  if (isJsonArray(value)) {
+    return value.map((entry) => redactJsonValue(entry, redact));
+  }
+  if (isRecord(value)) {
+    const record: Readonly<Record<string, JsonValue>> = value;
+    return Object.fromEntries(
+      Object.entries(record).map(([key, entry]) => [
+        redact(key),
+        redactJsonValue(entry, redact),
+      ]),
+    );
+  }
+  return value;
+}
+
+function isJsonArray(value: JsonValue): value is readonly JsonValue[] {
+  return Array.isArray(value);
+}
+
+function validateDuration(name: string, value: number): void {
+  if (!Number.isFinite(value) || value <= 0) {
+    throw new Error(`${name} must be a finite number greater than 0`);
+  }
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

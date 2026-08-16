@@ -4,7 +4,7 @@ import type {
   JsonValue,
   NodeDefinition,
 } from "../graph/types.js";
-import type { RunStore } from "./ports.js";
+import type { RunLease, RunStore } from "./ports.js";
 
 /** A proposed append-only change to a running graph. */
 export interface GraphExpansionProposal {
@@ -58,6 +58,7 @@ export async function submitGraphProposal(
   runId: string,
   proposal: GraphExpansionProposal,
   policy: GraphProposalPolicy,
+  lease: RunLease,
 ): Promise<GraphProposalResult> {
   validateProposalShape(proposal);
   if (
@@ -109,6 +110,7 @@ export async function submitGraphProposal(
     runId,
     revision,
     run.graphRevision,
+    lease,
   );
   return resultFor(persisted);
 }

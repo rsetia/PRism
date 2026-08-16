@@ -1,6 +1,7 @@
 import { describe, expect, test } from "vitest";
 import {
   compileGraph,
+  createManualClock,
   createMemoryStore,
   createEngine,
   createExecutorRegistry,
@@ -8,6 +9,25 @@ import {
   parseGraph,
   submitGraphProposal,
 } from "../src/index.js";
+import type {
+  GraphExpansionProposal,
+  GraphProposalPolicy,
+  RunStore,
+} from "../src/index.js";
+
+async function submitProposal(
+  store: RunStore,
+  runId: string,
+  proposal: GraphExpansionProposal,
+  policy: GraphProposalPolicy,
+) {
+  const lease = await store.acquireCoordinatorLease(runId, "test", 30_000);
+  try {
+    return await submitGraphProposal(store, runId, proposal, policy, lease);
+  } finally {
+    await store.releaseLease(lease);
+  }
+}
 
 function graph() {
   const parsed = parseGraph({
@@ -22,6 +42,37 @@ function graph() {
 }
 
 describe("audited graph expansion", () => {
+  test("rejects a revision from a coordinator that lost its lease", async () => {
+    const clock = createManualClock();
+    const store = createMemoryStore({ now: () => clock.now() });
+    await store.createRun({ runId: "r", graph: graph() });
+    const stale = await store.acquireCoordinatorLease("r", "stale", 10);
+    clock.advance(10);
+    const current = await store.acquireCoordinatorLease("r", "current", 10);
+
+    await expect(
+      submitGraphProposal(
+        store,
+        "r",
+        {
+          id: "stale-proposal",
+          proposer: "start",
+          nodes: {
+            follow: {
+              executor: "constant",
+              dependsOn: ["start"],
+            },
+          },
+        },
+        () => ({ status: "accepted", policy: "test" }),
+        stale,
+      ),
+    ).rejects.toThrow("fencing conflict");
+    expect((await store.getRun("r"))?.graph.order).toEqual(["start"]);
+    expect(await store.listGraphRevisions?.("r")).toEqual([]);
+    await store.releaseLease(current);
+  });
+
   test("accepts an append exactly once and exposes its revision to inspect", async () => {
     const store = createMemoryStore({ now: () => 42 });
     await store.createRun({ runId: "r", graph: graph() });
@@ -32,8 +83,8 @@ describe("audited graph expansion", () => {
       finalNode: "follow",
     } as const;
     const policy = () => ({ status: "accepted" as const, policy: "test" });
-    const first = await submitGraphProposal(store, "r", proposal, policy);
-    const replay = await submitGraphProposal(store, "r", proposal, policy);
+    const first = await submitProposal(store, "r", proposal, policy);
+    const replay = await submitProposal(store, "r", proposal, policy);
 
     expect(first.status).toBe("accepted");
     expect(replay.revision.sequence).toBe(0);
@@ -44,7 +95,7 @@ describe("audited graph expansion", () => {
   test("records rejected and cyclic proposals without changing the graph", async () => {
     const store = createMemoryStore();
     await store.createRun({ runId: "r", graph: graph() });
-    const rejected = await submitGraphProposal(
+    const rejected = await submitProposal(
       store,
       "r",
       {
@@ -54,7 +105,7 @@ describe("audited graph expansion", () => {
       },
       () => ({ status: "rejected", policy: "operator", reason: "not now" }),
     );
-    const cycle = await submitGraphProposal(
+    const cycle = await submitProposal(
       store,
       "r",
       {
@@ -78,7 +129,7 @@ describe("audited graph expansion", () => {
   test("rejects attempts to replace an existing node definition", async () => {
     const store = createMemoryStore();
     await store.createRun({ runId: "r", graph: graph() });
-    const result = await submitGraphProposal(
+    const result = await submitProposal(
       store,
       "r",
       {

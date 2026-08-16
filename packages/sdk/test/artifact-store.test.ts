@@ -71,6 +71,27 @@ describe("createLocalArtifactStore durable metadata", () => {
     ]);
   });
 
+  test("concurrent store instances preserve every manifest entry", async () => {
+    const baseDir = join(root, "concurrent-instances");
+    const first = createLocalArtifactStore({ baseDir });
+    const second = createLocalArtifactStore({ baseDir });
+    await Promise.all(
+      Array.from({ length: 20 }, (_, index) =>
+        (index % 2 === 0 ? first : second).put(
+          put({ filename: `artifact-${String(index)}.txt` }),
+        ),
+      ),
+    );
+
+    const artifacts = await first.list({ runId: "r", nodeId: "n" });
+    expect(artifacts.map((artifact) => artifact.filename).sort()).toEqual(
+      Array.from(
+        { length: 20 },
+        (_, index) => `artifact-${String(index)}.txt`,
+      ).sort(),
+    );
+  });
+
   test("missing artifact files do not leave phantom metadata", async () => {
     const baseDir = join(root, "missing");
     const first = createLocalArtifactStore({ baseDir });

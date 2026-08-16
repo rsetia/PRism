@@ -760,6 +760,9 @@ async function executeRun(
   async function submitProposal(
     proposal: import("./graph-revision.js").GraphExpansionProposal,
   ) {
+    if (currentCoordinatorLease === undefined) {
+      throw new Error("graph proposals require a coordinator lease");
+    }
     const result = await submitGraphProposal(
       store,
       runId,
@@ -788,6 +791,7 @@ async function executeRun(
         }
         return graphProposalPolicy(candidate, context);
       },
+      currentCoordinatorLease,
     );
     if (result.status === "accepted" && result.revision.graph !== undefined) {
       graph = result.revision.graph;
@@ -1216,6 +1220,7 @@ async function executeRun(
     return true;
   }
 
+  let executionFailure: Error | undefined;
   try {
     if (initialState !== undefined) {
       for (const nodeId of graph.order) {
@@ -1401,12 +1406,21 @@ async function executeRun(
       status: "succeeded",
       output: outputs.get(graph.finalNode) as JsonValue,
     };
+  } catch (error: unknown) {
+    executionFailure =
+      error instanceof Error
+        ? error
+        : new Error("scheduler execution failed", { cause: error });
+    throw executionFailure;
   } finally {
     if (coordinatorRenewalTimer !== undefined) {
       clearInterval(coordinatorRenewalTimer);
     }
     await coordinatorRenewalTail;
-    if (coordinatorRenewalFailure !== undefined) {
+    if (
+      executionFailure === undefined &&
+      coordinatorRenewalFailure !== undefined
+    ) {
       throw coordinatorRenewalFailure;
     }
   }

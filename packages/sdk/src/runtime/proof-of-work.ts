@@ -2,7 +2,7 @@ import type { JsonValue } from "../graph/types.js";
 import { isPlainObject } from "../internal/json.js";
 import type { ArtifactRef } from "./ports.js";
 
-/** Current durable evidence schema produced by Prism's agent executors. */
+/** Current durable self-reported evidence schema produced by Prism's agents. */
 export const PROOF_OF_WORK_VERSION = 1 as const;
 
 export interface CommitEvidence {
@@ -31,8 +31,12 @@ export interface ReviewVerdictEvidence {
 }
 
 /**
- * Backend-neutral, machine-verifiable evidence for one agent node. Artifact
- * values are references, never local filesystem paths or embedded bytes.
+ * Backend-neutral, machine-readable evidence reported by one agent node.
+ * Parsing verifies only this schema, not the external truth of commits, pull
+ * requests, validations, or review verdicts. Hosts that require attestation
+ * must verify those references against their source systems before trusting
+ * them for authorization. Artifact values are references, never local paths
+ * or embedded bytes.
  */
 export interface ProofOfWorkV1 {
   readonly version: typeof PROOF_OF_WORK_VERSION;

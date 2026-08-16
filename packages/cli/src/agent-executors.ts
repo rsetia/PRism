@@ -88,6 +88,7 @@ export function createAgentExecutorRegistry(
           model: options.codexModel ?? DEFAULT_CODEX_MODEL,
           reasoningEffort:
             options.codexReasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT,
+          executionPolicy: TRUSTED_LOCAL_AGENT_EXECUTION_POLICY,
         })
       : undefined;
   const sessionBackend =

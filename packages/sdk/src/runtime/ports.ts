@@ -234,6 +234,7 @@ export interface RunStore {
     runId: string,
     revision: GraphRevision,
     expectedGraphRevision: number,
+    lease: RunLease,
   ): Promise<GraphRevision>;
   /** Durable audit trail, including rejected proposals, in decision order. */
   listGraphRevisions?(runId: string): Promise<readonly GraphRevision[]>;

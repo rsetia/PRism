@@ -1,12 +1,15 @@
 import {
   mkdir,
   lstat,
+  open,
   readFile,
   readdir,
   realpath,
   rename,
   stat,
+  unlink,
   writeFile,
+  type FileHandle,
 } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
 import { resolve, sep } from "node:path";
@@ -21,6 +24,10 @@ import { decodePathComponent, encodePathComponent } from "./path-component.js";
 import { isPlainObject } from "../internal/json.js";
 
 const METADATA_FILE = ".prism-artifacts-v1.json";
+const METADATA_LOCK_FILE = ".prism-artifacts-v1.lock";
+const LOCK_RETRY_MS = 10;
+const LOCK_TIMEOUT_MS = 5_000;
+const STALE_LOCK_MS = 30_000;
 
 interface ArtifactMetadata {
   readonly filename: string;
@@ -89,20 +96,22 @@ export function createLocalArtifactStore(
       await writeFile(path, input.data);
 
       const previousWrite = metadataWrites.get(directory) ?? Promise.resolve();
-      const metadataWrite = previousWrite.then(async () => {
-        const manifest = await readManifest(directory);
-        const metadata: ArtifactMetadata = {
-          filename: input.filename,
-          size: input.data.byteLength,
-          ...(input.contentType === undefined
-            ? {}
-            : { contentType: input.contentType }),
-        };
-        await writeManifest(directory, {
-          version: 1,
-          entries: { ...manifest.entries, [filename]: metadata },
-        });
-      });
+      const metadataWrite = previousWrite.then(() =>
+        withManifestLock(directory, async () => {
+          const manifest = await readManifest(directory);
+          const metadata: ArtifactMetadata = {
+            filename: input.filename,
+            size: input.data.byteLength,
+            ...(input.contentType === undefined
+              ? {}
+              : { contentType: input.contentType }),
+          };
+          await writeManifest(directory, {
+            version: 1,
+            entries: { ...manifest.entries, [filename]: metadata },
+          });
+        }),
+      );
       metadataWrites.set(directory, metadataWrite);
       try {
         await metadataWrite;
@@ -207,6 +216,57 @@ export function createLocalArtifactStore(
       return Object.freeze(refs);
     },
   });
+}
+
+async function withManifestLock<T>(
+  directory: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const lockPath = resolve(directory, METADATA_LOCK_FILE);
+  const deadline = Date.now() + LOCK_TIMEOUT_MS;
+  let handle: FileHandle | undefined;
+  for (;;) {
+    try {
+      handle = await open(lockPath, "wx");
+      await handle.writeFile(
+        JSON.stringify({ pid: process.pid, createdAtMs: Date.now() }),
+        "utf8",
+      );
+      break;
+    } catch (error: unknown) {
+      if (!isErrnoException(error, "EEXIST")) throw error;
+      try {
+        const metadata = await stat(lockPath);
+        if (Date.now() - metadata.mtimeMs > STALE_LOCK_MS) {
+          await unlink(lockPath);
+          continue;
+        }
+      } catch (lockError: unknown) {
+        if (isErrnoException(lockError, "ENOENT")) continue;
+        throw lockError;
+      }
+      if (Date.now() >= deadline) {
+        throw new Error(
+          `Timed out acquiring artifact metadata lock: ${lockPath}`,
+        );
+      }
+      await new Promise<void>((resolveDelay) =>
+        setTimeout(resolveDelay, LOCK_RETRY_MS),
+      );
+    }
+  }
+
+  if (handle === undefined) {
+    throw new Error(`Could not acquire artifact metadata lock: ${lockPath}`);
+  }
+  try {
+    return await operation();
+  } finally {
+    await handle.close();
+    await unlink(lockPath).catch((error: unknown) => {
+      if (!isErrnoException(error, "ENOENT")) throw error;
+    });
+  }
 }
 
 async function readManifest(directory: string): Promise<ArtifactManifest> {

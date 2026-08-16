@@ -310,6 +310,13 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     }
   }
 
+  function assertCoordinatorLease(runId: string, lease: RunLease): void {
+    if (lease.kind !== "coordinator" || lease.runId !== runId) {
+      throw new Error(`lease fencing conflict for run: "${runId}"`);
+    }
+    assertCurrentLease(lease);
+  }
+
   function createRun(input: {
     readonly runId: string;
     readonly graph: CompiledGraph;
@@ -339,7 +346,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
         if (readNumber(run, "finished") === 1) {
           throw new Error(`run is already finished: "${runId}"`);
         }
-        if (lease !== undefined) assertCurrentLease(lease);
+        if (lease !== undefined) assertCoordinatorLease(runId, lease);
 
         const nextSequenceRow = selectNextSequence.get(runId);
         let sequence = readNumber(nextSequenceRow, "next_seq");
@@ -455,17 +462,25 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     return capture(() => {
       assertOpen();
       ensureSchemaCurrent();
-      const run = selectRun.get(runId);
-      if (run === undefined) {
-        throw new Error(`unknown run: "${runId}"`);
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const run = selectRun.get(runId);
+        if (run === undefined) {
+          throw new Error(`unknown run: "${runId}"`);
+        }
+        if (readNumber(run, "finished") === 1) {
+          db.exec("COMMIT");
+          return;
+        }
+        if (lease !== undefined) assertCoordinatorLease(runId, lease);
+        const persistedOutcome = snapshotRunOutcome(outcome);
+        finishRunStatement.run(JSON.stringify(persistedOutcome), runId);
+        db.exec("COMMIT");
+        wakeReaders(runId);
+      } catch (error: unknown) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
       }
-      if (readNumber(run, "finished") === 1) {
-        return;
-      }
-      if (lease !== undefined) assertCurrentLease(lease);
-      const persistedOutcome = snapshotRunOutcome(outcome);
-      finishRunStatement.run(JSON.stringify(persistedOutcome), runId);
-      wakeReaders(runId);
     });
   }
 
@@ -473,10 +488,17 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     return capture(() => {
       assertOpen();
       ensureSchemaCurrent();
-      if (lease !== undefined) assertCurrentLease(lease);
-      const result = reopenRunStatement.run(runId);
-      if (result.changes === 0) {
-        throw new Error(`unknown run: "${runId}"`);
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        if (selectRun.get(runId) === undefined) {
+          throw new Error(`unknown run: "${runId}"`);
+        }
+        if (lease !== undefined) assertCoordinatorLease(runId, lease);
+        reopenRunStatement.run(runId);
+        db.exec("COMMIT");
+      } catch (error: unknown) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
       }
     });
   }
@@ -541,6 +563,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     runId: string,
     revision: GraphRevision,
     expectedGraphRevision: number,
+    lease: RunLease,
   ): Promise<GraphRevision> {
     return capture(() => {
       assertOpen();
@@ -552,6 +575,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
         if (readNumber(run, "finished") === 1) {
           throw new Error(`run is already finished: "${runId}"`);
         }
+        assertCoordinatorLease(runId, lease);
         const duplicate = selectGraphRevisionByProposal.get(
           runId,
           revision.proposal.id,
