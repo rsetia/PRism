@@ -190,9 +190,15 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     db.exec("BEGIN IMMEDIATE");
     try {
       if (!hasGraphRevision) {
-        db.exec(
-          "ALTER TABLE runs ADD COLUMN graph_revision INTEGER NOT NULL DEFAULT 0",
-        );
+        const migratedByAnotherProcess = db
+          .prepare("PRAGMA table_info(runs)")
+          .all()
+          .some((column) => readString(column, "name") === "graph_revision");
+        if (!migratedByAnotherProcess) {
+          db.exec(
+            "ALTER TABLE runs ADD COLUMN graph_revision INTEGER NOT NULL DEFAULT 0",
+          );
+        }
         hasGraphRevision = true;
         selectRun = prepareSelectRun(true);
       }
