@@ -129,6 +129,32 @@ describe("applyGreptileAppSlug", () => {
     ).toThrow("graph has no Greptile review nodes");
   });
 
+  test("preserves version 2 conditions", () => {
+    const compiled = compileGraph({
+      version: 2,
+      nodes: {
+        work: {
+          executor: "implement",
+          dependsOn: [],
+          config: { review: { by: "greptile" } },
+        },
+        gated: {
+          executor: "passthrough",
+          dependsOn: ["work"],
+          when: { predicate: "diff_present", equals: true },
+        },
+      },
+      finalNode: "gated",
+    });
+    if (!compiled.ok) throw new Error("test graph did not compile");
+
+    const applied = applyGreptileAppSlug(compiled.graph, "greptile-apps");
+    expect(applied.graph.version).toBe(2);
+    expect(applied.graph.nodes["gated"]?.when).toEqual(
+      compiled.graph.nodes["gated"]?.when,
+    );
+  });
+
   test("rejects a blank requested slug", () => {
     expect(() => applyGreptileAppSlug(compiledGraph(), " ")).toThrow(
       "non-empty",

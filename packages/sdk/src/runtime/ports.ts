@@ -1,6 +1,12 @@
 import type { CompiledGraph, JsonValue, NodeKind } from "../graph/types.js";
-import type { PersistedRunEvent, RunEvent } from "./events.js";
+import type { GraphRevision } from "./graph-revision.js";
+import type {
+  GraphExpansionProposal,
+  GraphProposalResult,
+} from "./graph-revision.js";
+import type { PersistedRunEvent, RunEvent, UsageReport } from "./events.js";
 import type { NodePhase } from "./events.js";
+import type { AgentProgressState } from "../node/agent-progress.js";
 import type { FailureClass } from "./types.js";
 import type { RunOutcome } from "./types.js";
 
@@ -47,6 +53,14 @@ export interface ExecutionContext {
   readonly signal: AbortSignal;
   /** Persist a transition to a named execution phase for timing attribution. */
   readonly reportPhase: (phase: NodePhase) => Promise<void>;
+  /** Append normalized provider usage for this attempt. */
+  readonly reportUsage?: (usage: UsageReport) => Promise<void>;
+  /** Persist the latest agent-progress state for watch and inspect consumers. */
+  readonly reportAgentProgress?: (state: AgentProgressState) => Promise<void>;
+  /** Propose an append-only graph expansion through the engine's policy gate. */
+  readonly submitGraphProposal?: (
+    proposal: GraphExpansionProposal,
+  ) => Promise<GraphProposalResult>;
 }
 
 /**
@@ -107,6 +121,8 @@ interface StoredRunBase {
   readonly graph: CompiledGraph;
   /** Next event sequence; an optimistic revision for resume appends. */
   readonly revision: number;
+  /** Revision of the graph snapshot currently dispatched by the scheduler. */
+  readonly graphRevision: number;
 }
 
 /**
@@ -127,6 +143,26 @@ export type StoredRun =
 export interface RunSummary {
   readonly runId: string;
   readonly finished: boolean;
+}
+
+/** A time-bounded exclusive claim on either a run coordinator or one node. */
+export interface RunLease {
+  readonly kind: "coordinator" | "node";
+  readonly runId: string;
+  readonly nodeId?: string;
+  /** Opaque caller identity; stores never expose it to observers. */
+  readonly owner: string;
+  /** Monotonically increasing generation used to fence replaced owners. */
+  readonly fencingToken: number;
+  readonly expiresAtMs: number;
+}
+
+/** Safe ownership information suitable for status and inspect output. */
+export interface RunLeaseStatus {
+  readonly kind: RunLease["kind"];
+  readonly nodeId?: string;
+  readonly fencingToken: number;
+  readonly expiresAtMs: number;
 }
 
 /**
@@ -159,12 +195,49 @@ export interface RunStore {
     runId: string,
     events: readonly RunEvent[],
     expectedRevision?: number,
+    lease?: RunLease,
   ): Promise<readonly PersistedRunEvent[]>;
   readEvents(runId: string, fromSeq?: number): AsyncIterable<PersistedRunEvent>;
   getRun(runId: string): Promise<StoredRun | undefined>;
   listRuns(): Promise<readonly RunSummary[]>;
-  finishRun(runId: string, outcome: RunOutcome): Promise<void>;
-  reopenRun(runId: string): Promise<void>;
+  finishRun(
+    runId: string,
+    outcome: RunOutcome,
+    lease?: RunLease,
+  ): Promise<void>;
+  reopenRun(runId: string, lease?: RunLease): Promise<void>;
+  /** Acquire an exclusive renewable coordinator lease, or reject on conflict. */
+  acquireCoordinatorLease(
+    runId: string,
+    owner: string,
+    durationMs: number,
+  ): Promise<RunLease>;
+  /** Acquire an exclusive renewable per-node lease, or reject on conflict. */
+  acquireNodeLease(
+    runId: string,
+    nodeId: string,
+    owner: string,
+    durationMs: number,
+  ): Promise<RunLease>;
+  /** Extend a lease only when its fencing token remains current. */
+  renewLease(lease: RunLease, durationMs: number): Promise<RunLease>;
+  /** Idempotently release a current lease. Stale releases cannot release a successor. */
+  releaseLease(lease: RunLease): Promise<void>;
+  /** Returns current non-expired ownership without exposing owner identities. */
+  getRunLeases(runId: string): Promise<readonly RunLeaseStatus[]>;
+  /**
+   * Atomically records an audited graph decision. Accepted revisions replace
+   * the run's graph snapshot; rejected revisions deliberately leave it alone.
+   * Re-submitting the same proposal id is idempotent.
+   */
+  appendGraphRevision?(
+    runId: string,
+    revision: GraphRevision,
+    expectedGraphRevision: number,
+    lease: RunLease,
+  ): Promise<GraphRevision>;
+  /** Durable audit trail, including rejected proposals, in decision order. */
+  listGraphRevisions?(runId: string): Promise<readonly GraphRevision[]>;
   close?(): Promise<void>;
 }
 

@@ -4,13 +4,22 @@ import {
   snapshotRunOutcome,
 } from "../internal/persistence.js";
 import type { PersistedRunEvent, RunEvent } from "../runtime/events.js";
-import type { RunStore, RunSummary, StoredRun } from "../runtime/ports.js";
+import type {
+  RunLease,
+  RunLeaseStatus,
+  RunStore,
+  RunSummary,
+  StoredRun,
+} from "../runtime/ports.js";
 import type { RunOutcome } from "../runtime/types.js";
+import type { GraphRevision } from "../runtime/graph-revision.js";
 
 interface MemoryRun {
   readonly runId: string;
-  readonly graph: CompiledGraph;
   readonly events: PersistedRunEvent[];
+  readonly graphRevisions: GraphRevision[];
+  graphRevision: number;
+  graph: CompiledGraph;
   readonly waiters: Set<() => void>;
   finished: boolean;
   outcome: RunOutcome | undefined;
@@ -22,6 +31,10 @@ function wakeReaders(run: MemoryRun): void {
   for (const resolve of waiters) {
     resolve();
   }
+}
+
+function asError(error: unknown, message: string): Error {
+  return error instanceof Error ? error : new Error(message, { cause: error });
 }
 
 /**
@@ -47,7 +60,80 @@ export interface MemoryStoreOptions {
 
 export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
   const runs = new Map<string, MemoryRun>();
+  const leases = new Map<string, RunLease>();
+  let nextFencingToken = 1;
   const now = options.now ?? Date.now;
+
+  function leaseKey(
+    lease: Pick<RunLease, "kind" | "runId" | "nodeId">,
+  ): string {
+    return `${lease.runId}\u0000${lease.kind}\u0000${lease.nodeId ?? ""}`;
+  }
+
+  function duration(durationMs: number): void {
+    if (!Number.isFinite(durationMs) || durationMs <= 0) {
+      throw new Error("lease duration must be a finite number greater than 0");
+    }
+  }
+
+  function assertCurrentLease(lease: RunLease): void {
+    const current = leases.get(leaseKey(lease));
+    if (
+      current === undefined ||
+      current.fencingToken !== lease.fencingToken ||
+      current.owner !== lease.owner ||
+      current.expiresAtMs <= now()
+    ) {
+      throw new Error(`lease fencing conflict for run: "${lease.runId}"`);
+    }
+  }
+
+  function assertCoordinatorLease(runId: string, lease: RunLease): void {
+    if (lease.kind !== "coordinator" || lease.runId !== runId) {
+      throw new Error(`lease fencing conflict for run: "${runId}"`);
+    }
+    assertCurrentLease(lease);
+  }
+
+  function acquire(
+    kind: RunLease["kind"],
+    runId: string,
+    nodeId: string | undefined,
+    owner: string,
+    durationMs: number,
+  ): Promise<RunLease> {
+    try {
+      duration(durationMs);
+      if (runs.get(runId) === undefined)
+        throw new Error(`unknown run: "${runId}"`);
+      if (owner.length === 0) throw new Error("lease owner must not be empty");
+      const key = leaseKey({
+        kind,
+        runId,
+        ...(nodeId === undefined ? {} : { nodeId }),
+      });
+      const current = leases.get(key);
+      if (
+        current !== undefined &&
+        current.expiresAtMs > now() &&
+        current.owner !== owner
+      ) {
+        throw new Error(`lease ownership conflict for run: "${runId}"`);
+      }
+      const lease = Object.freeze({
+        kind,
+        runId,
+        ...(nodeId === undefined ? {} : { nodeId }),
+        owner,
+        fencingToken: nextFencingToken++,
+        expiresAtMs: now() + durationMs,
+      });
+      leases.set(key, lease);
+      return Promise.resolve(lease);
+    } catch (error: unknown) {
+      return Promise.reject(asError(error, "lease acquisition failed"));
+    }
+  }
 
   function createRun(input: {
     readonly runId: string;
@@ -60,6 +146,8 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     runs.set(input.runId, {
       runId: input.runId,
       graph: input.graph,
+      graphRevision: 0,
+      graphRevisions: [],
       finished: false,
       outcome: undefined,
       events: [],
@@ -72,6 +160,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     runId: string,
     events: readonly RunEvent[],
     expectedRevision?: number,
+    lease?: RunLease,
   ): Promise<readonly PersistedRunEvent[]> {
     const run = runs.get(runId);
     if (run === undefined) {
@@ -79,6 +168,13 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     }
     if (run.finished) {
       return Promise.reject(new Error(`run is already finished: "${runId}"`));
+    }
+    if (lease !== undefined) {
+      try {
+        assertCoordinatorLease(runId, lease);
+      } catch (error: unknown) {
+        return Promise.reject(asError(error, "lease fencing failed"));
+      }
     }
     if (
       expectedRevision !== undefined &&
@@ -157,6 +253,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
       runId: run.runId,
       graph: run.graph,
       revision: run.events.length,
+      graphRevision: run.graphRevision,
     };
     if (run.finished) {
       if (run.outcome === undefined) {
@@ -176,13 +273,24 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     return Promise.resolve(Object.freeze({ ...base, finished: false }));
   }
 
-  function finishRun(runId: string, outcome: RunOutcome): Promise<void> {
+  function finishRun(
+    runId: string,
+    outcome: RunOutcome,
+    lease?: RunLease,
+  ): Promise<void> {
     const run = runs.get(runId);
     if (run === undefined) {
       return Promise.reject(new Error(`unknown run: "${runId}"`));
     }
     if (run.finished) {
       return Promise.resolve();
+    }
+    if (lease !== undefined) {
+      try {
+        assertCoordinatorLease(runId, lease);
+      } catch (error: unknown) {
+        return Promise.reject(asError(error, "lease fencing failed"));
+      }
     }
 
     try {
@@ -199,10 +307,17 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     return Promise.resolve();
   }
 
-  function reopenRun(runId: string): Promise<void> {
+  function reopenRun(runId: string, lease?: RunLease): Promise<void> {
     const run = runs.get(runId);
     if (run === undefined) {
       return Promise.reject(new Error(`unknown run: "${runId}"`));
+    }
+    if (lease !== undefined) {
+      try {
+        assertCoordinatorLease(runId, lease);
+      } catch (error: unknown) {
+        return Promise.reject(asError(error, "lease fencing failed"));
+      }
     }
     run.finished = false;
     run.outcome = undefined;
@@ -218,6 +333,118 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     return Promise.resolve(Object.freeze(summaries));
   }
 
+  function acquireCoordinatorLease(
+    runId: string,
+    owner: string,
+    durationMs: number,
+  ): Promise<RunLease> {
+    return acquire("coordinator", runId, undefined, owner, durationMs);
+  }
+  function acquireNodeLease(
+    runId: string,
+    nodeId: string,
+    owner: string,
+    durationMs: number,
+  ): Promise<RunLease> {
+    return acquire("node", runId, nodeId, owner, durationMs);
+  }
+  function renewLease(lease: RunLease, durationMs: number): Promise<RunLease> {
+    try {
+      duration(durationMs);
+      assertCurrentLease(lease);
+      const renewed = Object.freeze({
+        ...lease,
+        expiresAtMs: now() + durationMs,
+      });
+      leases.set(leaseKey(lease), renewed);
+      return Promise.resolve(renewed);
+    } catch (error: unknown) {
+      return Promise.reject(asError(error, "lease renewal failed"));
+    }
+  }
+  function releaseLease(lease: RunLease): Promise<void> {
+    const current = leases.get(leaseKey(lease));
+    if (
+      current?.fencingToken === lease.fencingToken &&
+      current.owner === lease.owner
+    )
+      leases.delete(leaseKey(lease));
+    return Promise.resolve();
+  }
+  function getRunLeases(runId: string): Promise<readonly RunLeaseStatus[]> {
+    const current = [...leases.values()]
+      .filter((lease) => lease.runId === runId && lease.expiresAtMs > now())
+      .map(({ kind, nodeId, fencingToken, expiresAtMs }) =>
+        Object.freeze({
+          kind,
+          ...(nodeId === undefined ? {} : { nodeId }),
+          fencingToken,
+          expiresAtMs,
+        }),
+      );
+    return Promise.resolve(Object.freeze(current));
+  }
+
+  function appendGraphRevision(
+    runId: string,
+    revision: GraphRevision,
+    expectedGraphRevision: number,
+    lease: RunLease,
+  ): Promise<GraphRevision> {
+    const run = runs.get(runId);
+    if (run === undefined)
+      return Promise.reject(new Error(`unknown run: "${runId}"`));
+    if (run.finished)
+      return Promise.reject(new Error(`run is already finished: "${runId}"`));
+    try {
+      assertCoordinatorLease(runId, lease);
+    } catch (error: unknown) {
+      return Promise.reject(asError(error, "lease fencing failed"));
+    }
+    const duplicate = run.graphRevisions.find(
+      (entry) => entry.proposal.id === revision.proposal.id,
+    );
+    if (duplicate !== undefined) return Promise.resolve(duplicate);
+    if (expectedGraphRevision !== run.graphRevision) {
+      return Promise.reject(
+        new Error(
+          `graph revision conflict: expected ${String(expectedGraphRevision)}, actual ${String(run.graphRevision)}`,
+        ),
+      );
+    }
+    if (
+      revision.decision.status === "accepted" &&
+      revision.graph === undefined
+    ) {
+      return Promise.reject(
+        new Error("accepted graph revision is missing graph"),
+      );
+    }
+    const accepted = revision.decision.status === "accepted";
+    const persisted = Object.freeze({
+      ...revision,
+      sequence: run.graphRevisions.length,
+      graphRevision: accepted ? run.graphRevision + 1 : run.graphRevision,
+      timestampMs: now(),
+      addedNodeIds: Object.freeze([...revision.addedNodeIds]),
+    });
+    run.graphRevisions.push(persisted);
+    if (accepted && persisted.graph !== undefined) {
+      run.graph = persisted.graph;
+      run.graphRevision += 1;
+    }
+    return Promise.resolve(persisted);
+  }
+
+  function listGraphRevisions(
+    runId: string,
+  ): Promise<readonly GraphRevision[]> {
+    const run = runs.get(runId);
+    if (run === undefined)
+      return Promise.reject(new Error(`unknown run: "${runId}"`));
+    return Promise.resolve(Object.freeze([...run.graphRevisions]));
+  }
+
   return Object.freeze({
     createRun,
     appendEvents,
@@ -226,5 +453,12 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     listRuns,
     finishRun,
     reopenRun,
+    acquireCoordinatorLease,
+    acquireNodeLease,
+    renewLease,
+    releaseLease,
+    getRunLeases,
+    appendGraphRevision,
+    listGraphRevisions,
   });
 }

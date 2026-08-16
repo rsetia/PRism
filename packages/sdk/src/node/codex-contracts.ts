@@ -288,8 +288,7 @@ export function parseFinalizePrConfig(
  *     none     — gate on CI checks only
  * - after each push, poll only current-head feedback + checks, fix, repeat
  *   until merge-ready or maxIterations is reached
- * - write result.json with metadata { branch (required, exact git branch),
- *   pr_number, head_sha, review_state, greptile_confidence }
+ * - write result.json with versioned proof-of-work evidence
  *
  * Permissions: allowsGitMutation true, allowsGitHubIo true, and trusted host
  * access so Git can update shared worktree metadata and `gh` can reach GitHub.
@@ -301,8 +300,8 @@ export function buildImplementContract(
 ): CodexExecutorContract {
   const branchInstruction =
     config.branchName === undefined
-      ? "Create a focused feature branch with a stable, descriptive name; record its exact name in the result metadata."
-      : `Use the feature branch ${quote(config.branchName)}; record that exact branch name in the result metadata.`;
+      ? "Create a focused feature branch with a stable, descriptive name; record its exact name in the pull-request evidence."
+      : `Use the feature branch ${quote(config.branchName)}; record that exact branch name in the pull-request evidence.`;
   const validation = validationInstruction(
     config.validationCommands,
     "Run the repository's relevant validation before every final push.",
@@ -343,11 +342,13 @@ ${gateInstructions}
 - Stop successfully only when the configured review gate is merge-ready. Perform at most ${String(maxIterations)} implementation/review iterations. If the limit is reached first, write a failed result with failureClass "manual_review_required".
 
 Result:
-- On success, write result.json through the worker protocol as {"status":"succeeded","output":{"summary":"<concise summary>","metadata":{"branch":"<exact git branch>","pr_number":<number-or-null>,"head_sha":"<final head SHA>","review_state":"<approved|changes_requested|pending|null>","greptile_confidence":<number-or-null>}}}.
-- metadata.branch is required and must be the exact checked-out feature branch. Never substitute a node id, work-item id, or display label.`;
+- On success, write result.json as {"status":"succeeded","output":{"version":1,"summary":"<concise summary>","commits":[{"sha":"<commit SHA>","url":"<optional URL>"}],"pullRequests":[{"url":"<PR URL>","number":<number>,"branch":"<exact git branch>","headSha":"<final head SHA>"}],"validations":[{"command":"<command>","status":"passed|failed","details":"<optional details>"}],"reviewVerdicts":[{"reviewer":"<reviewer>","verdict":"approved|changes_requested|pending","url":"<optional URL>","headSha":"<reviewed head SHA>"}],"screenshots":[],"artifacts":[],"unresolvedRisks":[]}}.
+- Every top-level field is required. Use empty arrays when an evidence category does not apply. screenshots and artifacts may contain only ArtifactRef objects with {uri,filename,size,contentType?}; never place local paths or embedded bytes there.
+- pullRequests[0].branch is required and must be the exact checked-out feature branch. Never substitute a node id, work-item id, or display label.`;
 
   return freezeContract({
     instructions,
+    requiredExecutionMode: "trusted-local",
     dangerouslyBypassApprovalsAndSandbox: true,
     allowsGitMutation: true,
     allowsGitHubIo: true,
@@ -360,12 +361,12 @@ Result:
  * `task/merge_resolve`).
  *
  * Instructions: read sourceBranchFrom to find the
- * feature branch (from that upstream's output text or metadata.branch),
+ * feature branch (from that upstream's pullRequests evidence),
  * find/create the PR into targetBranch, merge cleanly if possible;
  * otherwise rebase onto origin/targetBranch, resolve conflicts
  * semantically, run validationCommands, force-with-lease push, merge via
  * GitHub using mergeMethod (default squash). Never direct-push the target.
- * result.json metadata { branch, pr_number, head_sha, merge_commit }.
+ * versioned proof-of-work result.
  * Permissions: allowsGitMutation, allowsGitHubIo, and trusted host access.
  */
 export function buildMergeResolveContract(
@@ -379,7 +380,7 @@ export function buildMergeResolveContract(
   const instructions = `Make the configured feature branch mergeable and merge it through GitHub.
 
 Source and pull request:
-- Read the upstream result identified by config.sourceBranchFrom (${quote(config.sourceBranchFrom)}) in spec.input. Extract the exact feature branch from its output text or metadata.branch; do not treat the upstream node id as a branch name.
+- Read the upstream result identified by config.sourceBranchFrom (${quote(config.sourceBranchFrom)}) in spec.input. Extract the exact feature branch from its pullRequests evidence; do not treat the upstream node id as a branch name.
 - Find or create the GitHub pull request from that feature branch into ${quote(config.targetBranch)}.
 - If GitHub reports that the PR can merge cleanly, merge it through GitHub using the ${config.mergeMethod ?? "squash"} method.
 
@@ -391,10 +392,12 @@ Conflict resolution:
 - Never direct-push ${quote(config.targetBranch)}. GitHub must perform the final merge so the pull request closes and branch state remains consistent.
 
 Result:
-- On success, write result.json through the worker protocol as {"status":"succeeded","output":{"summary":"<concise merge summary>","metadata":{"branch":"<exact feature branch>","pr_number":<number>,"head_sha":"<final feature head SHA>","merge_commit":"<merge commit SHA or null>"}}}.`;
+- On success, write result.json as {"status":"succeeded","output":{"version":1,"summary":"<concise merge summary>","commits":[{"sha":"<merge commit SHA, or final feature SHA when no merge commit is created>"}],"pullRequests":[{"url":"<PR URL>","number":<number>,"branch":"<exact feature branch>","headSha":"<final feature head SHA>"}],"validations":[],"reviewVerdicts":[],"screenshots":[],"artifacts":[],"unresolvedRisks":[]}}.
+- Every top-level field is required. Populate validations when commands run, and use empty arrays for categories that do not apply. Artifact entries must be backend-neutral ArtifactRef objects.`;
 
   return freezeContract({
     instructions,
+    requiredExecutionMode: "trusted-local",
     dangerouslyBypassApprovalsAndSandbox: true,
     allowsGitMutation: true,
     allowsGitHubIo: true,
@@ -452,10 +455,12 @@ ${implementGateInstructions(config.review)}
 - Succeed only when the current head has the configured review verdict and required green checks. Leave the reviewed pull request open for human merge.
 
 Result:
-- On success, write result.json through the worker protocol as {"status":"succeeded","output":{"summary":"<concise finalization summary>","metadata":{"branch":${quote(config.sourceBranch)},"pr_number":<number>,"head_sha":"<final head SHA>","review_state":"<approved|pending|null>","ready_for_human_merge":true}}}.`;
+- On success, write result.json as {"status":"succeeded","output":{"version":1,"summary":"<concise finalization summary; state that it is ready for human merge>","commits":[{"sha":"<final head SHA>"}],"pullRequests":[{"url":"<PR URL>","number":<number>,"branch":${quote(config.sourceBranch)},"headSha":"<final head SHA>"}],"validations":[],"reviewVerdicts":[{"reviewer":"<reviewer>","verdict":"approved|pending","url":"<optional review URL>","headSha":"<final head SHA>"}],"screenshots":[],"artifacts":[],"unresolvedRisks":[]}}.
+- Every top-level field is required. Populate validations with every command run and use empty arrays for categories that do not apply. Artifact entries must be backend-neutral ArtifactRef objects.`;
 
   return freezeContract({
     instructions,
+    requiredExecutionMode: "trusted-local",
     dangerouslyBypassApprovalsAndSandbox: true,
     allowsGitMutation: true,
     allowsGitHubIo: true,

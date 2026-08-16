@@ -9,6 +9,7 @@ import {
   createEngine,
   createExecutorRegistry,
   parseGraph,
+  submitGraphProposal,
 } from "../src/index.js";
 import type {
   CompiledGraph,
@@ -58,6 +59,208 @@ async function collect(
 }
 
 describe("sqlite durability", () => {
+  test("fences expired coordinator leases on SQLite writes", async () => {
+    let now = 0;
+    const store = createSqliteStore({ path: ":memory:", now: () => now });
+    await store.createRun({ runId: "leased", graph: fixtureGraph() });
+    const stale = await store.acquireCoordinatorLease("leased", "first", 10);
+    now = 10;
+    const current = await store.acquireCoordinatorLease("leased", "second", 10);
+    await expect(
+      store.appendEvents(
+        "leased",
+        [{ kind: "node_ready", nodeId: "only" }],
+        0,
+        stale,
+      ),
+    ).rejects.toThrow("fencing conflict");
+    await expect(
+      store.appendEvents(
+        "leased",
+        [{ kind: "node_ready", nodeId: "only" }],
+        0,
+        current,
+      ),
+    ).resolves.toHaveLength(1);
+    await store.close?.();
+  });
+
+  test("fences graph revisions from stale SQLite coordinators", async () => {
+    let now = 0;
+    const store = createSqliteStore({ path: ":memory:", now: () => now });
+    await store.createRun({ runId: "revision", graph: fixtureGraph() });
+    const stale = await store.acquireCoordinatorLease("revision", "first", 10);
+    now = 10;
+    const current = await store.acquireCoordinatorLease(
+      "revision",
+      "second",
+      10,
+    );
+    await expect(
+      submitGraphProposal(
+        store,
+        "revision",
+        {
+          id: "stale",
+          proposer: "only",
+          nodes: {
+            later: { executor: "constant", dependsOn: ["only"] },
+          },
+        },
+        () => ({ status: "accepted", policy: "test" }),
+        stale,
+      ),
+    ).rejects.toThrow("fencing conflict");
+    expect(await store.listGraphRevisions?.("revision")).toEqual([]);
+    await store.releaseLease(current);
+    await store.close?.();
+  });
+
+  test("enforces resource capacity with a SQLite-backed engine", async () => {
+    const parsed = parseGraph({
+      version: 1,
+      resources: { shared: { capacity: 1 } },
+      nodes: {
+        a: { executor: "controlled", resources: ["shared"] },
+        b: { executor: "controlled", resources: ["shared"] },
+      },
+      finalNode: "a",
+    });
+    if (!parsed.ok) throw new Error("fixture parse failed");
+    const compiled = compileGraph(parsed.graph);
+    if (!compiled.ok) throw new Error("fixture compile failed");
+    let active = 0;
+    let maximumActive = 0;
+    const controlled: ExecutorDefinition = {
+      name: "controlled",
+      async execute(context) {
+        active += 1;
+        maximumActive = Math.max(maximumActive, active);
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        active -= 1;
+        return { status: "succeeded", output: context.nodeId };
+      },
+    };
+    const store = createSqliteStore({ path: ":memory:" });
+    const outcome = await createEngine({
+      store,
+      registry: createExecutorRegistry([controlled]),
+      maxConcurrency: 2,
+    }).run(compiled.graph).result;
+    expect(outcome).toEqual({ status: "succeeded", output: "a" });
+    expect(maximumActive).toBe(1);
+    await store.close?.();
+  });
+
+  test("normalizes resource fields missing from legacy compiled graphs", async () => {
+    const path = tempDbPath();
+    const modern = fixtureGraph();
+    const legacyGraph = {
+      version: modern.version,
+      nodes: Object.fromEntries(
+        Object.entries(modern.nodes).map(([nodeId, node]) => [
+          nodeId,
+          { ...node, resources: undefined },
+        ]),
+      ),
+      order: modern.order,
+      finalNode: modern.finalNode,
+    };
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      PRAGMA user_version = 1;
+      CREATE TABLE runs (
+        run_id TEXT PRIMARY KEY,
+        graph_json TEXT NOT NULL,
+        finished INTEGER NOT NULL DEFAULT 0 CHECK (finished IN (0, 1)),
+        schema_version INTEGER NOT NULL,
+        outcome_json TEXT,
+        CHECK (
+          (finished = 0 AND outcome_json IS NULL) OR
+          (finished = 1 AND outcome_json IS NOT NULL)
+        )
+      ) STRICT;
+      CREATE TABLE events (
+        run_id TEXT NOT NULL,
+        seq INTEGER NOT NULL CHECK (seq >= 0),
+        event_json TEXT NOT NULL,
+        PRIMARY KEY (run_id, seq),
+        FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+      ) STRICT;
+    `);
+    legacy
+      .prepare(
+        "INSERT INTO runs (run_id, graph_json, schema_version) VALUES (?, ?, 1)",
+      )
+      .run("legacy-resume", JSON.stringify(legacyGraph));
+    legacy.close();
+
+    const store = createSqliteStore({ path });
+    const loaded = await store.getRun("legacy-resume");
+    expect(loaded?.graph.resources).toEqual({});
+    expect(loaded?.graph.nodes["only"]?.resources).toEqual([]);
+    const outcome = await createEngine({
+      store,
+      registry: createExecutorRegistry(builtinExecutors),
+    }).resume("legacy-resume").result;
+    expect(outcome).toEqual({ status: "succeeded", output: 1 });
+    await store.close?.();
+  });
+
+  test("two pre-migration store instances converge on one schema upgrade", async () => {
+    const path = tempDbPath();
+    const legacy = new DatabaseSync(path);
+    legacy.exec(`
+      PRAGMA user_version = 1;
+      CREATE TABLE runs (
+        run_id TEXT PRIMARY KEY,
+        graph_json TEXT NOT NULL,
+        finished INTEGER NOT NULL DEFAULT 0 CHECK (finished IN (0, 1)),
+        schema_version INTEGER NOT NULL,
+        outcome_json TEXT,
+        CHECK (
+          (finished = 0 AND outcome_json IS NULL) OR
+          (finished = 1 AND outcome_json IS NOT NULL)
+        )
+      ) STRICT;
+      CREATE TABLE events (
+        run_id TEXT NOT NULL,
+        seq INTEGER NOT NULL CHECK (seq >= 0),
+        event_json TEXT NOT NULL,
+        PRIMARY KEY (run_id, seq),
+        FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+      ) STRICT;
+    `);
+    legacy
+      .prepare(
+        "INSERT INTO runs (run_id, graph_json, schema_version) VALUES (?, ?, 1)",
+      )
+      .run("shared-legacy", JSON.stringify(fixtureGraph()));
+    legacy.close();
+
+    const first = createSqliteStore({ path });
+    const second = createSqliteStore({ path });
+    await first.appendEvents("shared-legacy", [
+      { kind: "node_ready", nodeId: "only" },
+    ]);
+    await expect(
+      second.appendEvents(
+        "shared-legacy",
+        [{ kind: "node_started", nodeId: "only" }],
+        1,
+      ),
+    ).resolves.toHaveLength(1);
+    await expect(
+      second.appendEvents(
+        "shared-legacy",
+        [{ kind: "node_succeeded", nodeId: "only", output: 1 }],
+        2,
+      ),
+    ).resolves.toHaveLength(1);
+    await first.close?.();
+    await second.close?.();
+  });
+
   test("upgrades timestamp-free version 1 events without inventing times", async () => {
     const path = tempDbPath();
     const legacy = new DatabaseSync(path);
@@ -164,6 +367,12 @@ describe("sqlite durability", () => {
     expect(untouched.prepare("SELECT schema_version FROM runs").get()).toEqual({
       schema_version: 1,
     });
+    expect(
+      untouched
+        .prepare("PRAGMA table_info(runs)")
+        .all()
+        .map((column) => column["name"]),
+    ).not.toContain("graph_revision");
     untouched.close();
   });
 

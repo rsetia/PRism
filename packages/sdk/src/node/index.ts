@@ -28,8 +28,35 @@ export type {
   LocalExecutionBackendOptions,
   WorkerHandle,
   WorkerStatus,
+  ProgressReportingExecutionBackend,
 } from "./execution-backend.js";
-export { createLocalExecutionBackend } from "./execution-backend.js";
+export {
+  createLocalExecutionBackend,
+  isProgressReportingExecutionBackend,
+} from "./execution-backend.js";
+export { assessAgentProgress } from "./agent-progress.js";
+export type {
+  AgentProgressAssessment,
+  AgentProgressSnapshot,
+  AgentProgressState,
+  AgentStallDecision,
+  ExternalWaitState,
+  StallAction,
+  StallPolicy,
+} from "./agent-progress.js";
+export type {
+  AgentExecutionMode,
+  AgentExecutionPolicy,
+  ChildEnvironmentPolicy,
+  SecretRedactor,
+} from "./execution-policy.js";
+export {
+  buildChildEnvironment,
+  createSecretRedactor,
+  SAFE_AGENT_EXECUTION_POLICY,
+  TRUSTED_LOCAL_AGENT_EXECUTION_POLICY,
+  validateAgentExecutionPolicy,
+} from "./execution-policy.js";
 export type {
   GitWorktreeProvisionerOptions,
   ProvisionInput,
@@ -65,6 +92,23 @@ export type {
   CodexSandbox,
 } from "./codex-engine.js";
 export { buildCodexPrompt, createCodexEngine } from "./codex-engine.js";
+export type {
+  AgentSession,
+  AgentSessionBackend,
+  AgentSessionEngineOptions,
+  AgentSessionEvent,
+  AgentSessionInput,
+  AgentSessionKey,
+  AgentSessionStore,
+} from "./agent-session-backend.js";
+export {
+  createFileAgentSessionStore,
+  runAgentSession,
+} from "./agent-session-backend.js";
+export type { CodexAppServerClient } from "./codex-app-server-backend.js";
+export { createCodexAppServerBackend } from "./codex-app-server-backend.js";
+export type { CodexAppServerStdioClientOptions } from "./codex-app-server-client.js";
+export { createCodexAppServerStdioClient } from "./codex-app-server-client.js";
 export type {
   FinalizePrConfig,
   ImplementConfig,

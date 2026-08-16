@@ -2,8 +2,13 @@ import type { CompiledGraph } from "../graph/types.js";
 import type { PersistedRunEvent } from "./events.js";
 import type { NodePhase } from "./events.js";
 import { reduceNodeState } from "./transitions.js";
-import type { Clock, RunStore } from "./ports.js";
+import type { Clock, RunLeaseStatus, RunStore } from "./ports.js";
 import type { NodeFailure, NodeState } from "./types.js";
+import { summarizeUsage, type UsageTotals } from "./usage.js";
+import { tryParseProofOfWork, type ProofOfWorkV1 } from "./proof-of-work.js";
+import type { JsonValue } from "../graph/types.js";
+import type { GraphRevision } from "./graph-revision.js";
+import type { AgentProgressState } from "../node/agent-progress.js";
 
 /**
  * A read-only snapshot of a run, rebuilt from its persisted events (plan
@@ -18,11 +23,15 @@ export interface NodeInspection {
   readonly state: NodeState;
   /** Null when this node has no events or includes legacy timestamp-free data. */
   readonly timing: NodeTiming | null;
+  /** Structured agent evidence; null for generic and legacy outputs. */
+  readonly evidence: ProofOfWorkV1 | null;
+  readonly agentProgress?: AgentProgressState | null;
 }
 
 export type NodeTimingPhase =
   | "dependency_wait"
   | "scheduler_queue"
+  | "resource_contention"
   | "retry_wait"
   | "recovery_wait"
   | NodePhase;
@@ -48,8 +57,26 @@ export interface RunInspection {
   readonly nodes: readonly NodeInspection[];
   /** Originating failures observed so far. */
   readonly failures: readonly NodeFailure[];
+  /** Accepted and rejected expansion decisions, in durable decision order. */
+  readonly graphRevisions?: readonly GraphRevision[];
   /** Null for empty or legacy timestamp-free event logs. */
   readonly timing: RunTiming | null;
+  /** Current non-expired ownership, without exposing owner identities. */
+  readonly leases?: readonly RunLeaseStatus[];
+  readonly usage?: UsageTotals | null;
+  readonly scheduler?: SchedulerUtilization;
+}
+
+export interface SchedulerUtilization {
+  readonly maximumRealizedNodeConcurrency: number;
+  readonly resourceWaitMs: number | null;
+  readonly totalNodeTimeMs: number | null;
+  /** Portion of observed node time spent blocked on resource locks; null when timing is unavailable. */
+  readonly resourceLockUtilization: number | null;
+}
+
+export interface InspectRunOptions {
+  readonly prices?: readonly import("./usage.js").UsagePriceMetadata[];
 }
 
 export interface CriticalPathTiming {
@@ -99,8 +126,9 @@ export interface WatchRunOptions {
 export function inspectRun(
   store: RunStore,
   runId: string,
+  options: InspectRunOptions = {},
 ): Promise<RunInspection> {
-  return inspectRunSnapshot(store, runId);
+  return inspectRunSnapshot(store, runId, options);
 }
 
 /**
@@ -145,6 +173,7 @@ async function* watchRunSnapshots(
 async function inspectRunSnapshot(
   store: RunStore,
   runId: string,
+  options: InspectRunOptions = {},
 ): Promise<RunInspection> {
   const stored = await store.getRun(runId);
   if (stored === undefined) {
@@ -162,6 +191,8 @@ async function inspectRunSnapshot(
   }
 
   const failureByNode = new Map<string, NodeFailure>();
+  const outputByNode = new Map<string, JsonValue>();
+  const progressByNode = new Map<string, AgentProgressState>();
   const events = await readEventSnapshot(store, runId, stored.revision);
   const timings = calculateNodeTimings(stored.graph.order, events);
   for (const event of events) {
@@ -172,9 +203,15 @@ async function inspectRunSnapshot(
     states.set(event.nodeId, reduceNodeState(previous, event));
     if (event.kind === "node_failed") {
       failureByNode.set(event.nodeId, event.failure);
+    } else if (event.kind === "node_succeeded") {
+      outputByNode.set(event.nodeId, event.output);
     } else if (event.kind === "node_reset") {
       // An administrative reset drops the node's recorded failure.
       failureByNode.delete(event.nodeId);
+      outputByNode.delete(event.nodeId);
+      progressByNode.delete(event.nodeId);
+    } else if (event.kind === "node_agent_progress") {
+      progressByNode.set(event.nodeId, event.state);
     }
   }
   const eventFailures = stored.graph.order.flatMap((nodeId) => {
@@ -196,6 +233,12 @@ async function inspectRunSnapshot(
       nodeId,
       state,
       timing: timings.get(nodeId) ?? null,
+      evidence: outputByNode.has(nodeId)
+        ? tryParseProofOfWork(outputByNode.get(nodeId) as JsonValue)
+        : null,
+      ...(progressByNode.has(nodeId)
+        ? { agentProgress: progressByNode.get(nodeId) as AgentProgressState }
+        : {}),
     });
   });
   const timing = calculateRunTiming(
@@ -204,13 +247,69 @@ async function inspectRunSnapshot(
     events,
     timings,
   );
+  const leases = await store.getRunLeases(runId);
 
   return Object.freeze({
     runId,
     finished: stored.finished,
     nodes: Object.freeze(nodes),
     failures: Object.freeze(failures),
+    graphRevisions:
+      store.listGraphRevisions === undefined
+        ? Object.freeze([])
+        : await store.listGraphRevisions(runId),
     timing,
+    usage: summarizeUsage(events, options.prices),
+    scheduler: calculateSchedulerUtilization(events, timings),
+    leases,
+  });
+}
+
+function calculateSchedulerUtilization(
+  events: readonly PersistedRunEvent[],
+  timings: ReadonlyMap<string, NodeTiming>,
+): SchedulerUtilization {
+  const active = new Set<string>();
+  let maximumRealizedNodeConcurrency = 0;
+  for (const event of events) {
+    if (event.kind === "node_started") active.add(event.nodeId);
+    if (
+      event.kind === "node_succeeded" ||
+      event.kind === "node_failed" ||
+      event.kind === "node_retry_wait" ||
+      event.kind === "node_cancelled"
+    )
+      active.delete(event.nodeId);
+    maximumRealizedNodeConcurrency = Math.max(
+      maximumRealizedNodeConcurrency,
+      active.size,
+    );
+  }
+  const timingValues = [...timings.values()];
+  if (timingValues.length === 0)
+    return Object.freeze({
+      maximumRealizedNodeConcurrency,
+      resourceWaitMs: null,
+      totalNodeTimeMs: null,
+      resourceLockUtilization: null,
+    });
+  const resourceWaitMs = timingValues.reduce(
+    (total, timing) =>
+      total +
+      (timing.phases.find((phase) => phase.phase === "resource_contention")
+        ?.durationMs ?? 0),
+    0,
+  );
+  const totalNodeTimeMs = timingValues.reduce(
+    (total, timing) => total + timing.totalDurationMs,
+    0,
+  );
+  return Object.freeze({
+    maximumRealizedNodeConcurrency,
+    resourceWaitMs,
+    totalNodeTimeMs,
+    resourceLockUtilization:
+      totalNodeTimeMs === 0 ? 0 : resourceWaitMs / totalNodeTimeMs,
   });
 }
 
@@ -286,7 +385,11 @@ function calculateCriticalPath(
       )
       .sort((left, right) => right.durationMs - left.durationMs)[0];
     const activeDurationMs = timing.phases
-      .filter((phase) => phase.phase !== "dependency_wait")
+      .filter(
+        (phase) =>
+          phase.phase !== "dependency_wait" &&
+          phase.phase !== "resource_contention",
+      )
       .reduce((total, phase) => total + phase.durationMs, 0);
     paths.set(nodeId, {
       durationMs: (predecessor?.durationMs ?? 0) + activeDurationMs,
@@ -306,7 +409,9 @@ function calculateCriticalPath(
     durationMs: selected.durationMs,
     phases: Object.freeze(
       sumPhases(pathTimings).filter(
-        (phase) => phase.phase !== "dependency_wait",
+        (phase) =>
+          phase.phase !== "dependency_wait" &&
+          phase.phase !== "resource_contention",
       ),
     ),
   });
@@ -337,6 +442,7 @@ function isWaitingPhase(phase: NodeTimingPhase): boolean {
   return (
     phase === "dependency_wait" ||
     phase === "scheduler_queue" ||
+    phase === "resource_contention" ||
     phase === "retry_wait" ||
     phase === "recovery_wait" ||
     phase === "ci_wait" ||
@@ -401,8 +507,13 @@ function calculateNodeTimings(
       case "node_started":
         changePhase(timing, "execution", timestampMs);
         break;
+      case "node_resource_wait":
+        changePhase(timing, "resource_contention", timestampMs);
+        break;
       case "node_phase_changed":
         changePhase(timing, event.phase, timestampMs);
+        break;
+      case "node_agent_progress":
         break;
       case "node_retry_wait":
         changePhase(timing, "retry_wait", timestampMs);
@@ -414,10 +525,12 @@ function calculateNodeTimings(
       case "node_succeeded":
       case "node_failed":
       case "node_blocked":
+      case "node_skipped":
       case "node_cancelled":
         completeTiming(timing, timestampMs);
         break;
       case "node_cancelling":
+      case "node_usage_reported":
         break;
       default: {
         const unhandled: never = event;

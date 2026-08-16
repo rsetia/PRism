@@ -9,10 +9,12 @@ export type { CompileResult } from "./graph/compile.js";
 export type {
   CompiledGraph,
   CompiledNode,
+  ExecutionCondition,
   GraphDefinition,
   JsonValue,
   NodeDefinition,
   NodeKind,
+  ResourceDefinition,
 } from "./graph/types.js";
 export type { GraphCompileError, GraphParseError } from "./graph/errors.js";
 export { buildBeadsGraph, parseBeadsJsonl } from "./beads/generate.js";
@@ -29,6 +31,18 @@ export {
   reduceNodeState,
 } from "./runtime/transitions.js";
 export { TERMINAL_NODE_STATES } from "./runtime/types.js";
+export {
+  parseProofOfWork,
+  PROOF_OF_WORK_VERSION,
+  tryParseProofOfWork,
+} from "./runtime/proof-of-work.js";
+export type {
+  CommitEvidence,
+  ProofOfWorkV1,
+  PullRequestEvidence,
+  ReviewVerdictEvidence,
+  ValidationEvidence,
+} from "./runtime/proof-of-work.js";
 export type {
   FailureClass,
   NodeFailure,
@@ -47,25 +61,39 @@ export type { RetryPolicy } from "./runtime/retry.js";
 export { createManualClock, createSystemClock } from "./adapters/clock.js";
 export type { ManualClock } from "./adapters/clock.js";
 export { inspectRun, watchRun } from "./runtime/inspect.js";
+export { summarizeUsage } from "./runtime/usage.js";
+export type { AttemptUsage, UsageTotals } from "./runtime/usage.js";
 export type {
   CriticalPathTiming,
+  InspectRunOptions,
   NodeInspection,
   NodeTiming,
   NodeTimingPhase,
   PhaseDuration,
   RunInspection,
   RunTiming,
+  SchedulerUtilization,
   WatchRunOptions,
 } from "./runtime/inspect.js";
+export { submitGraphProposal } from "./runtime/graph-revision.js";
+export type {
+  GraphExpansionProposal,
+  GraphProposalDecision,
+  GraphProposalPolicy,
+  GraphProposalResult,
+  GraphRevision,
+} from "./runtime/graph-revision.js";
 export { abortRun, resetRun } from "./runtime/admin.js";
 export type { ResetRunOptions } from "./runtime/admin.js";
 export type {
   NodePhase,
   PersistedRunEvent,
   RunEvent,
+  UsageReport,
   WorkerPhase,
 } from "./runtime/events.js";
 export { NODE_PHASES, WORKER_PHASES } from "./runtime/events.js";
+export type { UsagePriceMetadata } from "./runtime/usage.js";
 export type {
   Clock,
   CreateRunInput,
@@ -83,6 +111,8 @@ export type {
   NodeExecutionOutcome,
   PutArtifactInput,
   RunStore,
+  RunLease,
+  RunLeaseStatus,
   StoredRun,
 } from "./runtime/ports.js";
 export { createEngine } from "./runtime/engine.js";

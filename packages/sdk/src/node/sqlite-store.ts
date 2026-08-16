@@ -7,8 +7,15 @@ import {
   snapshotRunOutcome,
 } from "../internal/persistence.js";
 import type { PersistedRunEvent, RunEvent } from "../runtime/events.js";
-import type { RunStore, RunSummary, StoredRun } from "../runtime/ports.js";
+import type {
+  RunLease,
+  RunLeaseStatus,
+  RunStore,
+  RunSummary,
+  StoredRun,
+} from "../runtime/ports.js";
 import type { RunOutcome } from "../runtime/types.js";
+import type { GraphRevision } from "../runtime/graph-revision.js";
 
 export interface SqliteStoreOptions {
   /**
@@ -107,11 +114,21 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
       graph_json TEXT NOT NULL,
       finished INTEGER NOT NULL DEFAULT 0 CHECK (finished IN (0, 1)),
       schema_version INTEGER NOT NULL,
+      graph_revision INTEGER NOT NULL DEFAULT 0,
       outcome_json TEXT,
       CHECK (
         (finished = 0 AND outcome_json IS NULL) OR
         (finished = 1 AND outcome_json IS NOT NULL)
       )
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS graph_revisions (
+      run_id TEXT NOT NULL,
+      seq INTEGER NOT NULL,
+      proposal_id TEXT NOT NULL,
+      revision_json TEXT NOT NULL,
+      PRIMARY KEY (run_id, seq),
+      UNIQUE (run_id, proposal_id),
+      FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
     ) STRICT;
     CREATE TABLE IF NOT EXISTS events (
       run_id TEXT NOT NULL,
@@ -120,7 +137,24 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
       PRIMARY KEY (run_id, seq),
       FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
     ) STRICT;
+    CREATE TABLE IF NOT EXISTS run_leases (
+      run_id TEXT NOT NULL,
+      kind TEXT NOT NULL CHECK (kind IN ('coordinator', 'node')),
+      node_id TEXT NOT NULL DEFAULT '',
+      owner TEXT NOT NULL,
+      fencing_token INTEGER NOT NULL,
+      expires_at_ms INTEGER NOT NULL,
+      PRIMARY KEY (run_id, kind, node_id),
+      FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS lease_fencing_tokens (
+      token INTEGER PRIMARY KEY AUTOINCREMENT
+    ) STRICT;
   `);
+  let hasGraphRevision = db
+    .prepare("PRAGMA table_info(runs)")
+    .all()
+    .some((column) => readString(column, "name") === "graph_revision");
 
   const newestRun = db
     .prepare("SELECT MAX(schema_version) AS schema_version FROM runs")
@@ -137,12 +171,37 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   // previous release can still open it after a rollback.
   let stampedVersion = storedVersion >= schemaVersion;
 
+  let selectRun = prepareSelectRun(hasGraphRevision);
+
+  function prepareSelectRun(includeGraphRevision: boolean) {
+    return db.prepare(
+      `SELECT run_id, graph_json, finished, schema_version, outcome_json, ${
+        includeGraphRevision ? "graph_revision" : "0 AS graph_revision"
+      },
+       (SELECT COUNT(*) FROM events WHERE events.run_id = runs.run_id) AS revision
+     FROM runs WHERE run_id = ?`,
+    );
+  }
+
   function ensureSchemaCurrent(): void {
-    if (stampedVersion) {
+    if (stampedVersion && hasGraphRevision) {
       return;
     }
     db.exec("BEGIN IMMEDIATE");
     try {
+      if (!hasGraphRevision) {
+        const migratedByAnotherProcess = db
+          .prepare("PRAGMA table_info(runs)")
+          .all()
+          .some((column) => readString(column, "name") === "graph_revision");
+        if (!migratedByAnotherProcess) {
+          db.exec(
+            "ALTER TABLE runs ADD COLUMN graph_revision INTEGER NOT NULL DEFAULT 0",
+          );
+        }
+        hasGraphRevision = true;
+        selectRun = prepareSelectRun(true);
+      }
       db.prepare(
         "UPDATE runs SET schema_version = ? WHERE schema_version < ?",
       ).run(schemaVersion, schemaVersion);
@@ -159,11 +218,6 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
 
   const insertRun = db.prepare(
     "INSERT INTO runs (run_id, graph_json, schema_version) VALUES (?, ?, ?)",
-  );
-  const selectRun = db.prepare(
-    `SELECT run_id, graph_json, finished, schema_version, outcome_json,
-       (SELECT COUNT(*) FROM events WHERE events.run_id = runs.run_id) AS revision
-     FROM runs WHERE run_id = ?`,
   );
   const selectRuns = db.prepare(
     "SELECT run_id, finished FROM runs ORDER BY rowid DESC",
@@ -182,6 +236,36 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   );
   const reopenRunStatement = db.prepare(
     "UPDATE runs SET finished = 0, outcome_json = NULL WHERE run_id = ?",
+  );
+  const selectLease = db.prepare(
+    "SELECT owner, fencing_token, expires_at_ms FROM run_leases WHERE run_id = ? AND kind = ? AND node_id = ?",
+  );
+  const allocateFencingToken = db.prepare(
+    "INSERT INTO lease_fencing_tokens DEFAULT VALUES",
+  );
+  const upsertLease = db.prepare(
+    "INSERT INTO run_leases (run_id, kind, node_id, owner, fencing_token, expires_at_ms) VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(run_id, kind, node_id) DO UPDATE SET owner = excluded.owner, fencing_token = excluded.fencing_token, expires_at_ms = excluded.expires_at_ms",
+  );
+  const renewLeaseStatement = db.prepare(
+    "UPDATE run_leases SET expires_at_ms = ? WHERE run_id = ? AND kind = ? AND node_id = ? AND owner = ? AND fencing_token = ? AND expires_at_ms > ?",
+  );
+  const releaseLeaseStatement = db.prepare(
+    "DELETE FROM run_leases WHERE run_id = ? AND kind = ? AND node_id = ? AND owner = ? AND fencing_token = ?",
+  );
+  const selectRunLeases = db.prepare(
+    "SELECT kind, node_id, fencing_token, expires_at_ms FROM run_leases WHERE run_id = ? AND expires_at_ms > ? ORDER BY kind, node_id",
+  );
+  const selectGraphRevisions = db.prepare(
+    "SELECT revision_json FROM graph_revisions WHERE run_id = ? ORDER BY seq",
+  );
+  const selectGraphRevisionByProposal = db.prepare(
+    "SELECT revision_json FROM graph_revisions WHERE run_id = ? AND proposal_id = ?",
+  );
+  const insertGraphRevision = db.prepare(
+    "INSERT INTO graph_revisions (run_id, seq, proposal_id, revision_json) VALUES (?, ?, ?, ?)",
+  );
+  const selectGraphRevisionCount = db.prepare(
+    "SELECT COUNT(*) AS count FROM graph_revisions WHERE run_id = ?",
   );
 
   function assertOpen(): void {
@@ -213,6 +297,32 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     }
   }
 
+  function assertDuration(durationMs: number): void {
+    if (!Number.isFinite(durationMs) || durationMs <= 0)
+      throw new Error("lease duration must be a finite number greater than 0");
+  }
+  function nodeKey(lease: Pick<RunLease, "nodeId">): string {
+    return lease.nodeId ?? "";
+  }
+  function assertCurrentLease(lease: RunLease): void {
+    const row = selectLease.get(lease.runId, lease.kind, nodeKey(lease));
+    if (
+      row === undefined ||
+      readString(row, "owner") !== lease.owner ||
+      readNumber(row, "fencing_token") !== lease.fencingToken ||
+      readNumber(row, "expires_at_ms") <= now()
+    ) {
+      throw new Error(`lease fencing conflict for run: "${lease.runId}"`);
+    }
+  }
+
+  function assertCoordinatorLease(runId: string, lease: RunLease): void {
+    if (lease.kind !== "coordinator" || lease.runId !== runId) {
+      throw new Error(`lease fencing conflict for run: "${runId}"`);
+    }
+    assertCurrentLease(lease);
+  }
+
   function createRun(input: {
     readonly runId: string;
     readonly graph: CompiledGraph;
@@ -228,6 +338,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     runId: string,
     events: readonly RunEvent[],
     expectedRevision?: number,
+    lease?: RunLease,
   ): Promise<readonly PersistedRunEvent[]> {
     return capture(() => {
       assertOpen();
@@ -241,6 +352,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
         if (readNumber(run, "finished") === 1) {
           throw new Error(`run is already finished: "${runId}"`);
         }
+        if (lease !== undefined) assertCoordinatorLease(runId, lease);
 
         const nextSequenceRow = selectNextSequence.get(runId);
         let sequence = readNumber(nextSequenceRow, "next_seq");
@@ -329,6 +441,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
         runId: readString(row, "run_id"),
         graph: decodeGraph(readString(row, "graph_json")),
         revision: readNumber(row, "revision"),
+        graphRevision: readNumber(row, "graph_revision"),
       };
       if (finished) {
         if (outcomeJson === undefined) {
@@ -347,30 +460,51 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     });
   }
 
-  function finishRun(runId: string, outcome: RunOutcome): Promise<void> {
+  function finishRun(
+    runId: string,
+    outcome: RunOutcome,
+    lease?: RunLease,
+  ): Promise<void> {
     return capture(() => {
       assertOpen();
       ensureSchemaCurrent();
-      const run = selectRun.get(runId);
-      if (run === undefined) {
-        throw new Error(`unknown run: "${runId}"`);
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const run = selectRun.get(runId);
+        if (run === undefined) {
+          throw new Error(`unknown run: "${runId}"`);
+        }
+        if (readNumber(run, "finished") === 1) {
+          db.exec("COMMIT");
+          return;
+        }
+        if (lease !== undefined) assertCoordinatorLease(runId, lease);
+        const persistedOutcome = snapshotRunOutcome(outcome);
+        finishRunStatement.run(JSON.stringify(persistedOutcome), runId);
+        db.exec("COMMIT");
+        wakeReaders(runId);
+      } catch (error: unknown) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
       }
-      if (readNumber(run, "finished") === 1) {
-        return;
-      }
-      const persistedOutcome = snapshotRunOutcome(outcome);
-      finishRunStatement.run(JSON.stringify(persistedOutcome), runId);
-      wakeReaders(runId);
     });
   }
 
-  function reopenRun(runId: string): Promise<void> {
+  function reopenRun(runId: string, lease?: RunLease): Promise<void> {
     return capture(() => {
       assertOpen();
       ensureSchemaCurrent();
-      const result = reopenRunStatement.run(runId);
-      if (result.changes === 0) {
-        throw new Error(`unknown run: "${runId}"`);
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        if (selectRun.get(runId) === undefined) {
+          throw new Error(`unknown run: "${runId}"`);
+        }
+        if (lease !== undefined) assertCoordinatorLease(runId, lease);
+        reopenRunStatement.run(runId);
+        db.exec("COMMIT");
+      } catch (error: unknown) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
       }
     });
   }
@@ -385,6 +519,194 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
         }),
       );
       return Object.freeze(summaries);
+    });
+  }
+
+  function acquire(
+    kind: RunLease["kind"],
+    runId: string,
+    nodeId: string | undefined,
+    owner: string,
+    durationMs: number,
+  ): Promise<RunLease> {
+    return capture(() => {
+      assertOpen();
+      ensureSchemaCurrent();
+      assertDuration(durationMs);
+      if (owner.length === 0) throw new Error("lease owner must not be empty");
+      if (selectRun.get(runId) === undefined)
+        throw new Error(`unknown run: "${runId}"`);
+      const key = nodeId ?? "";
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const current = selectLease.get(runId, kind, key);
+        if (
+          current !== undefined &&
+          readNumber(current, "expires_at_ms") > now() &&
+          readString(current, "owner") !== owner
+        )
+          throw new Error(`lease ownership conflict for run: "${runId}"`);
+        const token = Number(allocateFencingToken.run().lastInsertRowid);
+        const expiresAtMs = now() + durationMs;
+        upsertLease.run(runId, kind, key, owner, token, expiresAtMs);
+        db.exec("COMMIT");
+        return Object.freeze({
+          kind,
+          runId,
+          ...(nodeId === undefined ? {} : { nodeId }),
+          owner,
+          fencingToken: token,
+          expiresAtMs,
+        });
+      } catch (error: unknown) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  function appendGraphRevision(
+    runId: string,
+    revision: GraphRevision,
+    expectedGraphRevision: number,
+    lease: RunLease,
+  ): Promise<GraphRevision> {
+    return capture(() => {
+      assertOpen();
+      ensureSchemaCurrent();
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const run = selectRun.get(runId);
+        if (run === undefined) throw new Error(`unknown run: "${runId}"`);
+        if (readNumber(run, "finished") === 1) {
+          throw new Error(`run is already finished: "${runId}"`);
+        }
+        assertCoordinatorLease(runId, lease);
+        const duplicate = selectGraphRevisionByProposal.get(
+          runId,
+          revision.proposal.id,
+        );
+        if (duplicate !== undefined) {
+          db.exec("COMMIT");
+          return decodeGraphRevision(readString(duplicate, "revision_json"));
+        }
+        // Older databases do not have the column until their first write.
+        const current = Object.hasOwn(run, "graph_revision")
+          ? readNumber(run, "graph_revision")
+          : 0;
+        if (current !== expectedGraphRevision) {
+          throw new Error(
+            `graph revision conflict: expected ${String(expectedGraphRevision)}, actual ${String(current)}`,
+          );
+        }
+        if (
+          revision.decision.status === "accepted" &&
+          revision.graph === undefined
+        ) {
+          throw new Error("accepted graph revision is missing graph");
+        }
+        const count = readNumber(selectGraphRevisionCount.get(runId), "count");
+        const accepted = revision.decision.status === "accepted";
+        const persisted = Object.freeze({
+          ...revision,
+          sequence: count,
+          graphRevision: accepted ? current + 1 : current,
+          timestampMs: now(),
+          addedNodeIds: Object.freeze([...revision.addedNodeIds]),
+        });
+        insertGraphRevision.run(
+          runId,
+          count,
+          revision.proposal.id,
+          JSON.stringify(persisted),
+        );
+        if (accepted && persisted.graph !== undefined) {
+          db.prepare(
+            "UPDATE runs SET graph_json = ?, graph_revision = ? WHERE run_id = ?",
+          ).run(JSON.stringify(persisted.graph), current + 1, runId);
+        }
+        db.exec("COMMIT");
+        return persisted;
+      } catch (error: unknown) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+  function acquireCoordinatorLease(
+    runId: string,
+    owner: string,
+    durationMs: number,
+  ): Promise<RunLease> {
+    return acquire("coordinator", runId, undefined, owner, durationMs);
+  }
+  function acquireNodeLease(
+    runId: string,
+    nodeId: string,
+    owner: string,
+    durationMs: number,
+  ): Promise<RunLease> {
+    return acquire("node", runId, nodeId, owner, durationMs);
+  }
+  function renewLease(lease: RunLease, durationMs: number): Promise<RunLease> {
+    return capture(() => {
+      assertOpen();
+      assertDuration(durationMs);
+      const expiresAtMs = now() + durationMs;
+      const result = renewLeaseStatement.run(
+        expiresAtMs,
+        lease.runId,
+        lease.kind,
+        nodeKey(lease),
+        lease.owner,
+        lease.fencingToken,
+        now(),
+      );
+      if (result.changes !== 1)
+        throw new Error(`lease fencing conflict for run: "${lease.runId}"`);
+      return Object.freeze({ ...lease, expiresAtMs });
+    });
+  }
+  function releaseLease(lease: RunLease): Promise<void> {
+    return capture(() => {
+      assertOpen();
+      releaseLeaseStatement.run(
+        lease.runId,
+        lease.kind,
+        nodeKey(lease),
+        lease.owner,
+        lease.fencingToken,
+      );
+    });
+  }
+  function getRunLeases(runId: string): Promise<readonly RunLeaseStatus[]> {
+    return capture(() =>
+      Object.freeze(
+        selectRunLeases.all(runId, now()).map((row) =>
+          Object.freeze({
+            kind: readString(row, "kind") as RunLease["kind"],
+            ...(readString(row, "node_id") === ""
+              ? {}
+              : { nodeId: readString(row, "node_id") }),
+            fencingToken: readNumber(row, "fencing_token"),
+            expiresAtMs: readNumber(row, "expires_at_ms"),
+          }),
+        ),
+      ),
+    );
+  }
+  function listGraphRevisions(
+    runId: string,
+  ): Promise<readonly GraphRevision[]> {
+    return capture(() => {
+      assertOpen();
+      if (selectRun.get(runId) === undefined)
+        throw new Error(`unknown run: "${runId}"`);
+      return Object.freeze(
+        selectGraphRevisions
+          .all(runId)
+          .map((row) => decodeGraphRevision(readString(row, "revision_json"))),
+      );
     });
   }
 
@@ -409,6 +731,13 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     listRuns,
     finishRun,
     reopenRun,
+    acquireCoordinatorLease,
+    acquireNodeLease,
+    renewLease,
+    releaseLease,
+    getRunLeases,
+    appendGraphRevision,
+    listGraphRevisions,
     close,
   });
 }
@@ -463,11 +792,36 @@ function readNullableString(
   return value;
 }
 
+function decodeGraphRevision(json: string): GraphRevision {
+  const value = JSON.parse(json) as GraphRevision;
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    typeof value.sequence !== "number" ||
+    typeof value.graphRevision !== "number" ||
+    typeof value.timestampMs !== "number" ||
+    typeof value.proposal?.id !== "string" ||
+    typeof value.proposal.proposer !== "string" ||
+    (value.decision?.status !== "accepted" &&
+      value.decision?.status !== "rejected") ||
+    !Array.isArray(value.addedNodeIds)
+  ) {
+    throw new Error("invalid persisted graph revision");
+  }
+  return Object.freeze({
+    ...value,
+    addedNodeIds: Object.freeze([...(value.addedNodeIds as readonly string[])]),
+    ...(value.graph === undefined
+      ? {}
+      : { graph: decodeGraph(JSON.stringify(value.graph)) }),
+  });
+}
+
 function decodeGraph(json: string): CompiledGraph {
   const value = JSON.parse(json) as unknown;
   if (
     !isPlainObject(value) ||
-    value["version"] !== 1 ||
+    (value["version"] !== 1 && value["version"] !== 2) ||
     !isPlainObject(value["nodes"]) ||
     !Array.isArray(value["order"]) ||
     !value["order"].every((nodeId) => typeof nodeId === "string") ||
@@ -475,8 +829,21 @@ function decodeGraph(json: string): CompiledGraph {
   ) {
     throw new Error("stored graph is invalid");
   }
-  deepFreeze(value);
-  return value as unknown as CompiledGraph;
+  const nodes = Object.fromEntries(
+    Object.entries(value["nodes"]).map(([nodeId, node]) => [
+      nodeId,
+      isPlainObject(node) && node["resources"] === undefined
+        ? { ...node, resources: [] }
+        : node,
+    ]),
+  );
+  const normalized = {
+    ...value,
+    resources: value["resources"] ?? {},
+    nodes,
+  };
+  deepFreeze(normalized);
+  return normalized as unknown as CompiledGraph;
 }
 
 function decodeEvent(json: string, seq: number): PersistedRunEvent {

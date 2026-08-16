@@ -46,10 +46,6 @@ function engineOn(
   });
 }
 
-function settle(): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, 0));
-}
-
 const linear = () =>
   buildGraph({
     version: 1,
@@ -63,27 +59,19 @@ const linear = () =>
 describe("abortRun", () => {
   test("forces an interrupted run to a finished, cancelled state", async () => {
     const store = createMemoryStore();
-    let release: (() => void) | undefined;
-    const gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    const slow: ExecutorDefinition = {
-      name: "slow",
-      async execute() {
-        await gate;
-        return { status: "succeeded", output: null };
-      },
-    };
     const graph = buildGraph({
       version: 1,
       nodes: {
-        a: { executor: "slow" },
+        a: { executor: "constant", config: { value: null } },
         b: { executor: "passthrough", dependsOn: ["a"] },
       },
       finalNode: "b",
     });
-    const handle = engineOn(store, [slow]).run(graph, { runId: "stuck" });
-    await settle(); // "a" running, "b" pending
+    await store.createRun({ runId: "stuck", graph });
+    await store.appendEvents("stuck", [
+      { kind: "node_ready", nodeId: "a" },
+      { kind: "node_started", nodeId: "a" },
+    ]);
 
     await abortRun(store, "stuck");
     const inspection = await inspectRun(store, "stuck");
@@ -95,9 +83,38 @@ describe("abortRun", () => {
       reason: null,
       failures: [],
     });
+  });
 
-    release?.();
-    await handle.result.catch(() => undefined);
+  test("holds and passes a coordinator lease to abort mutations", async () => {
+    const base = createMemoryStore();
+    await base.createRun({ runId: "fenced-abort", graph: linear() });
+    let appendFenced = false;
+    let finishFenced = false;
+    const store: RunStore = {
+      ...base,
+      appendEvents(runId, events, expectedRevision, lease) {
+        appendFenced = lease?.kind === "coordinator";
+        return base.appendEvents(runId, events, expectedRevision, lease);
+      },
+      finishRun(runId, outcome, lease) {
+        finishFenced = lease?.kind === "coordinator";
+        return base.finishRun(runId, outcome, lease);
+      },
+    };
+
+    await abortRun(store, "fenced-abort");
+    expect(appendFenced).toBe(true);
+    expect(finishFenced).toBe(true);
+    expect(await base.getRunLeases("fenced-abort")).toEqual([]);
+  });
+
+  test("rejects an abort while a coordinator owns the run", async () => {
+    const store = createMemoryStore();
+    await store.createRun({ runId: "owned", graph: linear() });
+    await store.acquireCoordinatorLease("owned", "engine", 30_000);
+    await expect(abortRun(store, "owned")).rejects.toThrow(
+      "active coordinator lease",
+    );
   });
 
   test("preserves failures that happened before an administrative abort", async () => {
@@ -142,6 +159,15 @@ describe("abortRun", () => {
 });
 
 describe("resetRun", () => {
+  test("rejects a reset while a coordinator owns the run", async () => {
+    const store = createMemoryStore();
+    await store.createRun({ runId: "owned", graph: linear() });
+    await store.acquireCoordinatorLease("owned", "engine", 30_000);
+    await expect(resetRun(store, "owned", ["first"])).rejects.toThrow(
+      "active coordinator lease",
+    );
+  });
+
   test("reset + resume re-runs a succeeded node", async () => {
     const store = createMemoryStore();
     let firstCalls = 0;
@@ -168,6 +194,29 @@ describe("resetRun", () => {
     const outcome = await engineOn(store, [counting]).resume("r").result;
     expect(outcome).toEqual({ status: "succeeded", output: "run-2" });
     expect(firstCalls).toBe(2);
+  });
+
+  test("holds and passes a coordinator lease to reset mutations", async () => {
+    const base = createMemoryStore();
+    await engineOn(base).run(linear(), { runId: "fenced-reset" }).result;
+    let reopenFenced = false;
+    let appendFenced = false;
+    const store: RunStore = {
+      ...base,
+      reopenRun(runId, lease) {
+        reopenFenced = lease?.kind === "coordinator";
+        return base.reopenRun(runId, lease);
+      },
+      appendEvents(runId, events, expectedRevision, lease) {
+        appendFenced = lease?.kind === "coordinator";
+        return base.appendEvents(runId, events, expectedRevision, lease);
+      },
+    };
+
+    await resetRun(store, "fenced-reset", ["first"]);
+    expect(reopenFenced).toBe(true);
+    expect(appendFenced).toBe(true);
+    expect(await base.getRunLeases("fenced-reset")).toEqual([]);
   });
 
   test("includeDownstream resets transitive dependents", async () => {

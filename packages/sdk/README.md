@@ -3,7 +3,7 @@
 The **Prism** agent-graph SDK: compile a graph of tasks — nodes plus
 "depends on" edges — into an immutable plan and run it, dependency-ordered,
 with bounded concurrency, failure-classified retry, cooperative cancellation,
-durable resume, and a streamed event log.
+durable resume, capacity-limited scheduler resources, and a streamed event log.
 
 ```js
 import {
@@ -17,9 +17,14 @@ import {
 
 const parsed = parseGraph({
   version: 1,
+  resources: { deployment: { capacity: 1 } },
   nodes: {
     first: { executor: "constant", config: { value: "hello" } },
-    second: { executor: "passthrough", dependsOn: ["first"] },
+    second: {
+      executor: "passthrough",
+      dependsOn: ["first"],
+      resources: ["deployment"],
+    },
   },
   finalNode: "second",
 });
@@ -47,6 +52,9 @@ const outcome = await engine.run(compiled.graph).result;
 - Failures are data; node lifecycle events and terminal outcomes are durable;
   resume replays unfinished work and returns the recorded result for finished
   work.
+- Resource requests are acquired atomically in stable graph order and are
+  separate from dependency edges. Inspection attributes their wait time to
+  `resource_contention`, outside the weighted dependency critical path.
 
 ```ts
 import { runStoreContract } from "@rsetia/prism/testing";
@@ -114,11 +122,46 @@ runWorkspaceProvisionerContract("ContainerWorkspaceProvisioner", async () =>
 );
 ```
 
-Executors run real commands with no sandbox — see the repository's
-[SECURITY.md](https://github.com/rsetia/PRism/blob/main/SECURITY.md) before
-running untrusted graphs.
+Agent-backed executors require an explicit host policy. `createCodexEngine()`
+and `createLocalExecutionBackend()` default to isolated environment handling:
+only `PATH` and Prism's protocol variable are inherited. Allowlist ordinary
+variables and mark credentials for redaction at the host boundary:
+
+```ts
+const engine = createCodexEngine({
+  executionPolicy: {
+    mode: "isolated",
+    environment: {
+      inherit: ["PATH", "LANG"],
+      values: { SCOPED_GITHUB_TOKEN: await issueScopedToken() },
+      secretNames: ["SCOPED_GITHUB_TOKEN"],
+    },
+  },
+});
+```
+
+`inherit: "all"` and Codex sandbox bypass are accepted only in
+`trusted-local` mode. The bundled CLI selects that compatibility mode for its
+local Git/GitHub workflow. Environment isolation is not filesystem or network
+containment: production adapters should advertise `isolation: "isolated"` and
+run the worker in a container, pod, or VM. See
+[SECURITY.md](https://github.com/rsetia/PRism/blob/main/SECURITY.md) for the
+complete trust model.
 
 Full docs, the CLI, and the Beads integration:
 **https://github.com/rsetia/PRism**
+
+For release validation, run `npm run eval` from the repository root. The suite
+uses fake executors and in-memory stores; a Codex/GitHub smoke is opt-in and
+never required by public CI.
+
+### Audited graph expansion
+
+Use `submitGraphProposal(store, runId, proposal, policy)` to append follow-up
+nodes through an explicit policy decision. Proposals are idempotent by id,
+compile before acceptance, and retain rejected decisions in the run's graph
+revision history, available from `inspectRun`. Existing nodes are immutable;
+when a proposal needs to revise completed work instead, create a child run and
+pass the completed output as its input.
 
 MIT

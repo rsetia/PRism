@@ -1,8 +1,19 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
-import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  rename,
+  writeFile,
+} from "node:fs/promises";
 import { join, resolve } from "node:path";
 import type { WorkerResult, WorkerSpec } from "./worker-protocol.js";
+import type {
+  AgentProgressSnapshot,
+  AgentStallDecision,
+} from "./agent-progress.js";
 import {
   NODE_DIR_ENV_VAR,
   parseWorkerResult,
@@ -10,6 +21,13 @@ import {
   WORKER_RESULT_FILE,
   WORKER_SPEC_FILE,
 } from "./worker-protocol.js";
+import {
+  buildChildEnvironment,
+  createSecretRedactor,
+  SAFE_AGENT_EXECUTION_POLICY,
+  validateAgentExecutionPolicy,
+  type AgentExecutionPolicy,
+} from "./execution-policy.js";
 
 /**
  * The ExecutionBackend port (plan §14, from PRism-py's ARCHITECTURE.md).
@@ -64,6 +82,8 @@ export interface LaunchOptions {
 }
 
 export interface ExecutionBackend {
+  /** Host process or an isolation boundary such as a container/pod. */
+  readonly isolation?: "host" | "isolated";
   /** Starts one worker for the supplied execution specification. */
   launch(spec: WorkerSpec, options?: LaunchOptions): Promise<WorkerHandle>;
   /** Reports whether a known worker is still running. */
@@ -81,6 +101,33 @@ export interface ExecutionBackend {
   close?(): Promise<void>;
 }
 
+/**
+ * A backend backed by an agent session stream, rather than only a child
+ * process. Its event stream is the authoritative source for stall handling.
+ * `recordStallDecision` must durably de-duplicate a restored decision.
+ */
+export interface ProgressReportingExecutionBackend extends ExecutionBackend {
+  readonly progressCapability: "structured";
+  readAgentProgress(handle: WorkerHandle): Promise<AgentProgressSnapshot>;
+  recordStallDecision(
+    handle: WorkerHandle,
+    decision: AgentStallDecision,
+  ): Promise<void>;
+}
+
+export function isProgressReportingExecutionBackend(
+  backend: ExecutionBackend,
+): backend is ProgressReportingExecutionBackend {
+  return (
+    (backend as Partial<ProgressReportingExecutionBackend>)
+      .progressCapability === "structured" &&
+    typeof (backend as Partial<ProgressReportingExecutionBackend>)
+      .readAgentProgress === "function" &&
+    typeof (backend as Partial<ProgressReportingExecutionBackend>)
+      .recordStallDecision === "function"
+  );
+}
+
 export interface LocalExecutionBackendOptions {
   /** Executable to run for each worker (e.g. process.execPath). */
   readonly command: string;
@@ -90,6 +137,8 @@ export interface LocalExecutionBackendOptions {
   readonly baseDir: string;
   /** Grace before SIGKILL after SIGTERM on terminate. Default 5000ms. */
   readonly killGraceMs?: number;
+  /** Defaults to the least-privilege isolated environment policy. */
+  readonly executionPolicy?: AgentExecutionPolicy;
 }
 
 /**
@@ -102,6 +151,10 @@ export function createLocalExecutionBackend(
   const baseDir = resolve(options.baseDir);
   const args = [...(options.args ?? [])];
   const killGraceMs = options.killGraceMs ?? 5_000;
+  const executionPolicy =
+    options.executionPolicy ?? SAFE_AGENT_EXECUTION_POLICY;
+  validateAgentExecutionPolicy(executionPolicy);
+  const redact = createSecretRedactor(executionPolicy, process.env);
   if (!Number.isFinite(killGraceMs) || killGraceMs < 0) {
     throw new RangeError("killGraceMs must be a finite non-negative number");
   }
@@ -211,6 +264,7 @@ export function createLocalExecutionBackend(
   }
 
   return {
+    isolation: "host",
     async launch(spec, launchOptions): Promise<WorkerHandle> {
       // With a workspace, the worker runs there and its protocol files
       // live inside it; without one, it runs in its own node dir.
@@ -232,7 +286,9 @@ export function createLocalExecutionBackend(
 
       const child = spawn(options.command, args, {
         cwd: workspaceDir ?? nodeDir,
-        env: { ...process.env, [NODE_DIR_ENV_VAR]: nodeDir },
+        env: buildChildEnvironment(executionPolicy, process.env, {
+          [NODE_DIR_ENV_VAR]: nodeDir,
+        }),
         stdio: "ignore",
       });
       const handle: WorkerHandle = Object.freeze({
@@ -333,7 +389,17 @@ export function createLocalExecutionBackend(
           cause: error,
         });
       }
-      return parseWorkerResult(result);
+      const parsed = parseWorkerResult(result);
+      const redacted =
+        parsed.status === "failed" && parsed.error !== undefined
+          ? { ...parsed, error: redact(parsed.error) }
+          : parsed;
+      if (redacted !== parsed) {
+        const temporaryPath = `${resultPath}.${String(process.pid)}.tmp`;
+        await writeFile(temporaryPath, JSON.stringify(redacted), "utf8");
+        await rename(temporaryPath, resultPath);
+      }
+      return redacted;
     },
   };
 }

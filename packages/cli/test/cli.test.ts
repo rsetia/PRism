@@ -133,6 +133,18 @@ describe("prism CLI", () => {
     expect(result.stdout).toContain("--greptile-app-slug <slug>");
   });
 
+  test("help documents Codex defaults and overrides", async () => {
+    const result = await cli("help");
+    expect(result.code).toBe(0);
+    expect(result.stdout).toContain("--codex-model <id>");
+    expect(result.stdout).toContain("--codex-reasoning-effort <level>");
+    expect(result.stdout).toContain("--codex-backend exec|app-server");
+    expect(result.stdout).toContain("gpt-5.6-terra");
+    expect(result.stdout).toContain(
+      "Codex reasoning effort                medium",
+    );
+  });
+
   test("validate: valid file exits 0 with empty stdout", async () => {
     const result = await cli("validate", fixture("valid.json"));
     expect(result.code).toBe(0);
@@ -202,6 +214,40 @@ describe("prism CLI", () => {
       status: "succeeded",
       output: "hello",
     });
+  });
+
+  test("run accepts Codex model and reasoning overrides", async () => {
+    const result = await cli(
+      "run",
+      fixture("valid.json"),
+      "--codex-model",
+      "gpt-5.6-sol",
+      "--codex-reasoning-effort",
+      "high",
+    );
+    expect(result.code).toBe(0);
+    expect(result.stdout.trim()).toBe('"hello"');
+  });
+
+  test("run accepts the Codex App Server backend selector", async () => {
+    const result = await cli(
+      "run",
+      fixture("valid.json"),
+      "--codex-backend",
+      "app-server",
+    );
+    expect(result.code).toBe(0);
+    expect(result.stdout.trim()).toBe('"hello"');
+  });
+
+  test("run rejects an unknown Codex backend", async () => {
+    const result = await cli(
+      "run",
+      fixture("valid.json"),
+      "--codex-backend",
+      "other",
+    );
+    expect(result.code).toBe(2);
   });
 
   test("run: graph failure is exit 1 with empty stdout", async () => {
@@ -1113,6 +1159,45 @@ describe("prism CLI: persisted runs", () => {
     });
   });
 
+  test("inspect renders a concise proof-of-work summary", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "prism-evidence-cli-"));
+    const graphPath = join(directory, "graph.json");
+    const store = join(directory, "run.db");
+    writeFileSync(
+      graphPath,
+      JSON.stringify({
+        version: 1,
+        nodes: {
+          work: {
+            executor: "constant",
+            config: {
+              value: {
+                version: 1,
+                summary: "Durable proof captured",
+                commits: [{ sha: "abc123" }],
+                pullRequests: [],
+                validations: [{ command: "npm test", status: "passed" }],
+                reviewVerdicts: [],
+                screenshots: [],
+                artifacts: [],
+                unresolvedRisks: [],
+              },
+            },
+          },
+        },
+        finalNode: "work",
+      }),
+    );
+    await cli("run", graphPath, "--store", store, "--run-id", "proof-run");
+
+    const inspected = await cli("inspect", "proof-run", "--store", store);
+    expect(inspected.code).toBe(0);
+    expect(inspected.stdout).toContain(
+      "evidence: Durable proof captured · 1 commit(s) · 0 PR(s) · 1/1 validation(s) passed · 0 unresolved risk(s)",
+    );
+    rmSync(directory, { recursive: true, force: true });
+  });
+
   test("events lists the persisted event log in order", async () => {
     const store = db();
     await cli("run", fixture("valid.json"), "--store", store, "--run-id", "r3");
@@ -1342,7 +1427,17 @@ describe("prism CLI: persisted runs", () => {
       "--run-id",
       "res1",
     );
-    const resumed = await cli("resume", "res1", "--store", store, "--json");
+    const resumed = await cli(
+      "resume",
+      "res1",
+      "--store",
+      store,
+      "--json",
+      "--codex-model",
+      "gpt-5.6-sol",
+      "--codex-reasoning-effort",
+      "high",
+    );
     expect(resumed.code).toBe(0);
     expect(JSON.parse(resumed.stdout)).toEqual({
       version: 1,

@@ -4,6 +4,15 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { StringDecoder } from "node:string_decoder";
 import type { WorkerResult, WorkerSpec } from "./worker-protocol.js";
+import {
+  buildChildEnvironment,
+  createSecretRedactor,
+  SAFE_AGENT_EXECUTION_POLICY,
+  validateAgentExecutionPolicy,
+  type AgentExecutionMode,
+  type AgentExecutionPolicy,
+  type SecretRedactor,
+} from "./execution-policy.js";
 import { WORKER_PHASES, type NodePhase } from "../runtime/events.js";
 import {
   NODE_DIR_ENV_VAR,
@@ -35,6 +44,8 @@ export interface CodexExecutorContract {
   readonly allowsGitMutation?: boolean;
   readonly allowsGitHubIo?: boolean;
   readonly extraRules?: readonly string[];
+  /** Reject this contract unless the host selected the matching mode. */
+  readonly requiredExecutionMode?: AgentExecutionMode;
 }
 
 export interface CodexExecutionInput {
@@ -59,6 +70,8 @@ export interface CodexPromptInput extends CodexExecutionInput {
 }
 
 export interface CodexEngine {
+  /** Used by executor preflight before a worktree or child is created. */
+  validateContract?(contract: CodexExecutorContract): void;
   execute(input: CodexExecutionInput): Promise<WorkerResult>;
 }
 
@@ -70,6 +83,8 @@ export interface CodexEngineOptions {
   /** Extra `codex exec` arguments inserted before the stdin prompt marker. */
   readonly execArgs?: readonly string[];
   readonly model?: string;
+  /** Reasoning effort passed as a per-run Codex config override. */
+  readonly reasoningEffort?: string;
   /** Additional writable directories passed through `--add-dir`. */
   readonly additionalWritableDirs?: readonly string[];
   /** Allow a non-git workspace. Default false. */
@@ -82,7 +97,9 @@ export interface CodexEngineOptions {
   readonly killGraceMs?: number;
   /** Child output mode. Default "inherit" so a worker log can capture it. */
   readonly stdio?: "inherit" | "ignore";
-  /** Additional child environment values. */
+  /** Host-side child environment, isolation, and redaction policy. */
+  readonly executionPolicy?: AgentExecutionPolicy;
+  /** @deprecated Use executionPolicy.environment.values. */
   readonly env?: Readonly<Record<string, string | undefined>>;
 }
 
@@ -172,12 +189,22 @@ export function createCodexEngine(
   const pollIntervalMs = options.pollIntervalMs ?? 250;
   const heartbeatIntervalMs = options.heartbeatIntervalMs ?? 10_000;
   const killGraceMs = options.killGraceMs ?? 5_000;
+  const executionPolicy = mergeLegacyEnvironment(
+    options.executionPolicy ?? SAFE_AGENT_EXECUTION_POLICY,
+    options.env,
+  );
+  validateAgentExecutionPolicy(executionPolicy);
+  const redact = createSecretRedactor(executionPolicy, process.env);
   validateDuration("pollIntervalMs", pollIntervalMs);
   validateDuration("heartbeatIntervalMs", heartbeatIntervalMs);
   validateDuration("killGraceMs", killGraceMs);
 
   return Object.freeze({
+    validateContract(contract: CodexExecutorContract): void {
+      validateContractPolicy(contract, executionPolicy);
+    },
     async execute(input: CodexExecutionInput): Promise<WorkerResult> {
+      validateContractPolicy(input.contract, executionPolicy);
       const nodeDir = resolve(input.nodeDir);
       const worktreeDir = resolve(input.worktreeDir);
       const specPath = join(nodeDir, WORKER_SPEC_FILE);
@@ -214,18 +241,16 @@ export function createCodexEngine(
       );
       const child = spawn(command, args, {
         cwd: worktreeDir,
-        env: {
-          ...process.env,
-          ...options.env,
+        env: buildChildEnvironment(executionPolicy, process.env, {
           [NODE_DIR_ENV_VAR]: nodeDir,
-        },
+        }),
         stdio: [
           "pipe",
           input.onOutput === undefined ? (options.stdio ?? "inherit") : "pipe",
           input.onOutput === undefined ? (options.stdio ?? "inherit") : "pipe",
         ],
       });
-      const outputDrained = captureChildOutput(child, input.onOutput);
+      const outputDrained = captureChildOutput(child, input.onOutput, redact);
       const settled = processSettlement(child);
       child.stdin?.on("error", () => {
         // Codex may exit before consuming all stdin. Its process result and
@@ -257,7 +282,9 @@ export function createCodexEngine(
           if (resultRead.kind === "valid") {
             await terminateProcess(child, settled, killGraceMs);
             await outputDrained;
-            return resultRead.result;
+            const result = redactWorkerResult(resultRead.result, redact);
+            await persistWorkerResult(resultPath, result);
+            return result;
           }
 
           if (isAborted(input.signal)) {
@@ -293,7 +320,9 @@ export function createCodexEngine(
       );
       const finalResult = await readWorkerResult(resultPath);
       if (finalResult.kind === "valid") {
-        return finalResult.result;
+        const result = redactWorkerResult(finalResult.result, redact);
+        await persistWorkerResult(resultPath, result);
+        return result;
       }
 
       const details = await readLastMessage(lastMessagePath);
@@ -313,9 +342,11 @@ export function createCodexEngine(
           : `codex exited with ${exitDescription} without writing result.json`;
       return persistInfrastructureFailure(
         resultPath,
-        details.length === 0
-          ? contractFailure
-          : `${contractFailure}: ${details}`,
+        redact(
+          details.length === 0
+            ? contractFailure
+            : `${contractFailure}: ${details}`,
+        ),
       );
     },
   });
@@ -348,6 +379,7 @@ async function observeWorkerPhase(
 function captureChildOutput(
   child: ChildProcess,
   onOutput: ((chunk: string) => void) | undefined,
+  redact: SecretRedactor,
 ): Promise<void> {
   if (onOutput === undefined) {
     return Promise.resolve();
@@ -363,11 +395,12 @@ function captureChildOutput(
     let remaining = streams.length;
     for (const stream of streams) {
       const decoder = new StringDecoder("utf8");
+      const streamRedactor = createStreamingRedactor(redact);
       let finished = false;
       const finish = (): void => {
         if (finished) return;
         finished = true;
-        const finalText = decoder.end();
+        const finalText = streamRedactor.end(decoder.end());
         if (finalText.length > 0) {
           onOutput(finalText);
         }
@@ -377,7 +410,7 @@ function captureChildOutput(
         }
       };
       stream.on("data", (chunk: Buffer) => {
-        const text = decoder.write(chunk);
+        const text = streamRedactor.write(decoder.write(chunk));
         if (text.length > 0) {
           onOutput(text);
         }
@@ -387,6 +420,90 @@ function captureChildOutput(
       stream.once("error", finish);
     }
   });
+}
+
+function createStreamingRedactor(redactor: SecretRedactor): {
+  write(value: string): string;
+  end(value: string): string;
+} {
+  if (redactor.secrets.length === 0) {
+    return { write: (value) => value, end: (value) => value };
+  }
+  let buffer = "";
+  const longest = redactor.secrets[0]?.length ?? 0;
+  const drain = (flush: boolean): string => {
+    const output: string[] = [];
+    const retained = flush ? 0 : Math.max(0, longest - 1);
+    while (buffer.length > retained) {
+      const secret = redactor.secrets.find((candidate) =>
+        buffer.startsWith(candidate),
+      );
+      if (secret !== undefined) {
+        output.push("[REDACTED]");
+        buffer = buffer.slice(secret.length);
+      } else {
+        output.push(buffer[0] ?? "");
+        buffer = buffer.slice(1);
+      }
+    }
+    return output.join("");
+  };
+  return {
+    write(value) {
+      buffer += value;
+      return drain(false);
+    },
+    end(value) {
+      buffer += value;
+      return drain(true);
+    },
+  };
+}
+
+function validateContractPolicy(
+  contract: CodexExecutorContract,
+  policy: AgentExecutionPolicy,
+): void {
+  if (
+    contract.requiredExecutionMode !== undefined &&
+    contract.requiredExecutionMode !== policy.mode
+  ) {
+    throw new Error(
+      `Codex contract requires ${contract.requiredExecutionMode} execution but the engine uses ${policy.mode}`,
+    );
+  }
+  if (
+    policy.mode === "isolated" &&
+    (contract.dangerouslyBypassApprovalsAndSandbox === true ||
+      contract.sandbox === "danger-full-access")
+  ) {
+    throw new Error(
+      "isolated execution cannot bypass the Codex sandbox or select danger-full-access",
+    );
+  }
+}
+
+function mergeLegacyEnvironment(
+  policy: AgentExecutionPolicy,
+  values: Readonly<Record<string, string | undefined>> | undefined,
+): AgentExecutionPolicy {
+  if (values === undefined) return policy;
+  return {
+    ...policy,
+    environment: {
+      ...policy.environment,
+      values: { ...policy.environment?.values, ...values },
+    },
+  };
+}
+
+function redactWorkerResult(
+  result: WorkerResult,
+  redact: (value: string) => string,
+): WorkerResult {
+  return result.status === "failed" && result.error !== undefined
+    ? { ...result, error: redact(result.error) }
+    : result;
 }
 
 function buildCommandArgs(
@@ -411,6 +528,12 @@ function buildCommandArgs(
   args.push("--ephemeral", "--color", "never", "-C", worktreeDir);
   if (options.model !== undefined) {
     args.push("--model", options.model);
+  }
+  if (options.reasoningEffort !== undefined) {
+    args.push(
+      "--config",
+      `model_reasoning_effort=${JSON.stringify(options.reasoningEffort)}`,
+    );
   }
   for (const directory of new Set([nodeDir, ...additionalWritableDirs])) {
     args.push("--add-dir", directory);
@@ -492,11 +615,17 @@ async function persistInfrastructureFailure(
     error,
     failureClass: "transient_infra",
   };
+  await persistWorkerResult(resultPath, result);
+  return result;
+}
+
+async function persistWorkerResult(
+  resultPath: string,
+  result: WorkerResult,
+): Promise<void> {
   const temporaryPath = `${resultPath}.${String(process.pid)}.tmp`;
   await writeFile(temporaryPath, JSON.stringify(result), "utf8");
-  await rm(resultPath, { force: true });
   await rename(temporaryPath, resultPath);
-  return result;
 }
 
 async function writeHeartbeat(path: string): Promise<void> {

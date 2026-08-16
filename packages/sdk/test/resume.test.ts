@@ -45,7 +45,11 @@ async function seed(
 function engineOn(
   store: RunStore,
   extraExecutors: readonly ExecutorDefinition[] = [],
-  options: { retryPolicy?: RetryPolicy; clock?: ManualClock } = {},
+  options: {
+    retryPolicy?: RetryPolicy;
+    clock?: ManualClock;
+    maxConcurrency?: number;
+  } = {},
 ): Engine {
   return createEngine({
     store,
@@ -100,6 +104,69 @@ const transientRetry = (): RetryPolicy => ({
 });
 
 describe("engine resume", () => {
+  test("fails a malformed ready node instead of rejecting the scheduler", async () => {
+    const store = createMemoryStore();
+    const graph = linearGraph();
+    // This represents corrupt/incomplete persisted state: b was marked ready
+    // but its dependency output was never recorded. The engine must surface a
+    // normal node failure rather than abandon the entire scheduler promise.
+    await seed(store, "missing-dependency", graph, [
+      { kind: "node_ready", nodeId: "b" },
+    ]);
+
+    await expect(
+      engineOn(store, [], { maxConcurrency: 2 }).resume("missing-dependency")
+        .result,
+    ).resolves.toEqual({
+      status: "failed",
+      failures: [
+        {
+          nodeId: "b",
+          cause: {
+            name: "Error",
+            message: 'node "b" is missing output from dependency "a"',
+          },
+        },
+      ],
+    });
+  });
+
+  test("restores null output for a previously skipped dependency", async () => {
+    const store = createMemoryStore();
+    const graph = buildGraph({
+      version: 2,
+      nodes: {
+        proof: {
+          executor: "constant",
+          config: { value: { proof: { version: 1, hasDiff: false } } },
+        },
+        gated: {
+          executor: "constant",
+          dependsOn: ["proof"],
+          config: { value: "not run" },
+          when: { predicate: "diff_present", equals: true },
+        },
+        final: { executor: "passthrough", dependsOn: ["gated"] },
+      },
+      finalNode: "final",
+    });
+    await seed(store, "skipped", graph, [
+      { kind: "node_ready", nodeId: "proof" },
+      { kind: "node_started", nodeId: "proof" },
+      {
+        kind: "node_succeeded",
+        nodeId: "proof",
+        output: { proof: { version: 1, hasDiff: false } },
+      },
+      { kind: "node_skipped", nodeId: "gated" },
+    ]);
+
+    await expect(engineOn(store).resume("skipped").result).resolves.toEqual({
+      status: "succeeded",
+      output: null,
+    });
+  });
+
   test("continues a run whose upstream node already succeeded", async () => {
     const store = createMemoryStore();
     // 'a' finished; 'b' was made ready but never started (crash here).
@@ -228,6 +295,53 @@ describe("engine resume", () => {
       status: "succeeded",
       output: "A",
     });
+  });
+
+  test("a resumed resource waiter runs after an interrupted owner releases", async () => {
+    const store = createMemoryStore();
+    const clock = createManualClock();
+    const graph = buildGraph({
+      version: 1,
+      resources: { shared: { capacity: 1 } },
+      nodes: {
+        a: {
+          executor: "constant",
+          resources: ["shared"],
+          config: { value: "A" },
+        },
+        b: {
+          executor: "constant",
+          resources: ["shared"],
+          config: { value: "B" },
+        },
+      },
+      finalNode: "a",
+    });
+    await seed(store, "resource-resume", graph, [
+      { kind: "node_ready", nodeId: "a" },
+      { kind: "node_ready", nodeId: "b" },
+      { kind: "node_started", nodeId: "a" },
+      {
+        kind: "node_resource_wait",
+        nodeId: "b",
+        resourceIds: ["shared"],
+      },
+    ]);
+
+    const handle = engineOn(store, [], {
+      retryPolicy: transientRetry(),
+      clock,
+    }).resume("resource-resume");
+    await drain(handle, clock);
+    await expect(handle.result).resolves.toEqual({
+      status: "succeeded",
+      output: "A",
+    });
+    const started: string[] = [];
+    for await (const event of handle.events) {
+      if (event.kind === "node_started") started.push(event.nodeId);
+    }
+    expect(started).toEqual(["a", "b", "a"]);
   });
 
   test("resuming an unknown run rejects", async () => {

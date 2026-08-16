@@ -9,9 +9,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, test } from "vitest";
-import { buildCodexPrompt, createCodexEngine } from "../src/node/index.js";
+import {
+  buildCodexPrompt,
+  createCodexEngine,
+  TRUSTED_LOCAL_AGENT_EXECUTION_POLICY,
+} from "../src/node/index.js";
 import type {
+  AgentExecutionPolicy,
   CodexEngine,
+  CodexEngineOptions,
   CodexExecutorContract,
   WorkerSpec,
 } from "../src/node/index.js";
@@ -51,7 +57,10 @@ function spec(mode = "success"): WorkerSpec {
   };
 }
 
-function engine(): CodexEngine {
+function engine(
+  options: CodexEngineOptions = {},
+  executionPolicy?: AgentExecutionPolicy,
+): CodexEngine {
   return createCodexEngine({
     command: process.execPath,
     commandArgs: [FAKE_CODEX],
@@ -60,6 +69,8 @@ function engine(): CodexEngine {
     heartbeatIntervalMs: 10,
     killGraceMs: 100,
     stdio: "ignore",
+    ...options,
+    ...(executionPolicy === undefined ? {} : { executionPolicy }),
   });
 }
 
@@ -118,9 +129,36 @@ describe("createCodexEngine", () => {
     expect(existsSync(join(location.nodeDir, "heartbeat.json"))).toBe(true);
   });
 
+  test("passes model and reasoning effort as invocation overrides", async () => {
+    const location = paths();
+    const result = await engine({
+      model: "gpt-5.6-terra",
+      reasoningEffort: "medium",
+    }).execute({
+      ...location,
+      spec: spec(),
+      contract,
+    });
+    expect(result.status).toBe("succeeded");
+    const args = JSON.parse(
+      readFileSync(join(location.nodeDir, "captured-args.json"), "utf8"),
+    ) as string[];
+    expect(args).toEqual(
+      expect.arrayContaining([
+        "--model",
+        "gpt-5.6-terra",
+        "--config",
+        'model_reasoning_effort="medium"',
+      ]),
+    );
+  });
+
   test("honors a trusted contract that requires unsandboxed host access", async () => {
     const location = paths();
-    const result = await engine().execute({
+    const result = await engine(
+      {},
+      TRUSTED_LOCAL_AGENT_EXECUTION_POLICY,
+    ).execute({
       ...location,
       spec: spec(),
       contract: {
@@ -147,6 +185,63 @@ describe("createCodexEngine", () => {
     expect(result.status).toBe("succeeded");
     expect(output.join("")).toContain("fake codex stdout");
     expect(output.join("")).toContain("fake codex stderr");
+  });
+
+  test("does not inherit undeclared environment variables in safe mode", async () => {
+    process.env["PRISM_UNDECLARED_TEST"] = "host-secret";
+    const location = paths();
+    try {
+      await engine().execute({ ...location, spec: spec(), contract });
+      const environment = JSON.parse(
+        readFileSync(join(location.nodeDir, "captured-env.json"), "utf8"),
+      ) as Record<string, string>;
+      expect(environment["PRISM_UNDECLARED_TEST"]).toBeUndefined();
+      expect(environment["PRISM_NODE_DIR"]).toBe(location.nodeDir);
+    } finally {
+      delete process.env["PRISM_UNDECLARED_TEST"];
+    }
+  });
+
+  test("redacts configured secrets from output and worker errors", async () => {
+    const output: string[] = [];
+    const secret = "top-secret-value";
+    const location = paths();
+    const result = await engine(
+      {},
+      {
+        mode: "isolated",
+        environment: {
+          inherit: ["PATH"],
+          values: { TEST_AGENT_SECRET: secret },
+          secretNames: ["TEST_AGENT_SECRET"],
+        },
+      },
+    ).execute({
+      ...location,
+      spec: spec("secret-output"),
+      contract,
+      onOutput: (chunk) => output.push(chunk),
+    });
+    expect(output.join("")).not.toContain(secret);
+    expect(output.join("")).toContain("[REDACTED]");
+    expect(result).toEqual({
+      status: "failed",
+      error: "failed with [REDACTED]",
+      failureClass: "semantic_failed",
+    });
+    const persisted = JSON.parse(
+      readFileSync(join(location.nodeDir, "result.json"), "utf8"),
+    ) as unknown;
+    expect(persisted).toEqual(result);
+  });
+
+  test("rejects unsafe sandbox selection before launch in isolated mode", () => {
+    expect(() =>
+      engine().validateContract?.({
+        instructions: "unsafe",
+        dangerouslyBypassApprovalsAndSandbox: true,
+      }),
+    ).toThrow(/isolated execution cannot bypass/);
   });
 
   test("observes worker-reported phase transitions", async () => {

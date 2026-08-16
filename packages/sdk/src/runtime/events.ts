@@ -1,5 +1,6 @@
 import type { JsonValue } from "../graph/types.js";
 import type { NodeFailure } from "./types.js";
+import type { AgentProgressState } from "../node/agent-progress.js";
 
 /** Stable phase names used for per-node wall-time attribution. */
 export const NODE_PHASES = Object.freeze([
@@ -55,11 +56,30 @@ export type WorkerPhase = (typeof WORKER_PHASES)[number];
  */
 export type RunEvent =
   | { readonly kind: "node_ready"; readonly nodeId: string }
+  | {
+      readonly kind: "node_resource_wait";
+      readonly nodeId: string;
+      /** Currently saturated requests, in deterministic resource order. */
+      readonly resourceIds: readonly string[];
+    }
   | { readonly kind: "node_started"; readonly nodeId: string }
   | {
       readonly kind: "node_phase_changed";
       readonly nodeId: string;
       readonly phase: NodePhase;
+    }
+  | {
+      /** Normalized, append-only usage observed during a particular attempt. */
+      readonly kind: "node_usage_reported";
+      readonly nodeId: string;
+      readonly attempt: number;
+      readonly usage: UsageReport;
+    }
+  | {
+      /** Latest agent-progress classification, separately from liveness. */
+      readonly kind: "node_agent_progress";
+      readonly nodeId: string;
+      readonly state: AgentProgressState;
     }
   | {
       readonly kind: "node_succeeded";
@@ -77,6 +97,7 @@ export type RunEvent =
       /** The failed-or-blocked dependencies that caused this. */
       readonly blockedBy: readonly string[];
     }
+  | { readonly kind: "node_skipped"; readonly nodeId: string }
   | { readonly kind: "node_cancelling"; readonly nodeId: string }
   | { readonly kind: "node_cancelled"; readonly nodeId: string }
   | {
@@ -104,6 +125,21 @@ export type RunEvent =
       readonly kind: "node_reset";
       readonly nodeId: string;
     };
+
+/** Provider-neutral counters. Missing fields are deliberately unknown. */
+export interface UsageReport {
+  readonly provider?: string;
+  readonly model?: string;
+  readonly inputTokens?: number;
+  readonly outputTokens?: number;
+  readonly cachedTokens?: number;
+  readonly agentTurns?: number;
+  readonly toolCalls?: number;
+  /** A provider may supply this without exposing its sensitive limit values. */
+  readonly rateLimited?: boolean;
+  /** Authoritative provider cost, if available; otherwise pricing is estimated. */
+  readonly costUsd?: number;
+}
 
 /**
  * An event as the store returns it. `seq` and `timestampMs` are assigned by

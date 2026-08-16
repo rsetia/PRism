@@ -61,6 +61,25 @@ async function createStoredRun(
 }
 
 describe("inspectRun", () => {
+  test("surfaces the latest structured agent-progress state", async () => {
+    const graph = buildGraph({
+      version: 1,
+      nodes: { work: { executor: "constant" } },
+      finalNode: "work",
+    });
+    const store = await createStoredRun(graph, "agent-progress", [
+      { kind: "node_ready", nodeId: "work" },
+      { kind: "node_started", nodeId: "work" },
+      { kind: "node_agent_progress", nodeId: "work", state: "active" },
+      { kind: "node_agent_progress", nodeId: "work", state: "waiting" },
+    ]);
+
+    expect((await inspectRun(store, "agent-progress")).nodes[0]).toMatchObject({
+      state: "running",
+      agentProgress: "waiting",
+    });
+  });
+
   test("reports every node succeeded for a finished run", async () => {
     const store = createMemoryStore();
     const graph = buildGraph({
@@ -80,6 +99,34 @@ describe("inspectRun", () => {
     expect(stateOf(inspection.nodes, "first")).toBe("succeeded");
     expect(stateOf(inspection.nodes, "second")).toBe("succeeded");
     expect(inspection.failures).toEqual([]);
+  });
+
+  test("recognizes structured evidence while preserving generic output", async () => {
+    const graph = buildGraph({
+      version: 1,
+      nodes: { work: { executor: "constant" } },
+      finalNode: "work",
+    });
+    const proof = {
+      version: 1,
+      summary: "Evidence is inspectable",
+      commits: [{ sha: "abc123" }],
+      pullRequests: [],
+      validations: [{ command: "npm test", status: "passed" }],
+      reviewVerdicts: [],
+      screenshots: [],
+      artifacts: [],
+      unresolvedRisks: [],
+    } as const;
+    const store = await createStoredRun(graph, "evidence", [
+      { kind: "node_ready", nodeId: "work" },
+      { kind: "node_started", nodeId: "work" },
+      { kind: "node_succeeded", nodeId: "work", output: proof },
+    ]);
+
+    expect((await inspectRun(store, "evidence")).nodes[0]?.evidence).toEqual(
+      proof,
+    );
   });
 
   test("reports failed and blocked nodes with the originating failure", async () => {
@@ -112,7 +159,7 @@ describe("inspectRun", () => {
     const inspection = await inspectRun(store, "preflight");
     expect(inspection.finished).toBe(true);
     expect(inspection.nodes).toEqual([
-      { nodeId: "ghost", state: "pending", timing: null },
+      { nodeId: "ghost", state: "pending", timing: null, evidence: null },
     ]);
     expect(inspection.failures).toEqual([
       {
@@ -306,6 +353,125 @@ describe("inspectRun", () => {
     expect(inspection.timing?.waitingPhases[0]).toMatchObject({
       phase: "dependency_wait",
     });
+  });
+
+  test("reports resource contention separately from critical-path work", async () => {
+    const graph = buildGraph({
+      version: 1,
+      resources: { shared: { capacity: 1 } },
+      nodes: {
+        work: { executor: "constant", resources: ["shared"] },
+      },
+      finalNode: "work",
+    });
+    const store = await createStoredRun(graph, "resource-timing", [
+      { kind: "node_ready", nodeId: "work" },
+      {
+        kind: "node_resource_wait",
+        nodeId: "work",
+        resourceIds: ["shared"],
+      },
+      { kind: "node_started", nodeId: "work" },
+      { kind: "node_succeeded", nodeId: "work", output: null },
+    ]);
+
+    const inspection = await inspectRun(store, "resource-timing");
+    expect(inspection.nodes[0]?.timing?.phases).toContainEqual({
+      phase: "resource_contention",
+      durationMs: 10,
+    });
+    expect(inspection.timing?.waitingPhases).toContainEqual({
+      phase: "resource_contention",
+      durationMs: 10,
+    });
+    expect(inspection.timing?.criticalPath).toMatchObject({
+      nodeIds: ["work"],
+      durationMs: 20,
+    });
+    expect(inspection.timing?.criticalPath.phases).not.toContainEqual(
+      expect.objectContaining({ phase: "resource_contention" }),
+    );
+  });
+
+  test("keeps usage from retried attempts and derives only labelled estimated cost", async () => {
+    const graph = buildGraph({
+      version: 1,
+      nodes: {
+        first: { executor: "constant" },
+        second: { executor: "constant" },
+      },
+      finalNode: "second",
+    });
+    const store = await createStoredRun(graph, "metered", [
+      { kind: "node_ready", nodeId: "first" },
+      { kind: "node_ready", nodeId: "second" },
+      { kind: "node_started", nodeId: "first" },
+      { kind: "node_started", nodeId: "second" },
+      {
+        kind: "node_usage_reported",
+        nodeId: "first",
+        attempt: 1,
+        usage: {
+          provider: "fake",
+          model: "v1",
+          inputTokens: 10,
+          outputTokens: 2,
+          agentTurns: 1,
+          toolCalls: 1,
+          rateLimited: true,
+        },
+      },
+      {
+        kind: "node_retry_wait",
+        nodeId: "first",
+        attempt: 1,
+        delayMs: 1,
+        failure: { nodeId: "first", cause: "retry" },
+      },
+      { kind: "node_succeeded", nodeId: "second", output: null },
+      { kind: "node_ready", nodeId: "first" },
+      { kind: "node_started", nodeId: "first" },
+      {
+        kind: "node_usage_reported",
+        nodeId: "first",
+        attempt: 2,
+        usage: {
+          provider: "fake",
+          model: "v1",
+          inputTokens: 20,
+          outputTokens: 3,
+          cachedTokens: 5,
+          agentTurns: 1,
+        },
+      },
+      { kind: "node_succeeded", nodeId: "first", output: null },
+    ]);
+
+    const inspection = await inspectRun(store, "metered", {
+      prices: [
+        {
+          version: "fake-2026",
+          provider: "fake",
+          model: "v1",
+          inputPerMillion: 1,
+          outputPerMillion: 2,
+          cachedPerMillion: 0.5,
+        },
+      ],
+    });
+    expect(inspection.usage).toMatchObject({
+      inputTokens: 30,
+      outputTokens: 5,
+      cachedTokens: null,
+      agentTurns: 2,
+      toolCalls: null,
+      costKind: "estimated",
+      priceVersion: "fake-2026",
+    });
+    expect(
+      inspection.usage?.attempts.map((attempt) => attempt.attempt),
+    ).toEqual([1, 2]);
+    expect(inspection.scheduler?.maximumRealizedNodeConcurrency).toBe(2);
   });
 
   test("charges an in-progress phase up to the run's latest observed event", async () => {

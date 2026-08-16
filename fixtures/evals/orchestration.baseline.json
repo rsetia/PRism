@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "profile": "deterministic",
+  "scenarios": 13,
+  "thresholds": {
+    "completionRate": 1,
+    "reviewAndValidationPassRate": 1,
+    "incorrectSuccessRate": 0,
+    "humanInterventionRate": 0,
+    "duplicateSideEffectRate": 0,
+    "maxDurationMs": 1000,
+    "maxEstimatedCostUsd": 0
+  },
+  "notes": "Uses fake executors and in-memory stores only; no model provider or GitHub credential is required."
+}

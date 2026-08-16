@@ -100,10 +100,19 @@ export function snapshotRunEvent(
     case "node_started":
     case "node_cancelling":
     case "node_cancelled":
+    case "node_skipped":
     case "node_reset":
       return Object.freeze({
         kind: event.kind,
         nodeId: event.nodeId,
+        ...persisted,
+      });
+
+    case "node_resource_wait":
+      return Object.freeze({
+        kind: event.kind,
+        nodeId: event.nodeId,
+        resourceIds: Object.freeze([...event.resourceIds]),
         ...persisted,
       });
 
@@ -112,6 +121,14 @@ export function snapshotRunEvent(
         kind: event.kind,
         nodeId: event.nodeId,
         phase: event.phase,
+        ...persisted,
+      });
+
+    case "node_agent_progress":
+      return Object.freeze({
+        kind: event.kind,
+        nodeId: event.nodeId,
+        state: event.state,
         ...persisted,
       });
 
@@ -138,6 +155,15 @@ export function snapshotRunEvent(
         attempt: event.attempt,
         delayMs: event.delayMs,
         failure: snapshotNodeFailure(event.failure),
+        ...persisted,
+      });
+
+    case "node_usage_reported":
+      return Object.freeze({
+        kind: event.kind,
+        nodeId: event.nodeId,
+        attempt: event.attempt,
+        usage: Object.freeze({ ...event.usage }),
         ...persisted,
       });
 

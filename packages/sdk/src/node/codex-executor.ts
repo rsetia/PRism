@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import type { JsonValue } from "../graph/types.js";
 import { isJsonValue } from "../internal/json.js";
 import { normalizeThrownCause } from "../runtime/failures.js";
+import { parseProofOfWork } from "../runtime/proof-of-work.js";
 import type {
   ExecutionContext,
   ExecutorDefinition,
@@ -10,7 +11,16 @@ import type {
   LogWriter,
   NodeExecutionOutcome,
 } from "../runtime/ports.js";
-import type { CodexEngine, CodexExecutorContract } from "./codex-engine.js";
+import {
+  buildCodexPrompt,
+  type CodexEngine,
+  type CodexExecutorContract,
+} from "./codex-engine.js";
+import {
+  runAgentSession,
+  type AgentSessionBackend,
+  type AgentSessionStore,
+} from "./agent-session-backend.js";
 import {
   codexContractForSpec,
   parseFinalizePrConfig,
@@ -41,7 +51,11 @@ export interface CodexExecutorOptions {
   /** Registry name — "implement" or "merge_resolve". */
   readonly name: string;
   /** The codex engine (real via createCodexEngine, or a test fake). */
-  readonly engine: CodexEngine;
+  readonly engine?: CodexEngine;
+  /** Structured, resumable alternative to the compatibility Codex engine. */
+  readonly sessionBackend?: AgentSessionBackend;
+  /** Optional durable store; defaults to agent-session.json in the node dir. */
+  readonly sessionStore?: AgentSessionStore;
   /** Provisions the worktree codex runs in (a git worktree in practice). */
   readonly provisioner?: WorkspaceProvisioner;
   /** Working dir when no provisioner is set. Default process.cwd(). */
@@ -84,8 +98,9 @@ export interface CodexExecutorOptions {
  *    : undefined. worktreeDir = workspace?.dir ?? cwd ?? process.cwd().
  * 5. nodeDir = mkdtemp under nodeDirBase ?? worktreeDir; write spec.json
  *    (the codex engine reads its protocol files there).
- * 6. result = await engine.execute({ spec, nodeDir, worktreeDir, contract,
- *    signal: context.signal }).
+ * 6. result = await engine.execute(...) for the compatibility backend, or
+ *    runAgentSession(...) for a structured session backend. The latter starts
+ *    or resumes the durable {runId,nodeId,attempt} conversation.
  * 7. map: succeeded -> { status: "succeeded", output: result.output };
  *    failed -> { status: "failed", cause: result.error ?? "codex failed",
  *    failureClass: result.failureClass }. A thrown engine error ->
@@ -98,6 +113,11 @@ export function createCodexExecutor(
   options: CodexExecutorOptions,
 ): ExecutorDefinition {
   validateExecutorName(options.name);
+  const engine = options.engine;
+  const sessionBackend = options.sessionBackend;
+  if (engine === undefined && sessionBackend === undefined) {
+    throw new Error("Codex executor requires an engine or sessionBackend");
+  }
   const name = options.name;
   const cwd = optionalDirectory(options.cwd, "cwd") ?? process.cwd();
   const explicitNodeDirBase = optionalDirectory(
@@ -111,6 +131,16 @@ export function createCodexExecutor(
     name,
     validateConfig(config: JsonValue | undefined): void {
       validateCodexConfig(name, config);
+      const contract = buildContract({
+        runId: "preflight",
+        nodeId: "preflight",
+        kind: "task",
+        executor: name,
+        input: null,
+        config: config ?? null,
+        attempt: 1,
+      });
+      engine?.validateContract?.(contract);
     },
     async execute(context: ExecutionContext): Promise<NodeExecutionOutcome> {
       let input: unknown;
@@ -180,34 +210,77 @@ export function createCodexExecutor(
         });
 
         await context.reportPhase(codexExecutionPhase(name));
-        const result = await options.engine.execute({
-          spec,
-          nodeDir,
-          worktreeDir,
-          contract,
-          signal: context.signal,
-          ...(logWriter === undefined
-            ? {}
-            : {
-                onOutput: (chunk: string): void => {
-                  pendingLogWrites = pendingLogWrites.then(() =>
-                    logWriter?.write(chunk),
-                  );
-                },
-              }),
-          onPhase: context.reportPhase,
-        });
-        await pendingLogWrites;
-        outcome =
-          result.status === "succeeded"
-            ? { status: "succeeded", output: result.output }
-            : {
-                status: "failed",
-                cause: result.error ?? "codex failed",
-                ...(result.failureClass === undefined
-                  ? {}
-                  : { failureClass: result.failureClass }),
+        const onOutput =
+          logWriter === undefined
+            ? undefined
+            : (chunk: string): void => {
+                pendingLogWrites = pendingLogWrites.then(() =>
+                  logWriter?.write(chunk),
+                );
               };
+        const result =
+          sessionBackend === undefined
+            ? await engine!.execute({
+                spec,
+                nodeDir,
+                worktreeDir,
+                contract,
+                signal: context.signal,
+                ...(onOutput === undefined ? {} : { onOutput }),
+                onPhase: context.reportPhase,
+              })
+            : await runAgentSession(
+                {
+                  key: {
+                    runId: context.runId,
+                    nodeId: context.nodeId,
+                    attempt: context.attempt,
+                  },
+                  spec,
+                  nodeDir,
+                  worktreeDir,
+                  sandbox:
+                    contract.dangerouslyBypassApprovalsAndSandbox === true
+                      ? "danger-full-access"
+                      : (contract.sandbox ?? "workspace-write"),
+                  prompt: buildCodexPrompt({
+                    spec,
+                    nodeDir,
+                    worktreeDir,
+                    contract,
+                    specPath: join(nodeDir, WORKER_SPEC_FILE),
+                    resultPath: join(nodeDir, "result.json"),
+                    heartbeatPath: join(nodeDir, "heartbeat.json"),
+                    phasePath: join(nodeDir, "phase.json"),
+                  }),
+                },
+                {
+                  backend: sessionBackend,
+                  ...(options.sessionStore === undefined
+                    ? {}
+                    : { store: options.sessionStore }),
+                  signal: context.signal,
+                  ...(onOutput === undefined ? {} : { onOutput }),
+                  onPhase: context.reportPhase,
+                },
+              );
+        await pendingLogWrites;
+        if (result.status === "succeeded") {
+          try {
+            parseProofOfWork(result.output);
+            outcome = { status: "succeeded", output: result.output };
+          } catch (error: unknown) {
+            outcome = validationFailure("MALFORMED_PROOF_OF_WORK", error);
+          }
+        } else {
+          outcome = {
+            status: "failed",
+            cause: result.error ?? "codex failed",
+            ...(result.failureClass === undefined
+              ? {}
+              : { failureClass: result.failureClass }),
+          };
+        }
       } catch (error: unknown) {
         outcome = infrastructureFailure("CODEX_EXECUTION_FAILED", error);
       }

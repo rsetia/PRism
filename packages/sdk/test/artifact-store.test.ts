@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { pathToFileURL } from "node:url";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { afterAll, describe, expect, test } from "vitest";
 import type { ArtifactStore, PutArtifactInput } from "../src/index.js";
 import { createLocalArtifactStore } from "../src/node/index.js";
@@ -54,5 +54,88 @@ describe("createLocalArtifactStore filesystem safety", () => {
     const s = store();
     const outside = pathToFileURL(join(root, "..", "escape.txt")).href;
     await expect(s.get(outside)).rejects.toThrow();
+  });
+});
+
+describe("createLocalArtifactStore durable metadata", () => {
+  test("content type survives store reconstruction", async () => {
+    const baseDir = join(root, "reconstructed");
+    const first = createLocalArtifactStore({ baseDir });
+    await first.put(
+      put({ filename: "data.json", contentType: "application/json" }),
+    );
+
+    const reopened = createLocalArtifactStore({ baseDir });
+    expect(await reopened.list({ runId: "r", nodeId: "n" })).toMatchObject([
+      { filename: "data.json", contentType: "application/json" },
+    ]);
+  });
+
+  test("concurrent store instances preserve every manifest entry", async () => {
+    const baseDir = join(root, "concurrent-instances");
+    const first = createLocalArtifactStore({ baseDir });
+    const second = createLocalArtifactStore({ baseDir });
+    await Promise.all(
+      Array.from({ length: 20 }, (_, index) =>
+        (index % 2 === 0 ? first : second).put(
+          put({ filename: `artifact-${String(index)}.txt` }),
+        ),
+      ),
+    );
+
+    const artifacts = await first.list({ runId: "r", nodeId: "n" });
+    expect(artifacts.map((artifact) => artifact.filename).sort()).toEqual(
+      Array.from(
+        { length: 20 },
+        (_, index) => `artifact-${String(index)}.txt`,
+      ).sort(),
+    );
+  });
+
+  test("missing artifact files do not leave phantom metadata", async () => {
+    const baseDir = join(root, "missing");
+    const first = createLocalArtifactStore({ baseDir });
+    const ref = await first.put(put({ contentType: "text/plain" }));
+    rmSync(fileURLToPath(ref.uri));
+
+    const reopened = createLocalArtifactStore({ baseDir });
+    expect(await reopened.list({ runId: "r", nodeId: "n" })).toEqual([]);
+  });
+
+  test("duplicate names keep one current metadata record", async () => {
+    const baseDir = join(root, "duplicate");
+    const first = createLocalArtifactStore({ baseDir });
+    const original = await first.put(
+      put({ contentType: "text/plain", data: new TextEncoder().encode("old") }),
+    );
+    await first.put(
+      put({
+        contentType: "application/json",
+        data: new TextEncoder().encode("{}"),
+      }),
+    );
+
+    const reopened = createLocalArtifactStore({ baseDir });
+    expect(await reopened.list({ runId: "r", nodeId: "n" })).toMatchObject([
+      { filename: "output.txt", size: 2, contentType: "application/json" },
+    ]);
+    expect(fileURLToPath(original.uri)).toContain(baseDir);
+  });
+
+  test("artifacts created before metadata sidecars remain readable", async () => {
+    const baseDir = join(root, "legacy");
+    const first = createLocalArtifactStore({ baseDir });
+    const ref = await first.put(put({ contentType: "text/plain" }));
+    rmSync(join(dirname(fileURLToPath(ref.uri)), ".prism-artifacts-v1.json"));
+
+    const reopened = createLocalArtifactStore({ baseDir });
+    expect(await reopened.list({ runId: "r", nodeId: "n" })).toEqual([
+      {
+        uri: ref.uri,
+        filename: "output.txt",
+        size: 5,
+      },
+    ]);
+    expect(new TextDecoder().decode(await reopened.get(ref.uri))).toBe("hello");
   });
 });

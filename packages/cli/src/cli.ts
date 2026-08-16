@@ -26,6 +26,7 @@ import type {
   GraphCompileError,
   GraphParseError,
   NodeFailure,
+  ProofOfWorkV1,
   PhaseDuration,
   PersistedRunEvent,
   LogBackend,
@@ -34,7 +35,11 @@ import type {
   RunStore,
 } from "@rsetia/prism";
 import { createFileLogBackend, createSqliteStore } from "@rsetia/prism/node";
-import { createAgentExecutorRegistry } from "./agent-executors.js";
+import {
+  createAgentExecutorRegistry,
+  DEFAULT_CODEX_MODEL,
+  DEFAULT_CODEX_REASONING_EFFORT,
+} from "./agent-executors.js";
 import { generateBeadsDag } from "./beads-dag.js";
 import { applyGreptileAppSlug } from "./review-policy.js";
 import {
@@ -97,6 +102,7 @@ Commands:
                                       Snapshot Beads into an agent DAG
   run <file> [--json] [--store <db>] [--run-id <id>] [--repo <path>]
              [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
+             [--codex-reasoning-effort <level>] [--codex-backend exec|app-server]
              [--greptile-app-slug <slug>]
                                       Execute the graph
   inspect <run-id> [--store <db>] [--json]
@@ -110,6 +116,7 @@ Commands:
                                       Render the live DAG (default latest running run)
   resume <run-id> [--store <db>] [--json] [--repo <path>]
          [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
+         [--codex-reasoning-effort <level>] [--codex-backend exec|app-server]
                                       Continue an interrupted run to completion
   abort <run-id> [--store <db>] [--json]
                                       Force a stuck run to a cancelled, finished state
@@ -123,7 +130,10 @@ Defaults:
   Beads, store, worktrees, and logs     $PRISM_HOME/<kind>/<project>/...
   Skill install target                  ~/.claude/skills
   Pull-request reviewer                 Greptile (@greptile review)
-  Maximum concurrency                   ${String(DEFAULT_MAX_CONCURRENCY)}`;
+  Maximum concurrency                   ${String(DEFAULT_MAX_CONCURRENCY)}
+  Codex model                           ${DEFAULT_CODEX_MODEL}
+  Codex reasoning effort                ${DEFAULT_CODEX_REASONING_EFFORT}
+  Codex backend                         exec`;
 
 interface ValidateInvocation {
   readonly command: "validate";
@@ -253,6 +263,8 @@ interface AgentInvocationOptions {
   readonly maxConcurrency: number;
   readonly codexCommand: string | undefined;
   readonly codexModel: string | undefined;
+  readonly codexReasoningEffort: string | undefined;
+  readonly codexBackend: "exec" | "app-server";
   readonly worktreeDir: string | undefined;
 }
 
@@ -266,6 +278,8 @@ interface ParsedFlags {
   readonly maxConcurrency: string | undefined;
   readonly codexCommand: string | undefined;
   readonly codexModel: string | undefined;
+  readonly codexReasoningEffort: string | undefined;
+  readonly codexBackend: string | undefined;
   readonly worktreeDir: string | undefined;
   readonly greptileAppSlug: string | undefined;
 }
@@ -281,6 +295,8 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
   let maxConcurrency: string | undefined;
   let codexCommand: string | undefined;
   let codexModel: string | undefined;
+  let codexReasoningEffort: string | undefined;
+  let codexBackend: string | undefined;
   let worktreeDir: string | undefined;
   let greptileAppSlug: string | undefined;
 
@@ -297,6 +313,8 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
       arg === "--max-concurrency" ||
       arg === "--codex-bin" ||
       arg === "--codex-model" ||
+      arg === "--codex-reasoning-effort" ||
+      arg === "--codex-backend" ||
       arg === "--worktree-dir" ||
       arg === "--greptile-app-slug"
     ) {
@@ -324,6 +342,12 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
       } else if (arg === "--codex-model") {
         if (codexModel !== undefined) return undefined;
         codexModel = value;
+      } else if (arg === "--codex-reasoning-effort") {
+        if (codexReasoningEffort !== undefined) return undefined;
+        codexReasoningEffort = value;
+      } else if (arg === "--codex-backend") {
+        if (codexBackend !== undefined) return undefined;
+        codexBackend = value;
       } else if (arg === "--worktree-dir") {
         if (worktreeDir !== undefined) return undefined;
         worktreeDir = value;
@@ -350,6 +374,8 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
     maxConcurrency,
     codexCommand,
     codexModel,
+    codexReasoningEffort,
+    codexBackend,
     worktreeDir,
     greptileAppSlug,
   };
@@ -541,6 +567,8 @@ function noAgentFlags(flags: ParsedFlags): boolean {
     flags.maxConcurrency === undefined &&
     flags.codexCommand === undefined &&
     flags.codexModel === undefined &&
+    flags.codexReasoningEffort === undefined &&
+    flags.codexBackend === undefined &&
     flags.worktreeDir === undefined &&
     flags.greptileAppSlug === undefined
   );
@@ -551,6 +579,8 @@ function noWorkerFlags(flags: ParsedFlags): boolean {
     flags.maxConcurrency === undefined &&
     flags.codexCommand === undefined &&
     flags.codexModel === undefined &&
+    flags.codexReasoningEffort === undefined &&
+    flags.codexBackend === undefined &&
     flags.worktreeDir === undefined &&
     flags.greptileAppSlug === undefined
   );
@@ -566,11 +596,17 @@ function parseAgentOptions(
   if (!Number.isSafeInteger(maxConcurrency) || maxConcurrency < 1) {
     return undefined;
   }
+  const codexBackend = flags.codexBackend ?? "exec";
+  if (codexBackend !== "exec" && codexBackend !== "app-server") {
+    return undefined;
+  }
   return {
     repo: flags.repo,
     maxConcurrency,
     codexCommand: flags.codexCommand,
     codexModel: flags.codexModel,
+    codexReasoningEffort: flags.codexReasoningEffort,
+    codexBackend,
     worktreeDir: flags.worktreeDir,
   };
 }
@@ -900,6 +936,7 @@ function printJsonGraph(graph: CompiledGraph, io: CliIo): void {
       readonly executor: string;
       readonly kind: CompiledGraph["nodes"][string]["kind"];
       readonly dependsOn: readonly string[];
+      readonly resources: readonly string[];
       readonly dependents: readonly string[];
     }
   > = Object.create(null) as Record<
@@ -908,6 +945,7 @@ function printJsonGraph(graph: CompiledGraph, io: CliIo): void {
       readonly executor: string;
       readonly kind: CompiledGraph["nodes"][string]["kind"];
       readonly dependsOn: readonly string[];
+      readonly resources: readonly string[];
       readonly dependents: readonly string[];
     }
   >;
@@ -918,6 +956,7 @@ function printJsonGraph(graph: CompiledGraph, io: CliIo): void {
       executor: node.executor,
       kind: node.kind,
       dependsOn: node.dependsOn,
+      resources: node.resources,
       dependents: node.dependents,
     };
   }
@@ -925,6 +964,7 @@ function printJsonGraph(graph: CompiledGraph, io: CliIo): void {
   io.stdout(
     stringifyJson({
       version: 1,
+      resources: graph.resources,
       order: graph.order,
       finalNode: graph.finalNode,
       nodes,
@@ -1070,23 +1110,31 @@ async function runGraph(
     return EXIT_USAGE;
   }
   let outcome: RunOutcome;
+  let agentRegistry: ReturnType<typeof createAgentExecutorRegistry> | undefined;
   try {
+    agentRegistry = createAgentExecutorRegistry({
+      ...(invocation.agent.repo === undefined
+        ? {}
+        : { repoDir: invocation.agent.repo }),
+      ...(invocation.agent.worktreeDir === undefined
+        ? {}
+        : { worktreeBaseDir: invocation.agent.worktreeDir }),
+      ...(invocation.agent.codexCommand === undefined
+        ? {}
+        : { codexCommand: invocation.agent.codexCommand }),
+      ...(invocation.agent.codexModel === undefined
+        ? {}
+        : { codexModel: invocation.agent.codexModel }),
+      ...(invocation.agent.codexReasoningEffort === undefined
+        ? {}
+        : {
+            codexReasoningEffort: invocation.agent.codexReasoningEffort,
+          }),
+      codexBackend: invocation.agent.codexBackend,
+    });
     const engine = createEngine({
       store,
-      registry: createAgentExecutorRegistry({
-        ...(invocation.agent.repo === undefined
-          ? {}
-          : { repoDir: invocation.agent.repo }),
-        ...(invocation.agent.worktreeDir === undefined
-          ? {}
-          : { worktreeBaseDir: invocation.agent.worktreeDir }),
-        ...(invocation.agent.codexCommand === undefined
-          ? {}
-          : { codexCommand: invocation.agent.codexCommand }),
-        ...(invocation.agent.codexModel === undefined
-          ? {}
-          : { codexModel: invocation.agent.codexModel }),
-      }),
+      registry: agentRegistry,
       maxConcurrency: invocation.agent.maxConcurrency,
     });
     const runId =
@@ -1108,6 +1156,7 @@ async function runGraph(
       throw error;
     }
   } finally {
+    await agentRegistry?.close();
     await store.close?.();
   }
 
@@ -1179,7 +1228,11 @@ async function inspectCommand(
           finished: inspection.finished,
           nodes: inspection.nodes,
           failures: inspection.failures,
+          graphRevisions: inspection.graphRevisions ?? [],
           timing: inspection.timing,
+          leases: inspection.leases,
+          usage: inspection.usage ?? null,
+          scheduler: inspection.scheduler ?? null,
         }),
       );
     } else {
@@ -1192,9 +1245,34 @@ async function inspectCommand(
             `  time: ${formatDuration(node.timing.totalDurationMs)} · ${formatPhaseSummary(node.timing.phases)}`,
           );
         }
+        if (node.evidence !== null) {
+          io.stdout(`  evidence: ${formatEvidenceSummary(node.evidence)}`);
+        }
       }
+      const usage = inspection.usage;
+      if (usage !== undefined && usage !== null) {
+        io.stdout(
+          `usage: ${usage.inputTokens ?? "unknown"} input tokens · ${usage.outputTokens ?? "unknown"} output tokens · ${usage.costUsd === null ? "cost unknown" : `$${usage.costUsd.toFixed(4)} ${usage.costKind}`}`,
+        );
+      }
+      io.stdout(
+        `realized concurrency: ${String(inspection.scheduler?.maximumRealizedNodeConcurrency ?? 0)}`,
+      );
+      const resourceLockUtilization =
+        inspection.scheduler?.resourceLockUtilization;
+      io.stdout(
+        resourceLockUtilization === null ||
+          resourceLockUtilization === undefined
+          ? "resource-lock utilization: unknown"
+          : `resource-lock utilization: ${(resourceLockUtilization * 100).toFixed(1)}%`,
+      );
       for (const failure of inspection.failures) {
         io.stdout(`failure ${failure.nodeId}: ${stringifyJson(failure.cause)}`);
+      }
+      for (const revision of inspection.graphRevisions ?? []) {
+        io.stdout(
+          `graph revision ${String(revision.graphRevision)}: ${revision.decision.status} · ${revision.proposal.proposer} · ${revision.addedNodeIds.join(", ") || "no nodes"}`,
+        );
       }
       if (inspection.timing === null) {
         io.stdout("timing: unavailable (empty or legacy event log)");
@@ -1221,6 +1299,13 @@ async function inspectCommand(
   } finally {
     await store?.close?.();
   }
+}
+
+function formatEvidenceSummary(evidence: ProofOfWorkV1): string {
+  const passed = evidence.validations.filter(
+    (validation) => validation.status === "passed",
+  ).length;
+  return `${evidence.summary} · ${String(evidence.commits.length)} commit(s) · ${String(evidence.pullRequests.length)} PR(s) · ${String(passed)}/${String(evidence.validations.length)} validation(s) passed · ${String(evidence.unresolvedRisks.length)} unresolved risk(s)`;
 }
 
 function formatPhaseSummary(phases: readonly PhaseDuration[]): string {
@@ -1439,28 +1524,36 @@ async function resumeCommand(
   io: CliIo,
 ): Promise<number> {
   let store: RunStore | undefined;
+  let agentRegistry: ReturnType<typeof createAgentExecutorRegistry> | undefined;
   try {
     const projectPaths = resolvePrismProjectPaths(invocation.agent.repo);
     if (projectPaths.prismHome === undefined) {
       throw new Error(executionPrismHomeMessage());
     }
     store = await openPersistentStore(invocation.store, invocation.agent.repo);
+    agentRegistry = createAgentExecutorRegistry({
+      ...(invocation.agent.repo === undefined
+        ? {}
+        : { repoDir: invocation.agent.repo }),
+      ...(invocation.agent.worktreeDir === undefined
+        ? {}
+        : { worktreeBaseDir: invocation.agent.worktreeDir }),
+      ...(invocation.agent.codexCommand === undefined
+        ? {}
+        : { codexCommand: invocation.agent.codexCommand }),
+      ...(invocation.agent.codexModel === undefined
+        ? {}
+        : { codexModel: invocation.agent.codexModel }),
+      ...(invocation.agent.codexReasoningEffort === undefined
+        ? {}
+        : {
+            codexReasoningEffort: invocation.agent.codexReasoningEffort,
+          }),
+      codexBackend: invocation.agent.codexBackend,
+    });
     const engine = createEngine({
       store,
-      registry: createAgentExecutorRegistry({
-        ...(invocation.agent.repo === undefined
-          ? {}
-          : { repoDir: invocation.agent.repo }),
-        ...(invocation.agent.worktreeDir === undefined
-          ? {}
-          : { worktreeBaseDir: invocation.agent.worktreeDir }),
-        ...(invocation.agent.codexCommand === undefined
-          ? {}
-          : { codexCommand: invocation.agent.codexCommand }),
-        ...(invocation.agent.codexModel === undefined
-          ? {}
-          : { codexModel: invocation.agent.codexModel }),
-      }),
+      registry: agentRegistry,
       maxConcurrency: invocation.agent.maxConcurrency,
     });
     const handle = engine.resume(invocation.runId);
@@ -1471,6 +1564,7 @@ async function resumeCommand(
     io.stderr(`cannot resume "${invocation.runId}": ${describeError(error)}`);
     return EXIT_USAGE;
   } finally {
+    await agentRegistry?.close();
     await store?.close?.();
   }
 }
@@ -1572,6 +1666,7 @@ function printWatchSnapshot(
         finished: inspection.finished,
         nodes: inspection.nodes,
         failures: inspection.failures,
+        leases: inspection.leases,
       }),
     );
     return;

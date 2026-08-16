@@ -58,6 +58,10 @@ From your project repository:
 prism run <graph-file>
 ```
 
+Codex-backed nodes use `gpt-5.6-terra` with `medium` reasoning by default.
+Override either setting for a run or resume with `--codex-model <id>` and
+`--codex-reasoning-effort <level>`.
+
 If both production and staging Greptile apps review the same pull requests,
 select the production GitHub App for the whole run:
 
@@ -111,17 +115,34 @@ prism --help
 ```
 
 `prism inspect` reports per-node phase durations, total elapsed time, the
-weighted DAG critical path, and the largest waiting categories. Add `--json`
+weighted DAG critical path, resource contention, and the largest waiting
+categories. Add `--json`
 for the versioned machine-readable timing summary.
 
 ## Trust
 
 Prism runs Codex, Git, GitHub CLI, Beads, and validation commands as you, with
-your network and credentials and without a sandbox. Only run DAGs you trust.
+your network and credentials in its explicit trusted-local compatibility mode.
+The SDK also provides an isolated environment policy for production adapters.
+Only run trusted-local DAGs you trust.
 Greptile app selection is enforced through the Codex worker instructions; it
 is not a separate deterministic GitHub review adapter.
 See [SECURITY.md](SECURITY.md) for details.
 
 SDK documentation is in [packages/sdk/README.md](packages/sdk/README.md).
+
+## Release validation
+
+`npm run eval` runs Prism's deterministic orchestration regression suite. It
+uses fake executors and in-memory stores, so CI never needs model credits,
+GitHub credentials, or a live backend. The checked-in machine-readable
+baseline at `fixtures/evals/orchestration.baseline.json` defines thresholds for
+completion, validation/review, safety, operator intervention, duration, and
+estimated cost. `npm run verify` includes this suite along with package smoke
+and compatibility coverage for older graphs and stores.
+
+Maintainers can opt into a Codex/GitHub smoke test against a disposable
+repository, but it is deliberately outside required public CI: it exercises
+the privileged backend boundary rather than the deterministic orchestrator.
 
 Status: `0.1.0-alpha.0` (unpublished).
