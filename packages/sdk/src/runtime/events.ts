@@ -6,6 +6,7 @@ import type { AgentProgressState } from "../node/agent-progress.js";
 export const NODE_PHASES = Object.freeze([
   "execution",
   "worktree_setup",
+  "reconciliation",
   "implementation",
   "validation",
   "pull_request",
@@ -25,8 +26,8 @@ export type NodePhase = (typeof NODE_PHASES)[number];
 
 /**
  * The subset of NODE_PHASES a worker may report. The rest (execution,
- * worktree_setup, tracker_update, workspace_cleanup) are orchestrator
- * bookkeeping — accepting them from phase.json would let a confused worker
+ * worktree_setup, reconciliation, tracker_update, workspace_cleanup) are
+ * orchestrator bookkeeping — accepting them from phase.json would let a confused worker
  * reclassify its implementation time as orchestrator overhead.
  */
 export const WORKER_PHASES = Object.freeze([

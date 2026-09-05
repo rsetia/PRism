@@ -13,6 +13,7 @@ import {
   createCodexExecutor,
   createFileAgentSessionStore,
   createFileLogBackend,
+  createGitHubReconciler,
   createGitWorktreeProvisioner,
   createMergePrExecutor,
   type AgentSessionBackend,
@@ -100,12 +101,16 @@ export function createAgentExecutorRegistry(
     repoDir,
     baseDir: worktreeBaseDir,
   });
+  // Every agent session starts from the branch, pull request, CI, and review
+  // state that already exists, so retries and resumes never redo landed work.
+  const reconciler = createGitHubReconciler();
 
   const codexExecutor = (name: "implement" | "merge_resolve" | "finalize_pr") =>
     createCodexExecutor({
       name,
       // Preflight policy validation must run for both execution transports.
       engine: codexEngine,
+      reconciler,
       ...(sessionBackend === undefined ? {} : { sessionBackend }),
       ...(sessionBackend === undefined
         ? {}

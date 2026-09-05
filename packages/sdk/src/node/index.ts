@@ -145,3 +145,18 @@ export {
 } from "./cli-builtins.js";
 export type { CodexExecutorOptions } from "./codex-executor.js";
 export { createCodexExecutor } from "./codex-executor.js";
+export type {
+  CiState,
+  GitHubReconcilerOptions,
+  NodeReconciler,
+  ReconcileInput,
+  ReconcileOutcome,
+  ReconciledPullRequest,
+  ReconciledReview,
+  ReconciledState,
+} from "./reconcile.js";
+export {
+  createGitHubReconciler,
+  describeReconciledState,
+  sourceBranchFromInput,
+} from "./reconcile.js";

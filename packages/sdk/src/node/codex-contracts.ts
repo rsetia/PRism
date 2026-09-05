@@ -691,10 +691,19 @@ function implementExtraRules(review: ReviewConfig): readonly string[] {
     "Prefer the local `gh` CLI for GitHub reads and writes.",
     "If `~/.codex/skills/sheperd/scripts/sheperd.py` exists, prefer it for pull request creation or reuse and review polling.",
     gateRule,
+    ...(review.by === "none" ? [] : [REVIEW_WAIT_RULE]),
     "Update the worker heartbeat regularly, especially while waiting for review or CI.",
     "Stop only when the configured merge-ready criteria are satisfied or a hard failure such as the maximum iteration count is reached.",
   ]);
 }
+
+/**
+ * Reviewer bots take minutes, not seconds. Without an explicit floor an
+ * agent that polls twice and sees "working" has been observed to declare a
+ * timeout after under a minute and fail an otherwise healthy node.
+ */
+export const REVIEW_WAIT_RULE =
+  "Reviews normally finish 3-6 minutes after the trigger comment. While waiting, poll every 60-90 seconds and refresh the heartbeat on every poll. A reviewer response that says it is working or reviewing, or shows an unfinished checklist, is in progress rather than a verdict. Keep waiting at least 20 minutes after the trigger before treating the review as stalled; never write a failed result with failureClass timeout inside that window. After 20 minutes with no finished review, re-post the trigger once and wait another 10 minutes before failing, and state how long you waited.";
 
 function freezeContract(
   contract: CodexExecutorContract,
