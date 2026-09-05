@@ -518,8 +518,7 @@ async function viewPullRequest(
   const commits = Array.isArray(parsed["commits"])
     ? parsed["commits"].filter(isPlainObject)
     : [];
-  const headCommit =
-    commits.find((commit) => commit["oid"] === headSha) ?? commits.at(-1);
+  const headCommit = commits.find((commit) => commit["oid"] === headSha);
   const headCommittedAt =
     headCommit === undefined
       ? undefined
@@ -551,7 +550,10 @@ function responsesFrom(
     if (author === undefined || createdAt === undefined) continue;
     const url = optionalString(entry["url"]);
     const state = optionalString(entry["state"]);
-    const commitSha = optionalString(entry["commit"]) ?? undefined;
+    const commit = entry["commit"];
+    const commitSha = isPlainObject(commit)
+      ? optionalString(commit["oid"])
+      : optionalString(commit);
     responses.push({
       author,
       body,
@@ -602,7 +604,6 @@ const IN_PROGRESS_PATTERNS = [
   /is reviewing/i,
   /review in progress/i,
   /reviewing pr/i,
-  /^\s*- \[ \] /m,
 ];
 
 const POSITIVE_PATTERNS = [
@@ -655,7 +656,9 @@ function classifyReview(
   const since = detail.headCommittedAt;
   const isCurrent = (response: ReviewerResponse): boolean =>
     logins.has(response.author.toLowerCase()) &&
-    (since === undefined || response.createdAt >= since);
+    (response.commitSha !== undefined
+      ? response.commitSha === detail.headSha
+      : since !== undefined && response.createdAt >= since);
   const formal = detail.reviews.filter(isCurrent);
   const comments = detail.comments.filter(isCurrent);
   const latest = [...formal, ...comments]
@@ -677,7 +680,16 @@ function classifyReview(
   if (formalState === "CHANGES_REQUESTED") {
     return { ...base, verdict: "changes_requested", inProgress: false };
   }
-  if (IN_PROGRESS_PATTERNS.some((pattern) => pattern.test(latest.body))) {
+  const finished = /\bclaude finished\b/i.test(latest.body);
+  const hasVerdict =
+    isBlocking(latest.body) ||
+    POSITIVE_PATTERNS.some((pattern) => pattern.test(latest.body)) ||
+    /confidence score:\s*\d\s*\/\s*5/i.test(latest.body);
+  const activePlaceholder = IN_PROGRESS_PATTERNS.some((pattern) =>
+    pattern.test(latest.body),
+  );
+  const uncheckedTodo = /^\s*- \[ \] /m.test(latest.body);
+  if (!finished && (activePlaceholder || (uncheckedTodo && !hasVerdict))) {
     return { ...base, verdict: "pending", inProgress: true };
   }
   if (reviewer === "greptile") {
@@ -715,17 +727,16 @@ function reviewerLogins(review: ReviewConfig): ReadonlySet<string> {
     case "claude":
       return new Set(["claude", "claude[bot]", "claude-code[bot]"]);
     case "greptile": {
-      const logins = new Set([
+      if (review.greptileAppSlug !== undefined) {
+        const slug = review.greptileAppSlug.toLowerCase();
+        return new Set([slug, `${slug}[bot]`]);
+      }
+      return new Set([
         "greptile",
         "greptile[bot]",
         "greptile-apps",
         "greptile-apps[bot]",
       ]);
-      if (review.greptileAppSlug !== undefined) {
-        logins.add(review.greptileAppSlug.toLowerCase());
-        logins.add(`${review.greptileAppSlug.toLowerCase()}[bot]`);
-      }
-      return logins;
     }
     case "none":
       return new Set();

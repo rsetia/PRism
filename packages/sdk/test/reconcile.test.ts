@@ -355,6 +355,141 @@ describe("createGitHubReconciler for implement nodes", () => {
     });
   });
 
+  test.each([
+    ["greptile", "pending"],
+    ["greptile[bot]", "pending"],
+    ["greptile-apps", "pending"],
+    ["greptile-apps[bot]", "pending"],
+    ["greptile-staging[bot]", "pending"],
+    ["greptile-production", "approved"],
+    ["greptile-production[bot]", "approved"],
+  ])("scopes configured Greptile feedback from %s", async (login, verdict) => {
+    const { outcome } = await reconcile(
+      [
+        lsRemoteHit,
+        prList([openPr]),
+        prView({
+          headRefOid: "abc123",
+          statusCheckRollup: greenChecks,
+          commits: [headCommit],
+          comments: [
+            {
+              author: { login },
+              body: "Confidence Score: 5/5",
+              createdAt: "2026-09-05T23:24:30Z",
+            },
+          ],
+        }),
+      ],
+      implementSpec(
+        {},
+        { by: "greptile", greptileAppSlug: "greptile-production" },
+      ),
+    );
+    expect(outcome.kind).toBe(verdict === "approved" ? "satisfied" : "resume");
+    if (outcome.kind === "fresh") return;
+    expect(outcome.state.review?.verdict).toBe(verdict);
+  });
+
+  test.each([
+    ["LGTM.\n- [ ] optional: add a test", "approved", false],
+    ["### Findings\n- [ ] Fix the race", "changes_requested", false],
+    [
+      "**Claude finished the task**\nLGTM.\n- [ ] optional: add a test",
+      "approved",
+      false,
+    ],
+    ["**Claude finished the task**\n- [ ] Fix this", "pending", false],
+    [
+      "### Reviewing PR #5\n- [ ] Check that approval says LGTM",
+      "pending",
+      true,
+    ],
+    ["**Todo list**\n- [ ] Gather context", "pending", true],
+  ])("classifies checklist review: %s", async (body, verdict, inProgress) => {
+    const { outcome } = await reconcile(
+      [
+        lsRemoteHit,
+        prList([openPr]),
+        prView({
+          headRefOid: "abc123",
+          statusCheckRollup: greenChecks,
+          commits: [headCommit],
+          comments: [
+            {
+              author: { login: "claude" },
+              body,
+              createdAt: "2026-09-05T23:24:30Z",
+            },
+          ],
+        }),
+      ],
+      implementSpec(),
+    );
+    expect(outcome.kind).toBe(verdict === "approved" ? "satisfied" : "resume");
+    if (outcome.kind === "fresh") return;
+    expect(outcome.state.review).toMatchObject({ verdict, inProgress });
+  });
+
+  test.each([
+    { commits: [] },
+    { commits: [{ oid: "old-head", committedDate: headCommit.committedDate }] },
+  ])(
+    "does not accept unbound comments when the head timestamp is unavailable: %j",
+    async ({ commits }) => {
+      const { outcome } = await reconcile(
+        [
+          lsRemoteHit,
+          prList([openPr]),
+          prView({
+            headRefOid: "abc123",
+            statusCheckRollup: greenChecks,
+            commits,
+            comments: [
+              {
+                author: { login: "claude" },
+                body: "LGTM",
+                createdAt: "2026-09-05T23:24:30Z",
+              },
+            ],
+          }),
+        ],
+        implementSpec(),
+      );
+      expect(outcome.kind).toBe("resume");
+      if (outcome.kind !== "resume") return;
+      expect(outcome.state.review?.verdict).toBe("pending");
+    },
+  );
+
+  test.each([
+    ["old-head", [headCommit], "resume"],
+    ["abc123", [], "satisfied"],
+  ])("binds formal reviews to commit %s", async (oid, commits, kind) => {
+    const { outcome } = await reconcile(
+      [
+        lsRemoteHit,
+        prList([openPr]),
+        prView({
+          headRefOid: "abc123",
+          statusCheckRollup: greenChecks,
+          commits,
+          reviews: [
+            {
+              author: { login: "claude" },
+              state: "APPROVED",
+              body: "",
+              commit: { oid },
+              submittedAt: "2026-09-05T23:24:30Z",
+            },
+          ],
+        }),
+      ],
+      implementSpec(),
+    );
+    expect(outcome.kind).toBe(kind);
+  });
+
   test("degrades to fresh when gh is unavailable", async () => {
     const { runner } = fakeRunner([]);
     const failing: CommandRunner = {
