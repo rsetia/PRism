@@ -684,3 +684,110 @@ describe("createCodexExecutor", () => {
     expect(existsSync(inputs[0]?.nodeDir ?? "")).toBe(false);
   });
 });
+
+describe("createCodexExecutor reconciliation", () => {
+  const reconciledState = {
+    executor: "implement",
+    branch: "prism/mc-1",
+    branchExists: true,
+    pullRequest: {
+      number: 5,
+      url: "https://github.com/example/repo/pull/5",
+      state: "open" as const,
+      headSha: "abc123",
+    },
+    ci: "passed" as const,
+    review: {
+      reviewer: "claude",
+      verdict: "changes_requested" as const,
+      inProgress: false,
+    },
+    notes: [],
+  };
+
+  test("a satisfied reconciliation completes the node without an agent session", async () => {
+    const { engine, inputs } = fakeEngine({
+      status: "succeeded",
+      output: proof("should not run"),
+    });
+    const phases: NodePhase[] = [];
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: {
+        reconcile: () =>
+          Promise.resolve({
+            kind: "satisfied" as const,
+            state: reconciledState,
+            output: proof("reconciled from GitHub"),
+          }),
+      },
+    });
+    const outcome = await executor.execute(
+      context([], {
+        reportPhase: async (phase) => {
+          await Promise.resolve();
+          phases.push(phase);
+        },
+      }),
+    );
+    expect(outcome).toEqual({
+      status: "succeeded",
+      output: proof("reconciled from GitHub"),
+    });
+    expect(inputs).toHaveLength(0);
+    expect(phases).toContain("reconciliation");
+    expect(phases).not.toContain("implementation");
+  });
+
+  test("a resume reconciliation appends the current state to the contract", async () => {
+    const { engine, inputs } = fakeEngine({
+      status: "succeeded",
+      output: proof(),
+    });
+    const seen: unknown[] = [];
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: {
+        reconcile: (input) => {
+          seen.push(input.spec.attempt, input.worktreeDir);
+          return Promise.resolve({
+            kind: "resume" as const,
+            state: reconciledState,
+          });
+        },
+      },
+    });
+    await executor.execute(context([], { attempt: 2 }));
+    expect(seen).toEqual([2, tempDir]);
+    const instructions = inputs[0]?.contract.instructions ?? "";
+    expect(instructions).toContain("Implement the configured work item");
+    expect(instructions).toContain("reconciled by the orchestrator");
+    expect(instructions).toContain('"verdict": "changes_requested"');
+    expect(instructions).toContain("Never create a duplicate branch");
+  });
+
+  test("a fresh reconciliation leaves the contract untouched", async () => {
+    const { engine, inputs } = fakeEngine({
+      status: "succeeded",
+      output: proof(),
+    });
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: {
+        reconcile: () =>
+          Promise.resolve({ kind: "fresh" as const, notes: ["nothing yet"] }),
+      },
+    });
+    await executor.execute(context());
+    expect(inputs[0]?.contract.instructions).not.toContain("reconciled");
+  });
+});

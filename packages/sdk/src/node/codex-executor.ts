@@ -32,6 +32,11 @@ import type {
   WorkspaceProvisioner,
 } from "./workspace-provisioner.js";
 import { WORKER_SPEC_FILE, type WorkerSpec } from "./worker-protocol.js";
+import {
+  describeReconciledState,
+  type NodeReconciler,
+  type ReconcileOutcome,
+} from "./reconcile.js";
 
 /**
  * Bridge the codex engine into an ExecutorDefinition (plan §15, final
@@ -78,6 +83,14 @@ export interface CodexExecutorOptions {
    * validates the node config for the executor name.
    */
   readonly buildContract?: (spec: WorkerSpec) => CodexExecutorContract;
+  /**
+   * Inspects the node's external state (branch, pull request, CI, review)
+   * before every agent session so a retry, resume, or reset continues from
+   * what actually exists. A `satisfied` outcome completes the node without
+   * an agent session; a `resume` outcome is appended to the contract.
+   * Absent means the agent discovers the state itself, as before.
+   */
+  readonly reconciler?: NodeReconciler;
 }
 
 /**
@@ -192,14 +205,15 @@ export function createCodexExecutor(
         const worktreeDir = resolve(workspace?.dir ?? cwd);
         const nodeDirBase = resolve(explicitNodeDirBase ?? worktreeDir);
         await mkdir(nodeDirBase, { recursive: true });
-        nodeDir = await mkdtemp(
+        const nodeDirPath = await mkdtemp(
           join(
             nodeDirBase,
             `.prism-${safePathPart(context.runId)}-${safePathPart(context.nodeId)}-a${String(context.attempt)}-`,
           ),
         );
+        nodeDir = nodeDirPath;
         await writeFile(
-          join(nodeDir, WORKER_SPEC_FILE),
+          join(nodeDirPath, WORKER_SPEC_FILE),
           JSON.stringify(spec),
           "utf8",
         );
@@ -208,8 +222,6 @@ export function createCodexExecutor(
           nodeId: context.nodeId,
           attempt: context.attempt,
         });
-
-        await context.reportPhase(codexExecutionPhase(name));
         const onOutput =
           logWriter === undefined
             ? undefined
@@ -218,11 +230,30 @@ export function createCodexExecutor(
                   logWriter?.write(chunk),
                 );
               };
-        const result =
-          sessionBackend === undefined
+
+        let reconciled: ReconcileOutcome | undefined;
+        if (options.reconciler !== undefined) {
+          await context.reportPhase("reconciliation");
+          reconciled = await options.reconciler.reconcile({
+            spec,
+            worktreeDir,
+            signal: context.signal,
+          });
+          onOutput?.(describeReconciliation(reconciled));
+          if (reconciled.kind === "resume") {
+            contract = Object.freeze({
+              ...contract,
+              instructions: `${contract.instructions}\n\n${describeReconciledState(reconciled.state)}`,
+            });
+          }
+        }
+
+        const runAgent = async () => {
+          await context.reportPhase(codexExecutionPhase(name));
+          return sessionBackend === undefined
             ? await engine!.execute({
                 spec,
-                nodeDir,
+                nodeDir: nodeDirPath,
                 worktreeDir,
                 contract,
                 signal: context.signal,
@@ -237,7 +268,7 @@ export function createCodexExecutor(
                     attempt: context.attempt,
                   },
                   spec,
-                  nodeDir,
+                  nodeDir: nodeDirPath,
                   worktreeDir,
                   sandbox:
                     contract.dangerouslyBypassApprovalsAndSandbox === true
@@ -245,13 +276,13 @@ export function createCodexExecutor(
                       : (contract.sandbox ?? "workspace-write"),
                   prompt: buildCodexPrompt({
                     spec,
-                    nodeDir,
+                    nodeDir: nodeDirPath,
                     worktreeDir,
                     contract,
-                    specPath: join(nodeDir, WORKER_SPEC_FILE),
-                    resultPath: join(nodeDir, "result.json"),
-                    heartbeatPath: join(nodeDir, "heartbeat.json"),
-                    phasePath: join(nodeDir, "phase.json"),
+                    specPath: join(nodeDirPath, WORKER_SPEC_FILE),
+                    resultPath: join(nodeDirPath, "result.json"),
+                    heartbeatPath: join(nodeDirPath, "heartbeat.json"),
+                    phasePath: join(nodeDirPath, "phase.json"),
                   }),
                 },
                 {
@@ -264,6 +295,11 @@ export function createCodexExecutor(
                   onPhase: context.reportPhase,
                 },
               );
+        };
+        const result =
+          reconciled?.kind === "satisfied"
+            ? { status: "succeeded" as const, output: reconciled.output }
+            : await runAgent();
         await pendingLogWrites;
         if (result.status === "succeeded") {
           try {
@@ -332,6 +368,18 @@ export function createCodexExecutor(
       return outcome;
     },
   });
+}
+
+function describeReconciliation(outcome: ReconcileOutcome): string {
+  const notes = outcome.kind === "fresh" ? outcome.notes : outcome.state.notes;
+  const detail =
+    outcome.kind === "fresh"
+      ? "no prior state found; starting fresh"
+      : outcome.kind === "satisfied"
+        ? "external state already satisfies this node; skipping the agent session"
+        : `resuming from existing state on branch ${outcome.state.branch}`;
+  const noteLines = notes.map((note) => `  - ${note}`).join("\n");
+  return `[prism] reconciliation: ${detail}${noteLines.length === 0 ? "" : `\n${noteLines}`}\n`;
 }
 
 function codexExecutionPhase(

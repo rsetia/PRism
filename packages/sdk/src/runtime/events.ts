@@ -6,6 +6,7 @@ import type { AgentProgressState } from "../node/agent-progress.js";
 export const NODE_PHASES = Object.freeze([
   "execution",
   "worktree_setup",
+  "reconciliation",
   "implementation",
   "validation",
   "pull_request",
