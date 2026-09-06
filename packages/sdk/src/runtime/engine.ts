@@ -98,11 +98,13 @@ export interface Engine {
   /**
    * Continue an interrupted run from the store (plan §12). Replays the
    * run's persisted events to rebuild state, then re-runs any node left
-   * `running` at crash time: when the retry policy still has budget it goes
+   * `running` or `cancelling` at crash time: when the retry policy still has budget it goes
    * through the normal `transient_infra` retry path; otherwise the
    * interruption is recorded and the node is reset to pending, because an
    * interruption is not a verdict on the work and executors reconcile
-   * against external state on re-entry. Then drives the run to completion. The graph
+   * against external state on re-entry. Cancellation intent is not durable,
+   * so resuming also re-runs nodes interrupted during cancellation.
+   * The engine then drives the run to completion. The graph
    * comes from the stored snapshot, not the caller. Rejects for an
    * unknown run; a run already finished resolves to its recorded outcome
    * without re-running anything.
