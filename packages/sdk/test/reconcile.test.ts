@@ -172,6 +172,7 @@ describe("createGitHubReconciler for implement nodes", () => {
       verdict: "pending",
       inProgress: true,
     });
+    expect(outcome.state.reviewRequests).toBe(1);
     const text = describeReconciledState(outcome.state);
     expect(text).toContain('"inProgress": true');
     expect(text).toContain("do not fail the node as timed out");

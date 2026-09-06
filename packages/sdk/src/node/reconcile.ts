@@ -76,6 +76,8 @@ export interface ReconciledState {
   readonly pullRequest?: ReconciledPullRequest;
   readonly ci: CiState;
   readonly review?: ReconciledReview;
+  /** Trigger comments posted on the pull request so far, by any author. */
+  readonly reviewRequests?: number;
   readonly notes: readonly string[];
 }
 
@@ -349,6 +351,10 @@ async function reconcileReviewedBranch(
     detail === undefined || reviewed.review.by === "none"
       ? undefined
       : classifyReview(reviewed.review, detail);
+  const reviewRequests =
+    detail === undefined || reviewed.review.by === "none"
+      ? undefined
+      : countReviewRequests(reviewed.review, detail);
   const state: ReconciledState = {
     executor: input.spec.executor,
     branch: reviewed.branch,
@@ -356,6 +362,7 @@ async function reconcileReviewedBranch(
     pullRequest: summary,
     ci,
     ...(review === undefined ? {} : { review }),
+    ...(reviewRequests === undefined ? {} : { reviewRequests }),
     notes,
   };
 
@@ -720,6 +727,19 @@ function classifyReview(
     verdict: positive ? "approved" : "pending",
     inProgress: false,
   };
+}
+
+function countReviewRequests(
+  review: ReviewConfig,
+  detail: PullRequestDetail,
+): number {
+  const trigger = (
+    review.triggerComment ??
+    (review.by === "greptile" ? "@greptile review" : "@claude review")
+  ).toLowerCase();
+  return detail.comments.filter((comment) =>
+    comment.body.toLowerCase().includes(trigger),
+  ).length;
 }
 
 function reviewerLogins(review: ReviewConfig): ReadonlySet<string> {

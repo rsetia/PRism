@@ -143,7 +143,10 @@ export {
   parseBeadsUpdateConfig,
   parseMergePrConfig,
 } from "./cli-builtins.js";
-export type { CodexExecutorOptions } from "./codex-executor.js";
+export type {
+  CodexExecutorOptions,
+  FailureAdjudicationOptions,
+} from "./codex-executor.js";
 export { createCodexExecutor } from "./codex-executor.js";
 export type {
   CiState,

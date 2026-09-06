@@ -27,6 +27,8 @@ import {
   parseImplementConfig,
   parseMergeResolveConfig,
 } from "./codex-contracts.js";
+import type { WorkerResult } from "./worker-protocol.js";
+import type { NodePhase } from "../runtime/events.js";
 import type {
   WorkspaceHandle,
   WorkspaceProvisioner,
@@ -36,7 +38,21 @@ import {
   describeReconciledState,
   type NodeReconciler,
   type ReconcileOutcome,
+  type ReconciledState,
 } from "./reconcile.js";
+
+/**
+ * How a worker-declared failure is adjudicated against external state.
+ * Only meaningful when a reconciler is configured.
+ */
+export interface FailureAdjudicationOptions {
+  /** Interval between reconciliations while a review or CI is in progress. Default 60 s. */
+  readonly pollMs?: number;
+  /** Ceiling on waiting for an in-progress review or CI. Default 30 min. */
+  readonly maxWaitMs?: number;
+  /** Abortable sleep; injected by tests. Default setTimeout. */
+  readonly wait?: (ms: number, signal: AbortSignal) => Promise<void>;
+}
 
 /**
  * Bridge the codex engine into an ExecutorDefinition (plan §15, final
@@ -91,6 +107,14 @@ export interface CodexExecutorOptions {
    * Absent means the agent discovers the state itself, as before.
    */
   readonly reconciler?: NodeReconciler;
+  /**
+   * When a worker reports a failure, reconcile before accepting it. A pull
+   * request that is still open, with iteration budget remaining, means the
+   * worker is re-invoked with the current findings; a review or CI still in
+   * progress is waited on deterministically here instead of inside an agent
+   * session. Requires `reconciler`. Absent means worker failures are final.
+   */
+  readonly adjudication?: FailureAdjudicationOptions;
 }
 
 /**
@@ -191,7 +215,7 @@ export function createCodexExecutor(
       }
 
       let workspace: WorkspaceHandle | undefined;
-      let nodeDir: string | undefined;
+      const nodeDirs: string[] = [];
       let logWriter: LogWriter | undefined;
       let pendingLogWrites = Promise.resolve();
       let outcome: NodeExecutionOutcome;
@@ -205,18 +229,21 @@ export function createCodexExecutor(
         const worktreeDir = resolve(workspace?.dir ?? cwd);
         const nodeDirBase = resolve(explicitNodeDirBase ?? worktreeDir);
         await mkdir(nodeDirBase, { recursive: true });
-        const nodeDirPath = await mkdtemp(
-          join(
-            nodeDirBase,
-            `.prism-${safePathPart(context.runId)}-${safePathPart(context.nodeId)}-a${String(context.attempt)}-`,
-          ),
-        );
-        nodeDir = nodeDirPath;
-        await writeFile(
-          join(nodeDirPath, WORKER_SPEC_FILE),
-          JSON.stringify(spec),
-          "utf8",
-        );
+        const prepareNodeDir = async (): Promise<string> => {
+          const dir = await mkdtemp(
+            join(
+              nodeDirBase,
+              `.prism-${safePathPart(context.runId)}-${safePathPart(context.nodeId)}-a${String(context.attempt)}-`,
+            ),
+          );
+          nodeDirs.push(dir);
+          await writeFile(
+            join(dir, WORKER_SPEC_FILE),
+            JSON.stringify(spec),
+            "utf8",
+          );
+          return dir;
+        };
         logWriter = await options.logBackend?.openWriter({
           runId: context.runId,
           nodeId: context.nodeId,
@@ -231,24 +258,27 @@ export function createCodexExecutor(
                 );
               };
 
-        let reconciled: ReconcileOutcome | undefined;
-        if (options.reconciler !== undefined) {
+        const baseContract = contract;
+        const reconcile = async (): Promise<ReconcileOutcome | undefined> => {
+          if (options.reconciler === undefined) {
+            return undefined;
+          }
           await context.reportPhase("reconciliation");
-          reconciled = await options.reconciler.reconcile({
+          const outcome = await options.reconciler.reconcile({
             spec,
             worktreeDir,
             signal: context.signal,
           });
-          onOutput?.(describeReconciliation(reconciled));
-          if (reconciled.kind === "resume") {
-            contract = Object.freeze({
-              ...contract,
-              instructions: `${contract.instructions}\n\n${describeReconciledState(reconciled.state)}`,
-            });
-          }
+          onOutput?.(describeReconciliation(outcome));
+          return outcome;
+        };
+        const reconciled = await reconcile();
+        if (reconciled?.kind === "resume") {
+          contract = withReconciledState(baseContract, reconciled.state);
         }
 
-        const runAgent = async () => {
+        const runAgent = async (): Promise<WorkerResult> => {
+          const nodeDirPath = await prepareNodeDir();
           await context.reportPhase(codexExecutionPhase(name));
           return sessionBackend === undefined
             ? await engine!.execute({
@@ -296,10 +326,66 @@ export function createCodexExecutor(
                 },
               );
         };
-        const result =
+        let result: WorkerResult | AdjudicatedFailure =
           reconciled?.kind === "satisfied"
             ? { status: "succeeded" as const, output: reconciled.output }
             : await runAgent();
+
+        // Adjudicate worker-declared failures against the world instead of
+        // trusting the worker's verdict on its own work.
+        if (
+          options.reconciler !== undefined &&
+          options.adjudication !== undefined
+        ) {
+          const budget = iterationBudget(name, spec.config);
+          let reinvocations = 0;
+          while (result.status === "failed") {
+            const workerFailure = result;
+            const verdict = await adjudicateFailure({
+              reconcile,
+              adjudication: options.adjudication,
+              signal: context.signal,
+              reportPhase: context.reportPhase,
+            });
+            onOutput?.(describeAdjudication(verdict, reinvocations, budget));
+            if (verdict.kind === "satisfied") {
+              result = { status: "succeeded", output: verdict.output };
+              break;
+            }
+            if (verdict.kind === "reinvoke" && reinvocations < budget) {
+              reinvocations += 1;
+              contract = withReconciledState(
+                baseContract,
+                verdict.state,
+                previousFailureNote(workerFailure, budget - reinvocations),
+              );
+              result = await runAgent();
+              continue;
+            }
+            result = {
+              status: "failed",
+              error: workerFailure.error,
+              ...(workerFailure.failureClass === undefined
+                ? {}
+                : { failureClass: workerFailure.failureClass }),
+              evidence: {
+                reason:
+                  verdict.kind === "reinvoke"
+                    ? `review iteration budget exhausted (${String(budget)})`
+                    : verdict.reason,
+                reinvocations,
+                maxIterations: budget,
+                ...(verdict.kind === "terminal" && verdict.state !== undefined
+                  ? { state: verdict.state }
+                  : {}),
+                ...(verdict.kind === "reinvoke"
+                  ? { state: verdict.state }
+                  : {}),
+              },
+            } satisfies AdjudicatedFailure;
+            break;
+          }
+        }
         await pendingLogWrites;
         if (result.status === "succeeded") {
           try {
@@ -309,9 +395,17 @@ export function createCodexExecutor(
             outcome = validationFailure("MALFORMED_PROOF_OF_WORK", error);
           }
         } else {
+          const evidence = (result as AdjudicatedFailure).evidence;
           outcome = {
             status: "failed",
-            cause: result.error ?? "codex failed",
+            cause:
+              evidence === undefined
+                ? (result.error ?? "codex failed")
+                : {
+                    code: "WORKER_FAILURE_ADJUDICATED",
+                    error: result.error ?? "codex failed",
+                    ...toJson(evidence),
+                  },
             ...(result.failureClass === undefined
               ? {}
               : { failureClass: result.failureClass }),
@@ -349,10 +443,12 @@ export function createCodexExecutor(
         }
       }
 
-      if (nodeDir !== undefined && explicitNodeDirBase === undefined) {
-        await rm(nodeDir, { recursive: true, force: true }).catch(
-          () => undefined,
-        );
+      if (explicitNodeDirBase === undefined) {
+        for (const dir of nodeDirs) {
+          await rm(dir, { recursive: true, force: true }).catch(
+            () => undefined,
+          );
+        }
       }
 
       if (workspace !== undefined && options.provisioner !== undefined) {
@@ -368,6 +464,163 @@ export function createCodexExecutor(
       return outcome;
     },
   });
+}
+
+type AdjudicatedFailure = Extract<WorkerResult, { status: "failed" }> & {
+  readonly evidence?: {
+    readonly reason: string;
+    readonly reinvocations: number;
+    readonly maxIterations: number;
+    readonly state?: ReconciledState;
+  };
+};
+
+type AdjudicationVerdict =
+  | { readonly kind: "satisfied"; readonly output: JsonValue }
+  | { readonly kind: "reinvoke"; readonly state: ReconciledState }
+  | {
+      readonly kind: "terminal";
+      readonly reason: string;
+      readonly state?: ReconciledState;
+    };
+
+/**
+ * Decide what a worker-declared failure means by looking at the pull
+ * request rather than the worker's message. While the reviewer or CI is
+ * still working on the current head, wait here — an agent session that
+ * sleeps is the expensive way to poll.
+ */
+async function adjudicateFailure(input: {
+  readonly reconcile: () => Promise<ReconcileOutcome | undefined>;
+  readonly adjudication: FailureAdjudicationOptions;
+  readonly signal: AbortSignal;
+  readonly reportPhase: (phase: NodePhase) => Promise<void>;
+}): Promise<AdjudicationVerdict> {
+  const pollMs = input.adjudication.pollMs ?? 60_000;
+  const maxWaitMs = input.adjudication.maxWaitMs ?? 30 * 60_000;
+  const wait = input.adjudication.wait ?? defaultWait;
+  let waited = 0;
+  while (true) {
+    const outcome = await input.reconcile();
+    if (outcome === undefined || outcome.kind === "fresh") {
+      return {
+        kind: "terminal",
+        reason: "no branch or pull request to continue from",
+      };
+    }
+    if (outcome.kind === "satisfied") {
+      return { kind: "satisfied", output: outcome.output };
+    }
+    const state = outcome.state;
+    if (state.pullRequest === undefined || state.pullRequest.state !== "open") {
+      return {
+        kind: "terminal",
+        reason:
+          state.pullRequest === undefined
+            ? "branch exists but no pull request is open"
+            : `pull request is ${state.pullRequest.state}`,
+        state,
+      };
+    }
+    const reviewInProgress = state.review?.inProgress === true;
+    const ciPending = state.ci === "pending";
+    if (!reviewInProgress && !ciPending) {
+      return { kind: "reinvoke", state };
+    }
+    if (waited >= maxWaitMs) {
+      return {
+        kind: "terminal",
+        reason: `${reviewInProgress ? "review" : "checks"} still in progress after ${String(Math.round(maxWaitMs / 60_000))} minutes`,
+        state,
+      };
+    }
+    await input.reportPhase(reviewInProgress ? "review_wait" : "ci_wait");
+    await wait(pollMs, input.signal);
+    waited += pollMs;
+  }
+}
+
+function defaultWait(ms: number, signal: AbortSignal): Promise<void> {
+  return new Promise((resolveWait, rejectWait) => {
+    if (signal.aborted) {
+      rejectWait(abortError());
+      return;
+    }
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolveWait();
+    }, ms);
+    const onAbort = (): void => {
+      clearTimeout(timer);
+      rejectWait(abortError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function abortError(): Error {
+  const error = new Error("adjudication wait aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function iterationBudget(
+  name: "implement" | "merge_resolve" | "finalize_pr",
+  config: JsonValue | null,
+): number {
+  switch (name) {
+    case "implement":
+      return parseImplementConfig(config ?? undefined).maxIterations ?? 8;
+    case "finalize_pr":
+      return parseFinalizePrConfig(config ?? undefined).maxIterations ?? 8;
+    case "merge_resolve":
+      return 0;
+  }
+}
+
+function withReconciledState(
+  base: CodexExecutorContract,
+  state: ReconciledState,
+  note?: string,
+): CodexExecutorContract {
+  const sections = [base.instructions, describeReconciledState(state)];
+  if (note !== undefined) {
+    sections.push(note);
+  }
+  return Object.freeze({ ...base, instructions: sections.join("\n\n") });
+}
+
+function previousFailureNote(
+  failure: Extract<WorkerResult, { status: "failed" }>,
+  remaining: number,
+): string {
+  const classNote =
+    failure.failureClass === undefined
+      ? ""
+      : ` (failureClass ${failure.failureClass})`;
+  return `Your previous session in this node ended with a failed result${classNote}: ${JSON.stringify(failure.error)}.
+The orchestrator reconciled the pull request afterwards and found it still viable; the current state is above. ${String(remaining)} review iteration(s) remain in this node's budget after this one.
+Continue from the current state. Do not restart the implementation, and do not report a failure while findings are fixable and budget remains; fix the findings, rerun validation, push, and re-request review.`;
+}
+
+function describeAdjudication(
+  verdict: AdjudicationVerdict,
+  reinvocations: number,
+  budget: number,
+): string {
+  const detail =
+    verdict.kind === "satisfied"
+      ? "pull request already satisfies the gate; overriding the worker's failure"
+      : verdict.kind === "reinvoke"
+        ? reinvocations < budget
+          ? `pull request still viable; re-invoking the worker (${String(reinvocations + 1)}/${String(budget)})`
+          : `pull request still viable but the iteration budget (${String(budget)}) is exhausted; failing`
+        : `accepting the worker's failure: ${verdict.reason}`;
+  return `[prism] adjudication: ${detail}\n`;
+}
+
+function toJson(value: unknown): Record<string, JsonValue> {
+  return JSON.parse(JSON.stringify(value)) as Record<string, JsonValue>;
 }
 
 function describeReconciliation(outcome: ReconcileOutcome): string {

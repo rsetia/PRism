@@ -791,3 +791,258 @@ describe("createCodexExecutor reconciliation", () => {
     expect(inputs[0]?.contract.instructions).not.toContain("reconciled");
   });
 });
+
+describe("createCodexExecutor failure adjudication", () => {
+  const openState = (
+    review: "changes_requested" | "pending" | "approved",
+    inProgress = false,
+    ci: "passed" | "pending" | "failed" = "passed",
+  ) => ({
+    executor: "implement",
+    branch: "prism/mc-1",
+    branchExists: true,
+    pullRequest: {
+      number: 5,
+      url: "https://github.com/example/repo/pull/5",
+      state: "open" as const,
+      headSha: "abc123",
+    },
+    ci,
+    review: { reviewer: "claude", verdict: review, inProgress },
+    reviewRequests: 3,
+    notes: [],
+  });
+
+  /** An engine that answers with a scripted sequence and records contracts. */
+  function scriptedEngine(results: readonly WorkerResult[]): {
+    engine: CodexEngine;
+    contracts: string[];
+    nodeDirs: string[];
+  } {
+    const contracts: string[] = [];
+    const nodeDirs: string[] = [];
+    const queue = [...results];
+    const engine: CodexEngine = {
+      execute(input) {
+        contracts.push(input.contract.instructions);
+        nodeDirs.push(input.nodeDir);
+        const next = queue.shift();
+        if (next === undefined) throw new Error("engine called too often");
+        return Promise.resolve(next);
+      },
+    };
+    return { engine, contracts, nodeDirs };
+  }
+
+  const semanticFailure: WorkerResult = {
+    status: "failed",
+    error: "Claude identified remaining actionable findings",
+    failureClass: "semantic_failed",
+  };
+  const noWait = () => Promise.resolve();
+
+  test("re-invokes the worker with findings when the pull request is still viable", async () => {
+    const { engine, contracts, nodeDirs } = scriptedEngine([
+      semanticFailure,
+      { status: "succeeded", output: proof("fixed after adjudication") },
+    ]);
+    const reconciliations: string[] = [];
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: {
+        reconcile: () => {
+          reconciliations.push("call");
+          return Promise.resolve({
+            kind: "resume" as const,
+            state: openState("changes_requested"),
+          });
+        },
+      },
+      adjudication: { wait: noWait },
+    });
+    const outcome = await executor.execute(context());
+    expect(outcome).toEqual({
+      status: "succeeded",
+      output: proof("fixed after adjudication"),
+    });
+    expect(contracts).toHaveLength(2);
+    expect(contracts[1]).toContain("previous session in this node ended");
+    expect(contracts[1]).toContain('"verdict": "changes_requested"');
+    expect(contracts[1]).toContain("7 review iteration(s) remain");
+    expect(nodeDirs[0]).not.toBe(nodeDirs[1]);
+    // Entry reconciliation plus one adjudication.
+    expect(reconciliations).toHaveLength(2);
+  });
+
+  test("overrides a worker failure when the pull request already satisfies the gate", async () => {
+    const { engine, contracts } = scriptedEngine([semanticFailure]);
+    let calls = 0;
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: {
+        reconcile: () => {
+          calls += 1;
+          return Promise.resolve(
+            calls === 1
+              ? { kind: "fresh" as const, notes: [] }
+              : {
+                  kind: "satisfied" as const,
+                  state: openState("approved"),
+                  output: proof("approved on GitHub"),
+                },
+          );
+        },
+      },
+      adjudication: { wait: noWait },
+    });
+    await expect(executor.execute(context())).resolves.toEqual({
+      status: "succeeded",
+      output: proof("approved on GitHub"),
+    });
+    expect(contracts).toHaveLength(1);
+  });
+
+  test("waits out an in-progress review before re-invoking", async () => {
+    const { engine, contracts } = scriptedEngine([
+      {
+        status: "failed",
+        error: "Timed out while Claude review was still in progress",
+        failureClass: "timeout",
+      },
+      { status: "succeeded", output: proof("after the review finished") },
+    ]);
+    const states = [
+      openState("pending", true),
+      openState("pending", true),
+      openState("changes_requested"),
+    ];
+    let calls = 0;
+    const waits: number[] = [];
+    const phases: NodePhase[] = [];
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: {
+        reconcile: () => {
+          calls += 1;
+          const state = states[Math.min(calls - 2, states.length - 1)];
+          return Promise.resolve(
+            calls === 1
+              ? { kind: "fresh" as const, notes: [] }
+              : { kind: "resume" as const, state: state! },
+          );
+        },
+      },
+      adjudication: {
+        pollMs: 1_000,
+        wait: (ms) => {
+          waits.push(ms);
+          return Promise.resolve();
+        },
+      },
+    });
+    const outcome = await executor.execute(
+      context([], {
+        reportPhase: async (phase) => {
+          await Promise.resolve();
+          phases.push(phase);
+        },
+      }),
+    );
+    expect(outcome.status).toBe("succeeded");
+    expect(waits).toEqual([1_000, 1_000]);
+    expect(phases.filter((phase) => phase === "review_wait")).toHaveLength(2);
+    expect(contracts).toHaveLength(2);
+  });
+
+  test("keeps the failure with structured evidence when the budget is exhausted", async () => {
+    const { engine, contracts } = scriptedEngine([
+      semanticFailure,
+      semanticFailure,
+      semanticFailure,
+    ]);
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: {
+        reconcile: () =>
+          Promise.resolve({
+            kind: "resume" as const,
+            state: openState("changes_requested"),
+          }),
+      },
+      adjudication: { wait: noWait },
+    });
+    const outcome = await executor.execute(
+      context([], { config: { ...implementConfig, maxIterations: 2 } }),
+    );
+    expect(outcome.status).toBe("failed");
+    if (outcome.status !== "failed") return;
+    expect(outcome.failureClass).toBe("semantic_failed");
+    expect(outcome.cause).toMatchObject({
+      code: "WORKER_FAILURE_ADJUDICATED",
+      error: "Claude identified remaining actionable findings",
+      reason: "review iteration budget exhausted (2)",
+      reinvocations: 2,
+      maxIterations: 2,
+      state: { pullRequest: { number: 5 } },
+    });
+    expect(contracts).toHaveLength(3);
+  });
+
+  test("accepts the failure when there is nothing to continue from", async () => {
+    const { engine, contracts } = scriptedEngine([semanticFailure]);
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: {
+        reconcile: () => Promise.resolve({ kind: "fresh" as const, notes: [] }),
+      },
+      adjudication: { wait: noWait },
+    });
+    const outcome = await executor.execute(context());
+    expect(outcome.status).toBe("failed");
+    if (outcome.status !== "failed") return;
+    expect(outcome.cause).toMatchObject({
+      reason: "no branch or pull request to continue from",
+      reinvocations: 0,
+    });
+    expect(contracts).toHaveLength(1);
+  });
+
+  test("worker failures stay final without adjudication configured", async () => {
+    const { engine, contracts } = scriptedEngine([semanticFailure]);
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: {
+        reconcile: () =>
+          Promise.resolve({
+            kind: "resume" as const,
+            state: openState("changes_requested"),
+          }),
+      },
+    });
+    const outcome = await executor.execute(context());
+    expect(outcome).toEqual({
+      status: "failed",
+      cause: "Claude identified remaining actionable findings",
+      failureClass: "semantic_failed",
+    });
+    expect(contracts).toHaveLength(1);
+  });
+});
