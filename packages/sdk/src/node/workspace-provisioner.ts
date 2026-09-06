@@ -164,18 +164,32 @@ async function resolveStartPoint(
   }
   const remote = input.remote ?? "origin";
   const base = input.baseBranch;
-  try {
-    await runGit(repoDir, ["fetch", "--quiet", remote, base]);
-    return `refs/remotes/${remote}/${base}`;
-  } catch (fetchError: unknown) {
+  const remotes = (await runGit(repoDir, ["remote"]))
+    .split(/\r?\n/)
+    .map((name) => name.trim());
+  if (!remotes.includes(remote)) {
     if (await localBranchExists(repoDir, base)) {
       return `refs/heads/${base}`;
     }
     throw new Error(
-      `cannot start worktree from ${quoteArgument(base)}: fetch from ${quoteArgument(remote)} failed and no local branch exists`,
+      `cannot start worktree from ${quoteArgument(base)}: remote ${quoteArgument(remote)} is not configured and no local branch exists`,
+    );
+  }
+  const target = `refs/remotes/${remote}/${base}`;
+  try {
+    await runGit(repoDir, [
+      "fetch",
+      "--quiet",
+      remote,
+      `+refs/heads/${base}:${target}`,
+    ]);
+  } catch (fetchError: unknown) {
+    throw new Error(
+      `cannot start worktree from ${quoteArgument(base)}: fetch from ${quoteArgument(remote)} failed`,
       { cause: fetchError },
     );
   }
+  return target;
 }
 
 async function localBranchExists(
@@ -207,15 +221,15 @@ async function localBranchExists(
   });
 }
 
-async function runGit(cwd: string, args: readonly string[]): Promise<void> {
-  await new Promise<void>((resolvePromise, rejectPromise) => {
+async function runGit(cwd: string, args: readonly string[]): Promise<string> {
+  return new Promise<string>((resolvePromise, rejectPromise) => {
     execFile(
       "git",
       [...args],
       { cwd, encoding: "utf8" },
-      (error, _stdout, stderr) => {
+      (error, stdout, stderr) => {
         if (error === null) {
-          resolvePromise();
+          resolvePromise(stdout);
           return;
         }
 

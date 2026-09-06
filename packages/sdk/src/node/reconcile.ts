@@ -35,7 +35,8 @@ import type { WorkerSpec } from "./worker-protocol.js";
  *
  * Reconciliation never blocks a node: every failure to inspect degrades to
  * `fresh` with a note, because the agent can still discover the state
- * itself. It never mutates git or GitHub.
+ * itself. It refreshes remote-tracking refs but never changes working trees,
+ * local branches, or GitHub.
  */
 
 export interface ReconcileInput {
@@ -81,6 +82,8 @@ export interface ReconciledState {
   readonly executor: string;
   readonly branch: string;
   readonly targetBranch: string;
+  /** Remote used to inspect and refresh this branch. Default "origin". */
+  readonly remote?: string;
   readonly branchExists: boolean;
   readonly divergence?: BranchDivergence;
   readonly pullRequest?: ReconciledPullRequest;
@@ -119,7 +122,7 @@ const EXCERPT_LIMIT = 1_500;
 
 /**
  * Reconcile Codex executor nodes against git and GitHub through the `gh`
- * CLI. Only reads are issued: `git ls-remote`, `gh pr list`, `gh pr view`.
+ * CLI. Remote-tracking refs are fetched to measure branch divergence.
  */
 export function createGitHubReconciler(
   options: GitHubReconcilerOptions = {},
@@ -186,7 +189,7 @@ function divergenceGuidance(state: ReconciledState): string {
       ? ""
       : ` Target commits missing from this branch: ${state.divergence.missingFromBranch.map((subject) => JSON.stringify(subject)).join(", ")}.`;
   return `
-- FIRST: the branch is ${conflicting ? "conflicting with" : "behind"} ${JSON.stringify(state.targetBranch)} (${String(behind)} target commit(s) missing).${missing} Fetch and rebase (or merge) onto origin/${state.targetBranch} before any other work. Resolve conflicts by keeping the already-merged implementations for files owned by other tasks and re-applying only this task's changes on top; never re-implement work that has already merged. Then rerun validation, push, and re-request review.`;
+- FIRST: the branch is ${conflicting ? "conflicting with" : "behind"} ${JSON.stringify(state.targetBranch)} (${String(behind)} target commit(s) missing).${missing} Fetch and rebase (or merge) onto ${state.remote ?? "origin"}/${state.targetBranch} before any other work. Resolve conflicts by keeping the already-merged implementations for files owned by other tasks and re-applying only this task's changes on top; never re-implement work that has already merged. Then rerun validation, push, and re-request review.`;
 }
 
 interface Tools {
@@ -247,6 +250,7 @@ async function reconcileMergeResolve(
     executor: input.spec.executor,
     branch,
     targetBranch: config.targetBranch,
+    remote: tools.remote,
     branchExists,
     ...(pullRequest === undefined ? {} : { pullRequest: pullRequest.summary }),
     ci: "none",
@@ -308,6 +312,7 @@ async function reconcileReviewedBranch(
         executor: input.spec.executor,
         branch: reviewed.branch,
         targetBranch: reviewed.targetBranch,
+        remote: tools.remote,
         branchExists,
         ci: "none",
         notes: [...notes, "branch exists but no pull request was found"],
@@ -320,6 +325,7 @@ async function reconcileReviewedBranch(
       executor: input.spec.executor,
       branch: reviewed.branch,
       targetBranch: reviewed.targetBranch,
+      remote: tools.remote,
       branchExists,
       pullRequest: pullRequest.summary,
       ci: "none",
@@ -353,6 +359,7 @@ async function reconcileReviewedBranch(
         executor: input.spec.executor,
         branch: reviewed.branch,
         targetBranch: reviewed.targetBranch,
+        remote: tools.remote,
         branchExists,
         pullRequest: pullRequest.summary,
         ci: "none",
@@ -397,6 +404,7 @@ async function reconcileReviewedBranch(
     executor: input.spec.executor,
     branch: reviewed.branch,
     targetBranch: reviewed.targetBranch,
+    remote: tools.remote,
     branchExists,
     ...(divergence === undefined ? {} : { divergence }),
     pullRequest: summary,
@@ -441,17 +449,23 @@ async function measureDivergence(
   targetBranch: string,
   notes: string[],
 ): Promise<BranchDivergence | undefined> {
+  const target = `refs/remotes/${tools.remote}/${targetBranch}`;
+  const head = `refs/remotes/${tools.remote}/${branch}`;
   const fetch = await tools.runner.run(
     tools.git,
-    ["fetch", "--quiet", tools.remote, targetBranch, branch],
+    [
+      "fetch",
+      "--quiet",
+      tools.remote,
+      `+refs/heads/${targetBranch}:${target}`,
+      `+refs/heads/${branch}:${head}`,
+    ],
     { cwd: input.worktreeDir, ...signalOption(input) },
   );
   if (fetch.exitCode !== 0) {
     notes.push(`git fetch failed: ${firstLine(fetch.stderr)}`);
     return undefined;
   }
-  const target = `refs/remotes/${tools.remote}/${targetBranch}`;
-  const head = `refs/remotes/${tools.remote}/${branch}`;
   const counts = await tools.runner.run(
     tools.git,
     ["rev-list", "--left-right", "--count", `${target}...${head}`],

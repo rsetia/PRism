@@ -101,9 +101,10 @@ const greenChecks = [
 async function reconcile(
   stubs: readonly Stub[],
   spec: WorkerSpec,
+  remote = "origin",
 ): Promise<{ outcome: ReconcileOutcome; calls: Recorded[] }> {
   const { runner, calls } = fakeRunner(stubs);
-  const reconciler = createGitHubReconciler({ runner });
+  const reconciler = createGitHubReconciler({ runner, remote });
   const outcome = await reconciler.reconcile({
     spec,
     worktreeDir: "/tmp/worktree",
@@ -513,47 +514,61 @@ describe("createGitHubReconciler for implement nodes", () => {
 });
 
 describe("createGitHubReconciler divergence", () => {
-  test("reports missing target commits and tells the worker to rebase first", async () => {
-    const { outcome } = await reconcile(
-      [
-        lsRemoteHit,
-        { match: "fetch", result: { stdout: "" } },
-        { match: "rev-list", result: { stdout: "3\t2\n" } },
-        {
-          match: "log --reverse",
-          result: { stdout: "PPL-005 (#7)\nPPL-006 (#8)\nPPL-007 (#10)\n" },
-        },
-        prList([{ ...openPr, mergeStateStatus: "DIRTY" }]),
-        prView({
-          headRefOid: "abc123",
-          statusCheckRollup: [],
-          reviews: [],
-          commits: [headCommit],
-          comments: [
-            {
-              author: { login: "claude" },
-              body: "I have no remaining blocking findings on this PR.",
-              createdAt: "2026-09-05T23:24:30Z",
-            },
-          ],
-        }),
-      ],
-      implementSpec(),
-    );
-    // Approved but conflicting: never satisfied.
-    expect(outcome.kind).toBe("resume");
-    if (outcome.kind !== "resume") return;
-    expect(outcome.state.targetBranch).toBe("prism/integration");
-    expect(outcome.state.divergence).toEqual({
-      behindTarget: 3,
-      aheadOfTarget: 2,
-      missingFromBranch: ["PPL-005 (#7)", "PPL-006 (#8)", "PPL-007 (#10)"],
-    });
-    const text = describeReconciledState(outcome.state);
-    expect(text).toContain("FIRST: the branch is conflicting with");
-    expect(text).toContain("rebase (or merge) onto origin/prism/integration");
-    expect(text).toContain("PPL-007 (#10)");
-  });
+  test.each(["origin", "upstream"])(
+    "reports divergence and rebase guidance for %s",
+    async (remote) => {
+      const { outcome, calls } = await reconcile(
+        [
+          lsRemoteHit,
+          { match: "fetch", result: { stdout: "" } },
+          { match: "rev-list", result: { stdout: "3\t2\n" } },
+          {
+            match: "log --reverse",
+            result: { stdout: "PPL-005 (#7)\nPPL-006 (#8)\nPPL-007 (#10)\n" },
+          },
+          prList([{ ...openPr, mergeStateStatus: "DIRTY" }]),
+          prView({
+            headRefOid: "abc123",
+            statusCheckRollup: [],
+            reviews: [],
+            commits: [headCommit],
+            comments: [
+              {
+                author: { login: "claude" },
+                body: "I have no remaining blocking findings on this PR.",
+                createdAt: "2026-09-05T23:24:30Z",
+              },
+            ],
+          }),
+        ],
+        implementSpec(),
+        remote,
+      );
+      // Approved but conflicting: never satisfied.
+      expect(outcome.kind).toBe("resume");
+      if (outcome.kind !== "resume") return;
+      expect(outcome.state.remote).toBe(remote);
+      expect(calls.find((call) => call.args[0] === "fetch")?.args).toEqual([
+        "fetch",
+        "--quiet",
+        remote,
+        `+refs/heads/prism/integration:refs/remotes/${remote}/prism/integration`,
+        `+refs/heads/prism/x-1:refs/remotes/${remote}/prism/x-1`,
+      ]);
+      expect(outcome.state.targetBranch).toBe("prism/integration");
+      expect(outcome.state.divergence).toEqual({
+        behindTarget: 3,
+        aheadOfTarget: 2,
+        missingFromBranch: ["PPL-005 (#7)", "PPL-006 (#8)", "PPL-007 (#10)"],
+      });
+      const text = describeReconciledState(outcome.state);
+      expect(text).toContain("FIRST: the branch is conflicting with");
+      expect(text).toContain(
+        `rebase (or merge) onto ${remote}/prism/integration`,
+      );
+      expect(text).toContain("PPL-007 (#10)");
+    },
+  );
 });
 
 describe("createGitHubReconciler for merge and finalize nodes", () => {

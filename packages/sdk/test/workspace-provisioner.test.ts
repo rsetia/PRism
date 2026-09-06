@@ -93,7 +93,10 @@ describe("createGitWorktreeProvisioner Git behavior", () => {
     const preservedHead = await git(first.dir, "rev-parse", "HEAD");
 
     await p.release(first, { preserveBranch: true });
-    const resumed = await p.provision(input);
+    const resumed = await p.provision({
+      ...input,
+      baseBranch: "does-not-exist",
+    });
     expect(resumed.branch).toBe(branch);
     expect(existsSync(join(resumed.dir, "RECOVERY.md"))).toBe(true);
     expect(await git(resumed.dir, "rev-parse", "HEAD")).toBe(preservedHead);
@@ -143,6 +146,13 @@ describe("createGitWorktreeProvisioner base branch", () => {
     await git(cloneDir, "push", "-q", "origin", "integration");
     await git(repoDir, "checkout", "main");
 
+    // A narrow fetch mapping must not prevent the requested base from updating.
+    await git(
+      repoDir,
+      "config",
+      "remote.origin.fetch",
+      "+refs/heads/main:refs/remotes/origin/main",
+    );
     const p = provisioner();
     const workspace = await p.provision({
       runId: "base",
@@ -154,7 +164,7 @@ describe("createGitWorktreeProvisioner base branch", () => {
     await p.release(workspace);
   });
 
-  test("falls back to a local branch when the remote is unavailable", async () => {
+  test("rejects a failed fetch even when a stale local base exists", async () => {
     await git(
       repoDir,
       "remote",
@@ -162,6 +172,18 @@ describe("createGitWorktreeProvisioner base branch", () => {
       "origin",
       join(root, "missing.git"),
     );
+    await expect(
+      provisioner().provision({
+        runId: "base",
+        nodeId: "failed-fetch",
+        attempt: 1,
+        baseBranch: "integration",
+      }),
+    ).rejects.toThrow(/fetch from "origin" failed/);
+  });
+
+  test("falls back to a local branch when the remote is not configured", async () => {
+    await git(repoDir, "remote", "remove", "origin");
     await git(repoDir, "checkout", "integration");
     writeFileSync(join(repoDir, "local-only.txt"), "local\n");
     await git(repoDir, "add", "local-only.txt");
