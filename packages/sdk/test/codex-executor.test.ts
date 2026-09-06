@@ -19,9 +19,11 @@ import {
   createCodexEngine,
   createCodexExecutor,
   createFileLogBackend,
+  createFileAgentSessionStore,
 } from "../src/node/index.js";
 import type {
   AgentSessionBackend,
+  AgentSessionInput,
   CodexEngine,
   CodexExecutionInput,
   WorkerResult,
@@ -871,10 +873,150 @@ describe("createCodexExecutor failure adjudication", () => {
     expect(contracts).toHaveLength(2);
     expect(contracts[1]).toContain("previous session in this node ended");
     expect(contracts[1]).toContain('"verdict": "changes_requested"');
-    expect(contracts[1]).toContain("7 review iteration(s) remain");
+    expect(contracts[1]).toContain("7 orchestrator continuation(s) remain");
+    expect(contracts[1]).toContain(
+      "at most 1 implementation/review iterations",
+    );
+    expect(contracts[1]).not.toContain(
+      "at most 8 implementation/review iterations",
+    );
     expect(nodeDirs[0]).not.toBe(nodeDirs[1]);
     // Entry reconciliation plus one adjudication.
     expect(reconciliations).toHaveLength(2);
+  });
+
+  test("starts distinct durable sessions for adjudication continuations", async () => {
+    const starts: AgentSessionInput[] = [];
+    const resumes: string[] = [];
+    const sessionStore = createFileAgentSessionStore(
+      join(tempDir, "continuations"),
+    );
+    const sessionBackend: AgentSessionBackend = {
+      name: "durable-fake",
+      start(input) {
+        starts.push(input);
+        return Promise.resolve({
+          id: `session-${String(starts.length)}`,
+          state: null,
+        });
+      },
+      resume(_input, session) {
+        resumes.push(session.id);
+        return Promise.resolve(session);
+      },
+      steer: () => Promise.resolve(),
+      interrupt: () => Promise.resolve(),
+      async *events(session) {
+        await Promise.resolve();
+        yield {
+          kind: "result" as const,
+          result:
+            session.id === "session-3"
+              ? { status: "succeeded" as const, output: proof("continued") }
+              : semanticFailure,
+        };
+      },
+    };
+    const executor = createCodexExecutor({
+      name: "implement",
+      sessionBackend,
+      sessionStore,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: {
+        reconcile: () =>
+          Promise.resolve({
+            kind: "resume" as const,
+            state: openState("changes_requested"),
+          }),
+      },
+      adjudication: { wait: noWait },
+    });
+    await expect(executor.execute(context())).resolves.toEqual({
+      status: "succeeded",
+      output: proof("continued"),
+    });
+    expect(resumes).toEqual([]);
+    expect(starts.map((input) => input.key.reinvocation)).toEqual([
+      undefined,
+      1,
+      2,
+    ]);
+    expect(new Set(starts.map((input) => input.nodeDir)).size).toBe(3);
+    for (const [index, input] of starts.entries()) {
+      expect(await sessionStore.load(input.key)).toMatchObject({
+        id: `session-${String(index + 1)}`,
+      });
+      if (index > 0) {
+        expect(input.prompt).toContain("single continuation attempt");
+        expect(input.spec.config).toMatchObject({ maxIterations: 1 });
+        expect(
+          JSON.parse(readFileSync(join(input.nodeDir, "spec.json"), "utf8")),
+        ).toMatchObject({ config: { maxIterations: 1 } });
+      }
+    }
+  });
+
+  test.each([0, -1, NaN, Infinity, 0.5])(
+    "rejects invalid polling interval %s",
+    (pollMs) => {
+      const { engine } = scriptedEngine([]);
+      expect(() =>
+        createCodexExecutor({
+          name: "implement",
+          engine,
+          adjudication: { pollMs },
+        }),
+      ).toThrow("adjudication.pollMs");
+    },
+  );
+
+  test.each([-1, NaN, Infinity])(
+    "rejects invalid wait ceiling %s",
+    (maxWaitMs) => {
+      const { engine } = scriptedEngine([]);
+      expect(() =>
+        createCodexExecutor({
+          name: "implement",
+          engine,
+          adjudication: { maxWaitMs },
+        }),
+      ).toThrow("adjudication.maxWaitMs");
+    },
+  );
+
+  test("caps the final poll at the wait ceiling and retains evidence", async () => {
+    const { engine } = scriptedEngine([semanticFailure]);
+    const waits: number[] = [];
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: {
+        reconcile: () =>
+          Promise.resolve({
+            kind: "resume" as const,
+            state: openState("pending", true),
+          }),
+      },
+      adjudication: {
+        pollMs: 100,
+        maxWaitMs: 150,
+        wait: (ms) => {
+          waits.push(ms);
+          return Promise.resolve();
+        },
+      },
+    });
+    await expect(executor.execute(context())).resolves.toMatchObject({
+      status: "failed",
+      cause: {
+        code: "WORKER_FAILURE_ADJUDICATED",
+        state: { review: { inProgress: true } },
+      },
+    });
+    expect(waits).toEqual([100, 50]);
   });
 
   test("overrides a worker failure when the pull request already satisfies the gate", async () => {

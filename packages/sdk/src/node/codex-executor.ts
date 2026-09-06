@@ -149,6 +149,20 @@ export interface CodexExecutorOptions {
 export function createCodexExecutor(
   options: CodexExecutorOptions,
 ): ExecutorDefinition {
+  if (
+    options.adjudication?.pollMs !== undefined &&
+    (!Number.isFinite(options.adjudication.pollMs) ||
+      options.adjudication.pollMs < 1)
+  ) {
+    throw new Error("adjudication.pollMs must be finite and at least 1 ms");
+  }
+  if (
+    options.adjudication?.maxWaitMs !== undefined &&
+    (!Number.isFinite(options.adjudication.maxWaitMs) ||
+      options.adjudication.maxWaitMs < 0)
+  ) {
+    throw new Error("adjudication.maxWaitMs must be finite and non-negative");
+  }
   validateExecutorName(options.name);
   const engine = options.engine;
   const sessionBackend = options.sessionBackend;
@@ -229,6 +243,8 @@ export function createCodexExecutor(
         const worktreeDir = resolve(workspace?.dir ?? cwd);
         const nodeDirBase = resolve(explicitNodeDirBase ?? worktreeDir);
         await mkdir(nodeDirBase, { recursive: true });
+        let sessionSpec = spec;
+        let reinvocations = 0;
         const prepareNodeDir = async (): Promise<string> => {
           const dir = await mkdtemp(
             join(
@@ -239,7 +255,7 @@ export function createCodexExecutor(
           nodeDirs.push(dir);
           await writeFile(
             join(dir, WORKER_SPEC_FILE),
-            JSON.stringify(spec),
+            JSON.stringify(sessionSpec),
             "utf8",
           );
           return dir;
@@ -282,7 +298,7 @@ export function createCodexExecutor(
           await context.reportPhase(codexExecutionPhase(name));
           return sessionBackend === undefined
             ? await engine!.execute({
-                spec,
+                spec: sessionSpec,
                 nodeDir: nodeDirPath,
                 worktreeDir,
                 contract,
@@ -296,8 +312,11 @@ export function createCodexExecutor(
                     runId: context.runId,
                     nodeId: context.nodeId,
                     attempt: context.attempt,
+                    ...(reinvocations === 0
+                      ? {}
+                      : { reinvocation: reinvocations }),
                   },
-                  spec,
+                  spec: sessionSpec,
                   nodeDir: nodeDirPath,
                   worktreeDir,
                   sandbox:
@@ -305,7 +324,7 @@ export function createCodexExecutor(
                       ? "danger-full-access"
                       : (contract.sandbox ?? "workspace-write"),
                   prompt: buildCodexPrompt({
-                    spec,
+                    spec: sessionSpec,
                     nodeDir: nodeDirPath,
                     worktreeDir,
                     contract,
@@ -338,7 +357,6 @@ export function createCodexExecutor(
           options.adjudication !== undefined
         ) {
           const budget = iterationBudget(name, spec.config);
-          let reinvocations = 0;
           while (result.status === "failed") {
             const workerFailure = result;
             const verdict = await adjudicateFailure({
@@ -354,8 +372,12 @@ export function createCodexExecutor(
             }
             if (verdict.kind === "reinvoke" && reinvocations < budget) {
               reinvocations += 1;
+              sessionSpec = {
+                ...spec,
+                config: { ...toJson(spec.config), maxIterations: 1 },
+              };
               contract = withReconciledState(
-                baseContract,
+                buildContract(sessionSpec),
                 verdict.state,
                 previousFailureNote(workerFailure, budget - reinvocations),
               );
@@ -535,8 +557,9 @@ async function adjudicateFailure(input: {
       };
     }
     await input.reportPhase(reviewInProgress ? "review_wait" : "ci_wait");
-    await wait(pollMs, input.signal);
-    waited += pollMs;
+    const delay = Math.min(pollMs, maxWaitMs - waited);
+    await wait(delay, input.signal);
+    waited += delay;
   }
 }
 
@@ -599,8 +622,8 @@ function previousFailureNote(
       ? ""
       : ` (failureClass ${failure.failureClass})`;
   return `Your previous session in this node ended with a failed result${classNote}: ${JSON.stringify(failure.error)}.
-The orchestrator reconciled the pull request afterwards and found it still viable; the current state is above. ${String(remaining)} review iteration(s) remain in this node's budget after this one.
-Continue from the current state. Do not restart the implementation, and do not report a failure while findings are fixable and budget remains; fix the findings, rerun validation, push, and re-request review.`;
+The orchestrator reconciled the pull request afterwards and found it still viable; the current state is above. ${String(remaining)} orchestrator continuation(s) remain after this one.
+This session is a single continuation attempt with at most one fix/review iteration, not a fresh full iteration allowance. This limit also overrides any iteration allowance in custom instructions. Continue from the current state: fix the findings, rerun validation, push, and re-request review. Report the outcome after that iteration so the orchestrator can reconcile it and decide whether to continue.`;
 }
 
 function describeAdjudication(
