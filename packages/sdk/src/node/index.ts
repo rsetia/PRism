@@ -149,6 +149,7 @@ export type {
 } from "./codex-executor.js";
 export { createCodexExecutor } from "./codex-executor.js";
 export type {
+  BranchDivergence,
   CiState,
   GitHubReconcilerOptions,
   NodeReconciler,
