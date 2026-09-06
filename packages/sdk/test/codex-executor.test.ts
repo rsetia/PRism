@@ -26,6 +26,7 @@ import type {
   AgentSessionInput,
   CodexEngine,
   CodexExecutionInput,
+  ProvisionInput,
   WorkerResult,
   WorkspaceHandle,
   WorkspaceProvisioner,
@@ -81,12 +82,14 @@ function fakeEngine(result: WorkerResult): {
 function fakeProvisioner(): {
   provisioner: WorkspaceProvisioner;
   provisioned: string[];
+  provisionInputs: ProvisionInput[];
   released: {
     readonly dir: string;
     readonly options: WorkspaceReleaseOptions | undefined;
   }[];
 } {
   const provisioned: string[] = [];
+  const provisionInputs: ProvisionInput[] = [];
   const released: {
     readonly dir: string;
     readonly options: WorkspaceReleaseOptions | undefined;
@@ -95,6 +98,7 @@ function fakeProvisioner(): {
     provision(input) {
       const dir = mkdtempSync(join(tempDir, `ws-${input.nodeId}-`));
       provisioned.push(dir);
+      provisionInputs.push(input);
       return Promise.resolve({ dir, branch: `b/${input.nodeId}` });
     },
     release(handle: WorkspaceHandle, options?: WorkspaceReleaseOptions) {
@@ -102,7 +106,7 @@ function fakeProvisioner(): {
       return Promise.resolve();
     },
   };
-  return { provisioner, provisioned, released };
+  return { provisioner, provisioned, provisionInputs, released };
 }
 
 const implementConfig = {
@@ -691,6 +695,7 @@ describe("createCodexExecutor reconciliation", () => {
   const reconciledState = {
     executor: "implement",
     branch: "prism/mc-1",
+    targetBranch: "main",
     branchExists: true,
     pullRequest: {
       number: 5,
@@ -802,6 +807,7 @@ describe("createCodexExecutor failure adjudication", () => {
   ) => ({
     executor: "implement",
     branch: "prism/mc-1",
+    targetBranch: "main",
     branchExists: true,
     pullRequest: {
       number: 5,
@@ -1186,5 +1192,24 @@ describe("createCodexExecutor failure adjudication", () => {
       failureClass: "semantic_failed",
     });
     expect(contracts).toHaveLength(1);
+  });
+});
+
+describe("createCodexExecutor provisioning", () => {
+  test("starts new worktrees from the node's target branch", async () => {
+    const { engine } = fakeEngine({ status: "succeeded", output: proof() });
+    const { provisioner, provisionInputs } = fakeProvisioner();
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      provisioner,
+      nodeDirBase: tempDir,
+    });
+    await executor.execute(
+      context([], {
+        config: { ...implementConfig, targetBranch: "prism/integration" },
+      }),
+    );
+    expect(provisionInputs[0]?.baseBranch).toBe("prism/integration");
   });
 });

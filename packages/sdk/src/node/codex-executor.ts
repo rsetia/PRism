@@ -239,6 +239,7 @@ export function createCodexExecutor(
           runId: context.runId,
           nodeId: context.nodeId,
           attempt: context.attempt,
+          baseBranch: targetBranchFor(name, spec.config),
         });
         const worktreeDir = resolve(workspace?.dir ?? cwd);
         const nodeDirBase = resolve(explicitNodeDirBase ?? worktreeDir);
@@ -585,6 +586,20 @@ function abortError(): Error {
   const error = new Error("adjudication wait aborted");
   error.name = "AbortError";
   return error;
+}
+
+function targetBranchFor(
+  name: "implement" | "merge_resolve" | "finalize_pr",
+  config: JsonValue | null,
+): string {
+  switch (name) {
+    case "implement":
+      return parseImplementConfig(config ?? undefined).targetBranch;
+    case "merge_resolve":
+      return parseMergeResolveConfig(config ?? undefined).targetBranch;
+    case "finalize_pr":
+      return parseFinalizePrConfig(config ?? undefined).targetBranch;
+  }
 }
 
 function iterationBudget(

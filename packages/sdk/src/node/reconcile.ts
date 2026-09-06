@@ -68,11 +68,21 @@ export interface ReconciledPullRequest {
   readonly mergeStateStatus?: string;
 }
 
+/** How far a branch has drifted from its target on the remote. */
+export interface BranchDivergence {
+  readonly behindTarget: number;
+  readonly aheadOfTarget: number;
+  /** Subjects of target commits missing from the branch, oldest first (max 20). */
+  readonly missingFromBranch: readonly string[];
+}
+
 /** The factual state handed to an agent that must continue prior work. */
 export interface ReconciledState {
   readonly executor: string;
   readonly branch: string;
+  readonly targetBranch: string;
   readonly branchExists: boolean;
+  readonly divergence?: BranchDivergence;
   readonly pullRequest?: ReconciledPullRequest;
   readonly ci: CiState;
   readonly review?: ReconciledReview;
@@ -154,12 +164,29 @@ export function describeReconciledState(state: ReconciledState): string {
 ${JSON.stringify(state, null, 2)}
 
 Resume from that state rather than re-deriving it:
-- The branch and pull request above already exist; reuse them. Never create a duplicate branch or pull request.
+- The branch and pull request above already exist; reuse them. Never create a duplicate branch or pull request.${divergenceGuidance(state)}
 - If pullRequest.state is "open" and review.verdict is "changes_requested", read the full reviewer response on the pull request, fix every current-head actionable finding, rerun validation, push, and re-request review. That is one iteration.
 - If review.inProgress is true, the reviewer is still working on the current head: poll and wait for it; do not post the trigger again and do not fail the node as timed out.
 - If ci is "failed", fix the failing checks before anything else.
 - If ci is "pending", wait for the checks on the current head.
 - Start the iteration count at zero; prior attempts do not count against this session.`;
+}
+
+function divergenceGuidance(state: ReconciledState): string {
+  const conflicting =
+    state.pullRequest?.mergeStateStatus === "DIRTY" ||
+    state.pullRequest?.mergeStateStatus === "BEHIND";
+  const behind = state.divergence?.behindTarget ?? 0;
+  if (!conflicting && behind === 0) {
+    return "";
+  }
+  const missing =
+    state.divergence === undefined ||
+    state.divergence.missingFromBranch.length === 0
+      ? ""
+      : ` Target commits missing from this branch: ${state.divergence.missingFromBranch.map((subject) => JSON.stringify(subject)).join(", ")}.`;
+  return `
+- FIRST: the branch is ${conflicting ? "conflicting with" : "behind"} ${JSON.stringify(state.targetBranch)} (${String(behind)} target commit(s) missing).${missing} Fetch and rebase (or merge) onto origin/${state.targetBranch} before any other work. Resolve conflicts by keeping the already-merged implementations for files owned by other tasks and re-applying only this task's changes on top; never re-implement work that has already merged. Then rerun validation, push, and re-request review.`;
 }
 
 interface Tools {
@@ -219,6 +246,7 @@ async function reconcileMergeResolve(
   const base: ReconciledState = {
     executor: input.spec.executor,
     branch,
+    targetBranch: config.targetBranch,
     branchExists,
     ...(pullRequest === undefined ? {} : { pullRequest: pullRequest.summary }),
     ci: "none",
@@ -279,6 +307,7 @@ async function reconcileReviewedBranch(
       state: {
         executor: input.spec.executor,
         branch: reviewed.branch,
+        targetBranch: reviewed.targetBranch,
         branchExists,
         ci: "none",
         notes: [...notes, "branch exists but no pull request was found"],
@@ -290,6 +319,7 @@ async function reconcileReviewedBranch(
     const state: ReconciledState = {
       executor: input.spec.executor,
       branch: reviewed.branch,
+      targetBranch: reviewed.targetBranch,
       branchExists,
       pullRequest: pullRequest.summary,
       ci: "none",
@@ -322,6 +352,7 @@ async function reconcileReviewedBranch(
       state: {
         executor: input.spec.executor,
         branch: reviewed.branch,
+        targetBranch: reviewed.targetBranch,
         branchExists,
         pullRequest: pullRequest.summary,
         ci: "none",
@@ -333,6 +364,13 @@ async function reconcileReviewedBranch(
     };
   }
 
+  const divergence = await measureDivergence(
+    tools,
+    input,
+    reviewed.branch,
+    reviewed.targetBranch,
+    notes,
+  );
   const detail = await viewPullRequest(
     tools,
     input,
@@ -358,7 +396,9 @@ async function reconcileReviewedBranch(
   const state: ReconciledState = {
     executor: input.spec.executor,
     branch: reviewed.branch,
+    targetBranch: reviewed.targetBranch,
     branchExists,
+    ...(divergence === undefined ? {} : { divergence }),
     pullRequest: summary,
     ci,
     ...(review === undefined ? {} : { review }),
@@ -366,11 +406,14 @@ async function reconcileReviewedBranch(
     notes,
   };
 
+  const conflicting =
+    summary.mergeStateStatus === "DIRTY" ||
+    summary.mergeStateStatus === "BEHIND";
   const reviewReady =
     reviewed.review.by === "none" || review?.verdict === "approved";
   const checksReady =
     ci === "passed" || (ci === "none" && !reviewed.requireGreenChecks);
-  if (reviewReady && checksReady && detail !== undefined) {
+  if (reviewReady && checksReady && !conflicting && detail !== undefined) {
     return {
       kind: "satisfied",
       state,
@@ -389,6 +432,57 @@ async function reconcileReviewedBranch(
 interface PullRequestLookup {
   readonly summary: ReconciledPullRequest;
   readonly mergeCommitSha?: string;
+}
+
+async function measureDivergence(
+  tools: Tools,
+  input: ReconcileInput,
+  branch: string,
+  targetBranch: string,
+  notes: string[],
+): Promise<BranchDivergence | undefined> {
+  const fetch = await tools.runner.run(
+    tools.git,
+    ["fetch", "--quiet", tools.remote, targetBranch, branch],
+    { cwd: input.worktreeDir, ...signalOption(input) },
+  );
+  if (fetch.exitCode !== 0) {
+    notes.push(`git fetch failed: ${firstLine(fetch.stderr)}`);
+    return undefined;
+  }
+  const target = `refs/remotes/${tools.remote}/${targetBranch}`;
+  const head = `refs/remotes/${tools.remote}/${branch}`;
+  const counts = await tools.runner.run(
+    tools.git,
+    ["rev-list", "--left-right", "--count", `${target}...${head}`],
+    { cwd: input.worktreeDir, ...signalOption(input) },
+  );
+  if (counts.exitCode !== 0) {
+    notes.push(`git rev-list failed: ${firstLine(counts.stderr)}`);
+    return undefined;
+  }
+  const [behindText, aheadText] = counts.stdout.trim().split(/\s+/);
+  const behindTarget = Number(behindText);
+  const aheadOfTarget = Number(aheadText);
+  if (!Number.isInteger(behindTarget) || !Number.isInteger(aheadOfTarget)) {
+    notes.push("git rev-list returned unexpected counts");
+    return undefined;
+  }
+  let missingFromBranch: string[] = [];
+  if (behindTarget > 0) {
+    const log = await tools.runner.run(
+      tools.git,
+      ["log", "--reverse", "--format=%s", "-n", "20", `${head}..${target}`],
+      { cwd: input.worktreeDir, ...signalOption(input) },
+    );
+    if (log.exitCode === 0) {
+      missingFromBranch = log.stdout
+        .split(/\r?\n/)
+        .map((line) => line.trim())
+        .filter((line) => line.length > 0);
+    }
+  }
+  return { behindTarget, aheadOfTarget, missingFromBranch };
 }
 
 async function remoteBranchExists(

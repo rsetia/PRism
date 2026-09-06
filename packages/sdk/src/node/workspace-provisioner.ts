@@ -24,6 +24,15 @@ export interface ProvisionInput {
   readonly nodeId: string;
   /** 1-based attempt, so a retry gets a fresh, distinctly-named worktree. */
   readonly attempt: number;
+  /**
+   * Branch a NEW worktree branch starts from, fetched from the remote first
+   * so the worker begins at the current integration head rather than at
+   * whatever the operator's checkout happens to be. Ignored when the
+   * worktree branch already exists (a retry or reset re-enters it).
+   */
+  readonly baseBranch?: string;
+  /** Remote `baseBranch` lives on. Default "origin". */
+  readonly remote?: string;
 }
 
 export interface WorkspaceReleaseOptions {
@@ -94,11 +103,14 @@ export function createGitWorktreeProvisioner(
 
       try {
         const branchExists = await localBranchExists(repoDir, branch);
+        const startPoint = branchExists
+          ? undefined
+          : await resolveStartPoint(repoDir, input, baseRef);
         await runGit(
           repoDir,
           branchExists
             ? ["worktree", "add", dir, branch]
-            : ["worktree", "add", "-b", branch, dir, baseRef],
+            : ["worktree", "add", "-b", branch, dir, startPoint ?? baseRef],
         );
       } catch (error: unknown) {
         await rm(dir, { recursive: true, force: true }).catch(() => undefined);
@@ -134,6 +146,36 @@ export function createGitWorktreeProvisioner(
       }
     },
   });
+}
+
+/**
+ * Where a new worktree branch starts. With a baseBranch: fetch it from the
+ * remote and use the remote-tracking ref; a repository without that remote
+ * (a local-only checkout, or tests) falls back to the local branch of the
+ * same name. Without a baseBranch: the configured baseRef, as before.
+ */
+async function resolveStartPoint(
+  repoDir: string,
+  input: ProvisionInput,
+  baseRef: string,
+): Promise<string> {
+  if (input.baseBranch === undefined) {
+    return baseRef;
+  }
+  const remote = input.remote ?? "origin";
+  const base = input.baseBranch;
+  try {
+    await runGit(repoDir, ["fetch", "--quiet", remote, base]);
+    return `refs/remotes/${remote}/${base}`;
+  } catch (fetchError: unknown) {
+    if (await localBranchExists(repoDir, base)) {
+      return `refs/heads/${base}`;
+    }
+    throw new Error(
+      `cannot start worktree from ${quoteArgument(base)}: fetch from ${quoteArgument(remote)} failed and no local branch exists`,
+      { cause: fetchError },
+    );
+  }
 }
 
 async function localBranchExists(
