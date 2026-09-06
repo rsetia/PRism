@@ -97,9 +97,12 @@ export interface Engine {
   run(graph: CompiledGraph, options?: RunOptions): RunHandle;
   /**
    * Continue an interrupted run from the store (plan §12). Replays the
-   * run's persisted events to rebuild state, reclassifies any node left
-   * `running` at crash time as a `transient_infra` failure (so the retry
-   * policy can re-run it), then drives the run to completion. The graph
+   * run's persisted events to rebuild state, then re-runs any node left
+   * `running` at crash time: when the retry policy still has budget it goes
+   * through the normal `transient_infra` retry path; otherwise the
+   * interruption is recorded and the node is reset to pending, because an
+   * interruption is not a verdict on the work and executors reconcile
+   * against external state on re-entry. Then drives the run to completion. The graph
    * comes from the stored snapshot, not the caller. Rejects for an
    * unknown run; a run already finished resolves to its recorded outcome
    * without re-running anything.
@@ -1225,12 +1228,34 @@ async function executeRun(
     if (initialState !== undefined) {
       for (const nodeId of graph.order) {
         const state = states.get(nodeId);
-        if (state === "running" || state === "cancelling") {
-          await processNodeFailure(nodeId, {
-            cause: { code: "INTERRUPTED" },
-            failureClass: "transient_infra",
-          });
+        if (state !== "running" && state !== "cancelling") {
+          continue;
         }
+        const attempt = attempts.get(nodeId) ?? 0;
+        const interrupted = {
+          cause: { code: "INTERRUPTED" },
+          failureClass: "transient_infra" as const,
+        };
+        if (
+          attempt < retryPolicy.maxAttempts &&
+          isRetryable(retryPolicy, "transient_infra")
+        ) {
+          await processNodeFailure(nodeId, interrupted);
+          continue;
+        }
+        // No retry budget. Recording only a failure would make a plain
+        // resume terminal for every node the interruption caught mid-flight,
+        // which is the opposite of resuming. Record the interruption for
+        // the audit trail, then reset the node so it re-runs from whatever
+        // external state its executor finds.
+        await applyEvents([
+          { kind: "node_failed", nodeId, failure: { nodeId, ...interrupted } },
+          { kind: "node_reset", nodeId },
+        ]);
+        attempts.delete(nodeId);
+        originatingFailures.delete(nodeId);
+        retryDelays.delete(nodeId);
+        resourceWaitResourceIds.delete(nodeId);
       }
 
       for (const nodeId of graph.order) {
