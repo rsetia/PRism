@@ -485,7 +485,7 @@ describe("sqlite durability", () => {
     await reopened.close?.();
   });
 
-  test("resume reclassifies a node running at the crash boundary", async () => {
+  test("resume re-runs a node running at the crash boundary", async () => {
     const path = tempDbPath();
     const store = createSqliteStore({ path });
     await store.createRun({ runId: "r", graph: fixtureGraph() });
@@ -500,12 +500,17 @@ describe("sqlite durability", () => {
       store: reopened,
       registry: createExecutorRegistry(builtinExecutors),
     });
+    // Without retry budget the interruption is recorded, the node is reset,
+    // and it runs again instead of failing the run.
     const outcome = await engine.resume("r").result;
-    expect(outcome.status).toBe("failed");
-    if (outcome.status === "failed") {
-      expect(outcome.failures[0]?.failureClass).toBe("transient_infra");
-      expect(outcome.failures[0]?.cause).toEqual({ code: "INTERRUPTED" });
-    }
+    expect(outcome.status).toBe("succeeded");
+    const kinds: string[] = [];
+    for await (const event of reopened.readEvents("r")) kinds.push(event.kind);
+    expect(kinds.slice(2, 5)).toEqual([
+      "node_failed",
+      "node_reset",
+      "node_ready",
+    ]);
     await reopened.close?.();
   });
 

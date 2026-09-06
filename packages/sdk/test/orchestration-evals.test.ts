@@ -119,6 +119,7 @@ describe("deterministic production orchestration evaluations", () => {
     const durations: number[] = [];
     const costs: number[] = [];
     const history: PersistedRunEvent[] = [];
+    const automaticResets = new Set<PersistedRunEvent>();
     const terminals = new Map<string, string>();
     const record = (name: string, events: readonly PersistedRunEvent[]) => {
       assertHistory(events);
@@ -301,8 +302,30 @@ describe("deterministic production orchestration evaluations", () => {
         registry: createExecutorRegistry(builtinExecutors),
       });
       const handle = subject.resume("crashed");
-      await expect(handle.result).resolves.toMatchObject({ status: "failed" });
-      record("crash/resume", await recordedEvents(handle));
+      await expect(handle.result).resolves.toEqual({
+        status: "succeeded",
+        output: "ok",
+      });
+      const events = await recordedEvents(handle);
+      const resetIndex = events.findIndex(
+        (event) => event.kind === "node_reset",
+      );
+      expect(resetIndex).toBeGreaterThan(0);
+      expect(events.slice(resetIndex - 1, resetIndex + 2)).toMatchObject([
+        {
+          kind: "node_failed",
+          nodeId: "work",
+          failure: {
+            cause: { code: "INTERRUPTED" },
+            failureClass: "transient_infra",
+          },
+        },
+        { kind: "node_reset", nodeId: "work" },
+        { kind: "node_ready", nodeId: "work" },
+      ]);
+      // This reset was performed by resume itself, without an admin action.
+      automaticResets.add(events[resetIndex]!);
+      record("crash/resume", events);
       const lease = await store.acquireCoordinatorLease(
         "crashed",
         "old",
@@ -453,7 +476,6 @@ describe("deterministic production orchestration evaluations", () => {
     expect(new Set(effects).size).toBe(effects.length); // no duplicate fake side effects
     const expectedFailures = new Set([
       "cancellation",
-      "crash/resume",
       "stalled agent",
       "restricted execution policy",
     ]);
@@ -465,8 +487,9 @@ describe("deterministic production orchestration evaluations", () => {
           (name) => terminals.get(name) === "node_succeeded",
         ).length / expectedFailures.size,
       humanInterventionRate:
-        history.filter((event) => event.kind === "node_reset").length /
-        completed.length,
+        history.filter(
+          (event) => event.kind === "node_reset" && !automaticResets.has(event),
+        ).length / completed.length,
       duplicateSideEffectRate:
         effects.length === 0
           ? 0

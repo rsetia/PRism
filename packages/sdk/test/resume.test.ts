@@ -249,12 +249,15 @@ describe("engine resume", () => {
     );
   });
 
-  test("reclassifies a crashed running node as transient_infra", async () => {
+  test("re-runs a crashed running node when no retry budget remains", async () => {
     const store = createMemoryStore();
     const graph = buildGraph({
       version: 1,
-      nodes: { a: { executor: "constant", config: { value: "A" } } },
-      finalNode: "a",
+      nodes: {
+        a: { executor: "constant", config: { value: "A" } },
+        b: { executor: "constant", config: { value: "B" }, dependsOn: ["a"] },
+      },
+      finalNode: "b",
     });
     // 'a' was running when the process died — no terminal event.
     await seed(store, "r", graph, [
@@ -262,13 +265,31 @@ describe("engine resume", () => {
       { kind: "node_started", nodeId: "a" },
     ]);
 
-    // No retry policy: the reclassified failure is terminal.
-    const outcome = await engineOn(store).resume("r").result;
-    expect(outcome.status).toBe("failed");
-    if (outcome.status === "failed") {
-      expect(outcome.failures[0]?.nodeId).toBe("a");
-      expect(outcome.failures[0]?.failureClass).toBe("transient_infra");
-    }
+    // No retry policy: the interruption is recorded, then the node is reset
+    // and re-run instead of becoming a terminal failure that blocks 'b'.
+    const handle = engineOn(store).resume("r");
+    await expect(handle.result).resolves.toEqual({
+      status: "succeeded",
+      output: "B",
+    });
+    const events: PersistedRunEvent[] = [];
+    for await (const event of store.readEvents("r")) events.push(event);
+    // Seeded: node_ready, node_started. Recovery: interruption recorded,
+    // node reset, then made ready again.
+    expect(events.slice(2, 5).map((event) => event.kind)).toEqual([
+      "node_failed",
+      "node_reset",
+      "node_ready",
+    ]);
+    const failure = events.find((event) => event.kind === "node_failed");
+    expect(failure?.kind === "node_failed" && failure.failure.cause).toEqual({
+      code: "INTERRUPTED",
+    });
+    // The re-run is a fresh attempt 1, not attempt 2.
+    const starts = events.filter(
+      (event) => event.kind === "node_started" && event.nodeId === "a",
+    );
+    expect(starts).toHaveLength(2);
   });
 
   test("a crashed running node is retried when the policy allows", async () => {
