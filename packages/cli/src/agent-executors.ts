@@ -111,6 +111,9 @@ export function createAgentExecutorRegistry(
       // Preflight policy validation must run for both execution transports.
       engine: codexEngine,
       reconciler,
+      // Worker-declared failures are checked against the pull request before
+      // they count: an open PR with budget left means "keep going".
+      adjudication: {},
       ...(sessionBackend === undefined ? {} : { sessionBackend }),
       ...(sessionBackend === undefined
         ? {}

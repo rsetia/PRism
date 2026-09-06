@@ -10,6 +10,8 @@ export interface AgentSessionKey {
   readonly runId: string;
   readonly nodeId: string;
   readonly attempt: number;
+  /** Adjudication continuation within an attempt; omitted for the initial session. */
+  readonly reinvocation?: number;
 }
 
 export interface AgentSession {
@@ -72,6 +74,9 @@ export function createFileAgentSessionStore(
       safePathPart(key.runId),
       safePathPart(key.nodeId),
       `attempt-${String(key.attempt)}`,
+      ...(key.reinvocation === undefined
+        ? []
+        : [`reinvocation-${String(key.reinvocation)}`]),
       SESSION_FILE,
     );
   return {
@@ -86,6 +91,7 @@ export function createFileAgentSessionStore(
           value.key?.runId !== key.runId ||
           value.key.nodeId !== key.nodeId ||
           value.key.attempt !== key.attempt ||
+          value.key.reinvocation !== key.reinvocation ||
           typeof value.session?.id !== "string"
         )
           return undefined;
