@@ -164,3 +164,42 @@ export {
   describeReconciledState,
   sourceBranchFromInput,
 } from "./reconcile.js";
+export type {
+  PollCandidate,
+  PollConfig,
+  PollExecutorOptions,
+  PollImplementSettings,
+  PollItem,
+  PollListing,
+  PollNodeIds,
+  PollSkip,
+  PollSource,
+  PollSourceConfig,
+} from "./poll.js";
+export {
+  buildPollGraph,
+  buildPollProposal,
+  createPollExecutor,
+  DEFAULT_POLL_INTERVAL_SECONDS,
+  DEFAULT_POLL_MAX_PARALLEL,
+  DEFAULT_POLL_REVIEW,
+  MIN_POLL_INTERVAL_SECONDS,
+  parsePollConfig,
+  POLL_EXECUTOR,
+  POLL_IMPLEMENT_RESOURCE,
+  POLL_NODE_ID,
+  pollConfigToJson,
+  pollGraphProposalPolicy,
+  pollNodeIds,
+  pollProposalId,
+  pollRunId,
+} from "./poll.js";
+export type {
+  LinearPollSourceOptions,
+  LinearSourceConfig,
+} from "./linear-source.js";
+export {
+  createLinearPollSource,
+  LINEAR_API_URL,
+  parseLinearSourceConfig,
+} from "./linear-source.js";
