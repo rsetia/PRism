@@ -197,6 +197,155 @@ describe("Linear poll source", () => {
     ]);
   });
 
+  test.each([VIEWER, "other"])(
+    "checks label provenance on later history pages for actor %s",
+    async (actor) => {
+      const { calls, fetchImpl } = fakeLinear([
+        page([
+          issue("ENG-1", {
+            // Force the creator fallback to give the opposite answer.
+            creator: { id: actor === VIEWER ? "other" : VIEWER },
+            history: {
+              nodes: Array.from({ length: 50 }, () => ({
+                createdAt: "2026-09-01T00:00:00Z",
+                addedLabelIds: [],
+              })),
+              pageInfo: { hasNextPage: true, endCursor: "history-1" },
+            },
+          }),
+        ]),
+        {
+          data: {
+            issue: {
+              history: {
+                nodes: [
+                  {
+                    createdAt: "2026-09-30T00:00:00Z",
+                    addedLabelIds: [LABEL_ID],
+                    actor: { id: actor },
+                  },
+                ],
+                pageInfo: { hasNextPage: false, endCursor: null },
+              },
+            },
+          },
+        },
+      ]);
+      const listing = await createLinearPollSource({
+        fetch: fetchImpl,
+        env,
+      }).list(config, signal);
+      expect(listing.candidates.map((entry) => entry.key)).toEqual(
+        actor === VIEWER ? ["ENG-1"] : [],
+      );
+      expect(listing.skipped).toHaveLength(actor === VIEWER ? 0 : 1);
+      expect(calls[1]?.variables).toEqual({
+        id: "uuid-ENG-1",
+        after: "history-1",
+      });
+      expect(calls[1]?.query).toContain("history(first: 50, after: $after)");
+    },
+  );
+
+  test("uses the newest label addition across pages regardless of history order", async () => {
+    const addition = (createdAt: string, actor: string) => ({
+      createdAt,
+      addedLabelIds: [LABEL_ID],
+      actor: { id: actor },
+    });
+    const { fetchImpl } = fakeLinear([
+      page([
+        issue("ENG-1", {
+          history: {
+            nodes: [addition("2026-09-30T00:00:00Z", "other")],
+            pageInfo: { hasNextPage: true, endCursor: "history-1" },
+          },
+        }),
+      ]),
+      {
+        data: {
+          issue: {
+            history: {
+              nodes: [addition("2026-09-01T00:00:00Z", VIEWER)],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        },
+      },
+    ]);
+    const listing = await createLinearPollSource({
+      fetch: fetchImpl,
+      env,
+    }).list(config, signal);
+    expect(listing.candidates).toEqual([]);
+    expect(listing.skipped[0]?.reason).toContain("was not applied by you");
+  });
+
+  test("checks blockers beyond the first relation page", async () => {
+    const { fetchImpl } = fakeLinear([
+      page([
+        issue("ENG-1", {
+          inverseRelations: {
+            nodes: [],
+            pageInfo: { hasNextPage: true, endCursor: "relations-1" },
+          },
+        }),
+      ]),
+      {
+        data: {
+          issue: {
+            inverseRelations: {
+              nodes: [
+                {
+                  type: "blocks",
+                  issue: { identifier: "ENG-9", state: { type: "started" } },
+                },
+              ],
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        },
+      },
+    ]);
+    const listing = await createLinearPollSource({
+      fetch: fetchImpl,
+      env,
+    }).list(config, signal);
+    expect(listing).toEqual({
+      candidates: [],
+      skipped: [{ key: "ENG-1", reason: "blocked by ENG-9" }],
+    });
+  });
+
+  test.each([null, "history-1"])(
+    "fails closed when history pagination returns invalid cursor %s",
+    async (endCursor) => {
+      const { fetchImpl } = fakeLinear([
+        page([
+          issue("ENG-1", {
+            history: {
+              nodes: [],
+              pageInfo: { hasNextPage: true, endCursor: "history-1" },
+            },
+          }),
+        ]),
+        {
+          data: {
+            issue: {
+              history: {
+                nodes: [],
+                pageInfo: { hasNextPage: true, endCursor },
+              },
+            },
+          },
+        },
+      ]);
+      await expect(
+        createLinearPollSource({ fetch: fetchImpl, env }).list(config, signal),
+      ).rejects.toThrow("invalid pagination cursor");
+    },
+  );
+
   test("skips issues blocked by unfinished work", async () => {
     const blocked = (state: string) => ({
       inverseRelations: {
@@ -244,6 +393,77 @@ describe("Linear poll source", () => {
       "ENG-2",
     ]);
     expect(calls[1]?.variables["after"]).toBe("cursor-1");
+  });
+
+  test("does not starve candidates beyond the former ten-page limit", async () => {
+    const { calls, fetchImpl } = fakeLinear(
+      Array.from({ length: 11 }, (_, index) =>
+        page(
+          [issue(`ENG-${String(index)}`)],
+          index < 10,
+          `page-${String(index)}`,
+        ),
+      ),
+    );
+    const listing = await createLinearPollSource({
+      fetch: fetchImpl,
+      env,
+    }).list(config, signal);
+    expect(calls).toHaveLength(11);
+    expect(listing.candidates.at(-1)?.key).toBe("ENG-10");
+  });
+
+  test("snapshots all pages of every issue connection", async () => {
+    const connections = {
+      labels: [{ name: "second label" }],
+      comments: [{ body: "acceptance criteria on page two" }],
+      attachments: [{ title: "design", url: "https://example.com/design" }],
+      relations: [{ type: "blocks", relatedIssue: { identifier: "ENG-2" } }],
+      inverseRelations: [{ type: "blocks", issue: { identifier: "ENG-3" } }],
+    };
+    const { calls, fetchImpl } = fakeLinear([
+      {
+        data: {
+          issue: {
+            id: "uuid-ENG-1",
+            ...Object.fromEntries(
+              Object.keys(connections).map((name) => [
+                name,
+                {
+                  nodes: [],
+                  pageInfo: { hasNextPage: true, endCursor: `${name}-1` },
+                },
+              ]),
+            ),
+          },
+        },
+      },
+      ...Object.entries(connections).map(([name, entries]) => ({
+        data: {
+          issue: {
+            [name]: {
+              nodes: entries,
+              pageInfo: { hasNextPage: false, endCursor: null },
+            },
+          },
+        },
+      })),
+    ]);
+    const loaded = await createLinearPollSource({ fetch: fetchImpl, env }).load(
+      config,
+      { key: "ENG-1", title: "Snapshot" },
+      signal,
+    );
+    expect(calls).toHaveLength(6);
+    expect(loaded.snapshot).toMatchObject({
+      labels: ["second label"],
+      comments: connections.comments,
+      attachments: connections.attachments,
+      relations: {
+        blocks: [{ identifier: "ENG-2" }],
+        blockedBy: [{ identifier: "ENG-3" }],
+      },
+    });
   });
 
   test("snapshots the full issue for the implementer", async () => {

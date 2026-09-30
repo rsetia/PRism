@@ -43,7 +43,6 @@ const SOURCE_KEYS: ReadonlySet<string> = new Set([
   "apiUrl",
 ]);
 const PAGE_SIZE = 50;
-const MAX_PAGES = 10;
 
 export interface LinearSourceConfig {
   readonly label: string;
@@ -139,6 +138,23 @@ export function parseLinearSourceConfig(
   });
 }
 
+const CONNECTION_FIELDS = {
+  labels: "id name",
+  history: "createdAt addedLabelIds actor { id }",
+  comments: "body createdAt user { name }",
+  attachments: "title url",
+  relations: "type relatedIssue { identifier title url state { name type } }",
+  inverseRelations: "type issue { identifier title url state { name type } }",
+} as const;
+type IssueConnection = keyof typeof CONNECTION_FIELDS;
+
+function connectionSelection(name: IssueConnection, after = false): string {
+  return `${name}(first: ${String(PAGE_SIZE)}${after ? ", after: $after" : ""}) {
+    pageInfo { hasNextPage endCursor }
+    nodes { ${CONNECTION_FIELDS[name]} }
+  }`;
+}
+
 const CANDIDATES_QUERY = `query PrismPollCandidates($filter: IssueFilter, $after: String) {
   viewer { id }
   issues(first: ${String(PAGE_SIZE)}, after: $after, filter: $filter, orderBy: createdAt) {
@@ -146,9 +162,9 @@ const CANDIDATES_QUERY = `query PrismPollCandidates($filter: IssueFilter, $after
     nodes {
       id identifier title url
       creator { id }
-      labels { nodes { id name } }
-      history(first: 50) { nodes { createdAt addedLabelIds actor { id } } }
-      inverseRelations(first: 25) { nodes { type issue { identifier state { type } } } }
+      ${connectionSelection("labels")}
+      ${connectionSelection("history")}
+      ${connectionSelection("inverseRelations")}
     }
   }
 }`;
@@ -158,12 +174,12 @@ const ISSUE_QUERY = `query PrismPollIssue($id: String!) {
     id identifier title description url branchName priority priorityLabel createdAt updatedAt
     creator { name } assignee { name }
     team { key name } state { name type } project { name }
-    labels { nodes { name } }
+    ${connectionSelection("labels")}
     parent { identifier title url }
-    comments(first: 50) { nodes { body createdAt user { name } } }
-    attachments(first: 25) { nodes { title url } }
-    relations(first: 25) { nodes { type relatedIssue { identifier title url state { name type } } } }
-    inverseRelations(first: 25) { nodes { type issue { identifier title url state { name type } } } }
+    ${connectionSelection("comments")}
+    ${connectionSelection("attachments")}
+    ${connectionSelection("relations")}
+    ${connectionSelection("inverseRelations")}
   }
 }`;
 
@@ -212,6 +228,41 @@ export function createLinearPollSource(
     return data;
   }
 
+  // Complete every connection before using it for authorization, blocking,
+  // or task context. A partial history cannot justify the creator fallback,
+  // and a partial relation list cannot establish that an issue is unblocked.
+  async function completeConnections(
+    config: LinearSourceConfig,
+    issue: Record<string, unknown>,
+    id: string,
+    names: readonly IssueConnection[],
+    signal: AbortSignal,
+  ): Promise<void> {
+    for (const name of names) {
+      let connection = record(issue[name]);
+      const all = nodes(connection);
+      const cursors = new Set<string>();
+      let after = nextCursor(connection, cursors);
+      while (after !== null) {
+        const data = await graphql(
+          config,
+          `query PrismPollIssueConnection($id: String!, $after: String) {
+            issue(id: $id) { ${connectionSelection(name, true)} }
+          }`,
+          { id, after },
+          signal,
+        );
+        connection = record(record(data["issue"])?.[name]);
+        if (connection === undefined) {
+          throw new Error(`Linear issue ${id} returned no ${name} page`);
+        }
+        all.push(...nodes(connection));
+        after = nextCursor(connection, cursors);
+      }
+      issue[name] = { nodes: all };
+    }
+  }
+
   return Object.freeze({
     kind: "linear",
     validateConfig(config: PollSourceConfig): void {
@@ -235,7 +286,8 @@ export function createLinearPollSource(
       const candidates: PollCandidate[] = [];
       const skipped: PollSkip[] = [];
       let after: string | null = null;
-      for (let page = 0; page < MAX_PAGES; page += 1) {
+      const cursors = new Set<string>();
+      do {
         const data = await graphql(
           parsed,
           CANDIDATES_QUERY,
@@ -248,6 +300,18 @@ export function createLinearPollSource(
           const key = text(issue["identifier"]);
           const title = text(issue["title"]) ?? "";
           if (key === undefined) continue;
+          await completeConnections(
+            parsed,
+            issue,
+            text(issue["id"]) ?? key,
+            [
+              ...(parsed.labelAppliedBy === "me"
+                ? (["labels", "history"] as const)
+                : []),
+              ...(parsed.skipBlocked ? (["inverseRelations"] as const) : []),
+            ],
+            signal,
+          );
           const reason = skipReason(parsed, issue, viewerId);
           if (reason !== undefined) {
             skipped.push({ key, reason });
@@ -260,10 +324,8 @@ export function createLinearPollSource(
             ...(url === undefined ? {} : { url }),
           });
         }
-        const pageInfo = record(issues?.["pageInfo"]);
-        after = text(pageInfo?.["endCursor"]) ?? null;
-        if (pageInfo?.["hasNextPage"] !== true || after === null) break;
-      }
+        after = nextCursor(issues, cursors);
+      } while (after !== null);
       return { candidates, skipped };
     },
     async load(
@@ -282,6 +344,13 @@ export function createLinearPollSource(
       if (issue === undefined) {
         throw new Error(`Linear issue ${candidate.key} was not found`);
       }
+      await completeConnections(
+        parsed,
+        issue,
+        text(issue["id"]) ?? candidate.key,
+        ["labels", "comments", "attachments", "relations", "inverseRelations"],
+        signal,
+      );
       const snapshot = linearSnapshot(issue, now());
       const branchName = text(issue["branchName"]);
       const url = text(issue["url"]) ?? candidate.url;
@@ -490,6 +559,20 @@ function nodes(
         return value === undefined ? [] : [value];
       })
     : [];
+}
+
+function nextCursor(
+  connection: Record<string, unknown> | undefined,
+  seen: Set<string>,
+): string | null {
+  const pageInfo = record(connection?.["pageInfo"]);
+  if (pageInfo?.["hasNextPage"] !== true) return null;
+  const cursor = text(pageInfo["endCursor"]);
+  if (cursor === undefined || cursor.length === 0 || seen.has(cursor)) {
+    throw new Error("Linear API returned an invalid pagination cursor");
+  }
+  seen.add(cursor);
+  return cursor;
 }
 
 function text(value: unknown): string | undefined {

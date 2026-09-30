@@ -114,6 +114,8 @@ loops with Greptile until the review gate passes. The default gate is a final
 5/5 with no actionable findings and green checks. Nothing merges: a finished
 implementer leaves a pull request ready for your review. `maxParallel` caps
 how many implementers run at once, and the rest wait their turn.
+Prism does not move issues in Linear: completed items can keep matching until
+you change their state or label, but deduplication prevents another implementation.
 
 The poll run is durable and named after the config (`poll-<name>`), so
 `prism watch` follows it like any other run and shows what is being watched,
@@ -166,9 +168,16 @@ for the versioned machine-readable timing summary.
 Prism runs Codex, Git, GitHub CLI, Beads, and validation commands as you, with
 your network and credentials in its explicit trusted-local compatibility mode.
 The SDK also provides an isolated environment policy for production adapters.
-Only run trusted-local DAGs you trust. The same applies to poll sources:
-issue text reaches the implementer as task data, so keep `labelAppliedBy: me`
-unless you trust everyone who can label issues in the workspace.
+Only run trusted-local DAGs and poll configs you trust. A poll config can set
+validation commands and `source.apiUrl`; the latter receives your Linear token
+and defaults to `https://api.linear.app/graphql`. Only override it for an endpoint
+you control (such as a local test server).
+The label-applier check authorizes the trigger, not the issue's contents:
+descriptions, comments, and attachments from other workspace members also reach
+the implementer. Review that content before applying the trigger label, and keep
+`labelAppliedBy: me` unless you trust everyone who can label issues.
+`LINEAR_API_KEY` accepts a personal API key as shown above; for OAuth, provide the
+full `Bearer <access-token>` authorization value in the configured token variable.
 Greptile app selection is enforced through the Codex worker instructions; it
 is not a separate deterministic GitHub review adapter.
 See [SECURITY.md](SECURITY.md) for details.
