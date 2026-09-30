@@ -5,6 +5,8 @@ export interface WatchDashboardOptions {
   readonly rows?: number;
   readonly color?: boolean;
   readonly frame?: number;
+  /** Wall-clock time for relative ages in the poll panel. Default Date.now(). */
+  readonly nowMs?: number;
 }
 
 const RESET = "\u001B[0m";
@@ -73,10 +75,30 @@ export function renderWatchDashboard(
   const counts = countStates(inspection);
   const lines = renderHeader(inspection, counts, columns, color, frame);
   const workflows = extractBeadsWorkflows(graph);
+  const pollPanel = renderPollPanel(
+    graph,
+    inspection,
+    stateByNode,
+    columns,
+    color,
+    options.nowMs ?? Date.now(),
+  );
+  lines.push(...pollPanel);
 
   if (workflows.length > 0) {
     lines.push(
       ...renderBeadsDag(graph, workflows, stateByNode, columns, color),
+    );
+  } else if (pollPanel.length > 0) {
+    lines.push(
+      style(
+        truncate(
+          "◆ NO WORK ITEMS YET · matching items appear here as they are queued",
+          columns,
+        ),
+        DIM,
+        color,
+      ),
     );
   } else {
     lines.push(...renderGenericDag(graph, stateByNode, columns, color));
@@ -167,9 +189,13 @@ function extractBeadsWorkflows(graph: CompiledGraph): readonly BeadsWorkflow[] {
     const node = graph.nodes[nodeId];
     if (node?.executor !== "implement") continue;
     const workItem = objectValue(objectValue(node.config)?.["workItem"]);
+    // Any work-item provider with a frozen context snapshot gets a lane:
+    // Beads items, and items a poll node queued (Linear issues).
+    const provider = workItem?.["provider"];
     if (
-      workItem?.["provider"] !== "beads" ||
-      typeof workItem["id"] !== "string"
+      typeof provider !== "string" ||
+      provider === "prism" ||
+      typeof workItem?.["id"] !== "string"
     ) {
       continue;
     }
@@ -179,7 +205,7 @@ function extractBeadsWorkflows(graph: CompiledGraph): readonly BeadsWorkflow[] {
       const value = objectValue(
         objectValue(graph.nodes[dependencyId]?.config)?.["value"],
       );
-      return value?.["provider"] === "beads" && value["id"] === id;
+      return value?.["provider"] === provider && value["id"] === id;
     });
     const contextValue =
       contextNodeId === undefined
@@ -371,7 +397,11 @@ function renderBeadsDag(
       workflow.stages.map((stage) => stage.nodeId),
     ),
   );
-  if (!coveredNodes.has(graph.finalNode)) {
+  // A poll run's final node is the poller itself; the poll panel shows it.
+  if (
+    !coveredNodes.has(graph.finalNode) &&
+    graph.nodes[graph.finalNode]?.executor !== POLL_EXECUTOR
+  ) {
     const state = stateByNode.get(graph.finalNode) ?? "pending";
     const presentation = STATE_PRESENTATION[state];
     lines.push(
@@ -379,6 +409,124 @@ function renderBeadsDag(
     );
   }
   return lines;
+}
+
+const POLL_EXECUTOR = "poll";
+const POLL_PROPOSER_PREFIX = "poll:";
+const POLL_IMPLEMENT_RESOURCE = "poll-implement";
+
+/**
+ * Poll mode: what is being watched, how often, and where queued items
+ * stand. Items that finished their implementer passed the review gate and
+ * are waiting for a human, so they read as "ready for review".
+ */
+function renderPollPanel(
+  graph: CompiledGraph,
+  inspection: RunInspection,
+  stateByNode: ReadonlyMap<string, NodeState>,
+  columns: number,
+  color: boolean,
+  nowMs: number,
+): string[] {
+  const pollNodeId = graph.order.find(
+    (nodeId) => graph.nodes[nodeId]?.executor === POLL_EXECUTOR,
+  );
+  if (pollNodeId === undefined) return [];
+  const config = objectValue(graph.nodes[pollNodeId]?.config);
+  const source = objectValue(config?.["source"]);
+  const kind = typeof source?.["kind"] === "string" ? source["kind"] : "source";
+  const label =
+    typeof source?.["label"] === "string" ? ` · label ${source["label"]}` : "";
+  const intervalSeconds = config?.["intervalSeconds"];
+  const cadence =
+    typeof intervalSeconds === "number"
+      ? ` · every ${formatInterval(intervalSeconds)}`
+      : "";
+  const pollState = stateByNode.get(pollNodeId) ?? "pending";
+  const presentation = STATE_PRESENTATION[pollState];
+  const status = `${presentation.symbol} ${
+    pollState === "running" ? "POLLING" : pollState.toUpperCase()
+  }`;
+
+  const pollRevisions = (inspection.graphRevisions ?? []).filter((revision) =>
+    revision.proposal.proposer.startsWith(POLL_PROPOSER_PREFIX),
+  );
+  const accepted = pollRevisions.filter(
+    (revision) => revision.decision.status === "accepted",
+  );
+  const rejected = pollRevisions.length - accepted.length;
+  const implementStates = graph.order
+    .filter((nodeId) => {
+      const node = graph.nodes[nodeId];
+      return (
+        node?.executor === "implement" &&
+        node.resources.includes(POLL_IMPLEMENT_RESOURCE)
+      );
+    })
+    .map((nodeId) => stateByNode.get(nodeId) ?? "pending");
+  const tally = (states: readonly NodeState[]): number =>
+    implementStates.filter((state) => states.includes(state)).length;
+  const active = tally(["running", "cancelling"]);
+  const waiting = tally(["pending", "ready", "resource_wait", "retry_wait"]);
+  const ready = tally(["succeeded"]);
+  const attention = tally(["failed", "blocked", "cancelled"]);
+  const last = accepted.at(-1);
+  const lastKey = objectValue(last?.proposal.rationale)?.["key"];
+  const lastQueued =
+    last === undefined
+      ? ""
+      : ` · last queued ${typeof lastKey === "string" ? `${lastKey} ` : ""}${formatAge(nowMs - last.timestampMs)}`;
+  const summary = [
+    `${String(accepted.length)} queued`,
+    `${String(active)} active`,
+    `${String(waiting)} waiting`,
+    `${String(ready)} ready for review`,
+    ...(attention > 0 ? [`${String(attention)} need attention`] : []),
+    ...(rejected > 0 ? [`${String(rejected)} rejected`] : []),
+  ].join(" · ");
+
+  const brand = `◆ POLL · ${kind}`;
+  const titleFill = "─".repeat(
+    Math.max(1, columns - brand.length - status.length - 8),
+  );
+  const innerWidth = columns - 4;
+  const statusStyle =
+    pollState === "running"
+      ? MAGENTA
+      : pollState === "failed"
+        ? "\u001B[1;31m"
+        : YELLOW;
+  return [
+    style(`╭─ ${brand} ${titleFill} ${status} ─╮`, statusStyle, color),
+    panelRow(
+      truncate(`WATCHING ${kind}${label}${cadence}`, innerWidth),
+      columns,
+      color,
+      DIM,
+    ),
+    panelRow(
+      truncate(`${summary}${lastQueued}`, innerWidth),
+      columns,
+      color,
+      statusStyle,
+    ),
+    style(`╰${"─".repeat(columns - 2)}╯`, DIM, color),
+  ];
+}
+
+function formatInterval(seconds: number): string {
+  if (seconds % 3600 === 0) return `${String(seconds / 3600)}h`;
+  if (seconds % 60 === 0) return `${String(seconds / 60)}m`;
+  return `${String(seconds)}s`;
+}
+
+function formatAge(ms: number): string {
+  const minutes = Math.floor(Math.max(0, ms) / 60_000);
+  if (minutes < 1) return "just now";
+  if (minutes < 60) return `${String(minutes)}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 48) return `${String(hours)}h ago`;
+  return `${String(Math.floor(hours / 24))}d ago`;
 }
 
 function renderWorkflowLane(

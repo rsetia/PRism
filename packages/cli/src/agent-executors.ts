@@ -15,8 +15,11 @@ import {
   createFileLogBackend,
   createGitHubReconciler,
   createGitWorktreeProvisioner,
+  createLinearPollSource,
   createMergePrExecutor,
+  createPollExecutor,
   type AgentSessionBackend,
+  type PollSource,
   type CodexAppServerClient,
   TRUSTED_LOCAL_AGENT_EXECUTION_POLICY,
 } from "@rsetia/prism/node";
@@ -42,6 +45,13 @@ export interface AgentExecutorRegistryOptions {
   readonly codexBackend?: "exec" | "app-server";
   /** Selects a structured backend when embedding the CLI registry. */
   readonly sessionBackend?: AgentSessionBackend;
+  /** Operator-facing poll progress lines (stderr in the CLI). */
+  readonly pollLog?: (line: string) => void;
+}
+
+/** Every poll source the CLI knows. Linear is the first. */
+export function createPollSources(): readonly PollSource[] {
+  return [createLinearPollSource()];
 }
 
 export interface AgentExecutorRegistry extends ExecutorRegistry {
@@ -136,6 +146,12 @@ export function createAgentExecutorRegistry(
     // Kept for hand-authored graphs that only need deterministic PR merging.
     createMergePrExecutor({ cwd: repoDir }),
     createBeadsUpdateExecutor({ cwd: repoDir }),
+    // Registered for every command, not just `poll`: `prism resume` of a
+    // poll run must find the same executor or the run cannot recover.
+    createPollExecutor({
+      sources: createPollSources(),
+      ...(options.pollLog === undefined ? {} : { log: options.pollLog }),
+    }),
   ]);
   return Object.freeze({
     ...registry,
