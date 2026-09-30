@@ -206,3 +206,94 @@ describe("watch dashboard", () => {
     expect(output.split("\n").every((line) => line.length <= 100)).toBe(true);
   });
 });
+
+describe("poll mode dashboard", () => {
+  // Imported lazily so the Beads-only tests above do not depend on poll exports.
+  async function pollFixture(withItem: boolean) {
+    const { buildPollGraph, buildPollProposal, parsePollConfig } =
+      await import("@rsetia/prism/node");
+    const config = parsePollConfig({
+      name: "tickets",
+      intervalSeconds: 300,
+      source: { kind: "linear", label: "agent-implemented" },
+    });
+    const definition = buildPollGraph(config);
+    const proposal = buildPollProposal(
+      config,
+      {
+        key: "ENG-2142",
+        title: "Add namespace-scoped routing",
+        snapshot: { description: "Do it" },
+      },
+      "poll",
+    );
+    const parsed = parseGraph({
+      ...definition,
+      nodes: { ...definition.nodes, ...(withItem ? proposal.nodes : {}) },
+    });
+    if (!parsed.ok) throw new Error("poll fixture did not parse");
+    const compiled = compileGraph(parsed.graph);
+    if (!compiled.ok) throw new Error("poll fixture did not compile");
+    const inspection: RunInspection = {
+      runId: "poll-tickets",
+      finished: false,
+      nodes: compiled.graph.order.map((nodeId) => ({
+        nodeId,
+        state:
+          nodeId === "poll" || nodeId.startsWith("implement-")
+            ? ("running" as const)
+            : ("succeeded" as const),
+        timing: null,
+        evidence: null,
+      })),
+      failures: [],
+      graphRevisions: withItem
+        ? [
+            {
+              sequence: 0,
+              graphRevision: 1,
+              timestampMs: 1_000,
+              proposal,
+              decision: { status: "accepted", policy: "poll" },
+              addedNodeIds: Object.keys(proposal.nodes),
+            },
+          ]
+        : [],
+      timing: null,
+    };
+    return { graph: compiled.graph, inspection };
+  }
+
+  test("shows what is watched and where queued items stand", async () => {
+    const { graph, inspection } = await pollFixture(true);
+    const output = renderWatchDashboard(graph, inspection, {
+      columns: 120,
+      color: false,
+      nowMs: 1_000 + 12 * 60_000,
+    });
+    expect(output).toContain("◆ POLL · linear");
+    expect(output).toContain("▶ POLLING");
+    expect(output).toContain(
+      "WATCHING linear · label agent-implemented · every 5m",
+    );
+    expect(output).toContain(
+      "1 queued · 1 active · 0 waiting · 0 ready for review · last queued ENG-2142 12m ago",
+    );
+    expect(output).toContain("Add namespace-scoped routing");
+    expect(output).not.toContain("FINAL GATE");
+  });
+
+  test("says so while nothing has matched yet", async () => {
+    const { graph, inspection } = await pollFixture(false);
+    const output = renderWatchDashboard(graph, inspection, {
+      columns: 100,
+      color: false,
+      nowMs: 0,
+    });
+    expect(output).toContain(
+      "0 queued · 0 active · 0 waiting · 0 ready for review",
+    );
+    expect(output).toContain("NO WORK ITEMS YET");
+    expect(output).not.toContain("EXECUTION DAG");
+  });
+});

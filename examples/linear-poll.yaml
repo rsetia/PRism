@@ -1,0 +1,34 @@
+# prism poll examples/linear-poll.yaml
+#
+# Implements every Linear issue that carries the trigger label, is assigned
+# to you, and had the label applied by you. Each issue gets its own
+# implementer that loops with Greptile until the review gate passes, then
+# stops with an open pull request for you to review and merge.
+version: 1
+name: agent-implemented # the durable run is poll-agent-implemented
+intervalSeconds: 300
+maxParallel: 3
+
+source:
+  kind: linear
+  label: agent-implemented
+  # labelAppliedBy: me       # default; "anyone" trusts teammates' labels
+  # assignee: me             # default; "anyone" drops the assignee filter
+  # team: ENG                # optional team key
+  # states: [backlog, unstarted]
+  # skipBlocked: true        # skip issues with an unfinished "blocked by"
+  # tokenEnv: LINEAR_API_KEY # default: LINEAR_API_KEY, then LINEAR_TOKEN
+
+implement:
+  targetBranch: main
+  # useSourceBranchName: true  # Linear's suggested branch links the PR
+  # branchPrefix: prism/       # used when Linear has no branch name
+  validationCommands:
+    - npm test
+  maxIterations: 8
+  review:
+    by: greptile
+    minConfidenceScore: 5
+    requireNoActionableFindings: true
+    requireGreenChecks: true
+    # greptileAppSlug: greptile-apps

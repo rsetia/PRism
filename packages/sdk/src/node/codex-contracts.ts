@@ -327,6 +327,7 @@ Work item:
 - Generated Beads graphs put the full snapshotted bead record first: spec.input is that record for an independent bead, or [beadRecord, ...upstreamResults] when it has dependencies.
 - Do not require a GitHub issue number unless config.workItem.provider is "github".
 - When the provider is "beads", create or update the PR body from the snapshotted Beads context in spec.input. Include the bead id, title, description, acceptance criteria when present, dependencies, validation plan, and its beads:// URL.
+- When the provider is "linear", spec.input is a snapshot of the Linear issue taken when it was queued: its description, comments, relations, and attachments are the task specification. Build the PR body from that snapshot with the issue identifier, title, URL, and acceptance criteria when present, and include "Fixes <identifier>" so Linear links the pull request. Implement what the snapshot specifies; interface names, schemas, and contracts it states are requirements, not suggestions.
 
 Implementation and pull request:
 - Make only changes needed for this work item.
@@ -658,6 +659,7 @@ function implementGateInstructions(review: ReviewConfig): string {
           : "Do not accept a Greptile confidence score below the configured minimum.";
       return `- Use Greptile as the review gate. Read current-head summary comments containing "Confidence Score: N/5", inline review comments, and Greptile-generated test or issue comments.${appFilter}
 - Use the latest substantive Greptile response that applies to the current head. Require a confidence score of at least ${String(minimum)}/5 from that response and apply current-head actionable-finding and check requirements; never reuse a score from an older head.${criteriaInstruction}
+- Only a final score counts. Greptile can post a provisional score while deeper checks still run and rewrite it in place later: a score marked "(tentative)", "pending", or "failed", or a summary whose raw body still contains a greptile_trex_pending_review marker, is a review in progress, not a verdict. Keep waiting until the summary is final. When the raw body carries a hidden greptile_confidence_score:N marker, read the score from the last such marker, and confirm the summary's "Last reviewed commit" link names the current head.
 - Post ${quote(trigger)} after a new head needs review, then wait for Greptile feedback on that head.
 - ${confidenceFour}`;
     }

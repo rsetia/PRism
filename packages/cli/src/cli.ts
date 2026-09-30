@@ -34,9 +34,21 @@ import type {
   RunOutcome,
   RunStore,
 } from "@rsetia/prism";
-import { createFileLogBackend, createSqliteStore } from "@rsetia/prism/node";
+import {
+  buildPollGraph,
+  createFileLogBackend,
+  createSqliteStore,
+  parsePollConfig,
+  POLL_EXECUTOR,
+  POLL_NODE_ID,
+  pollConfigToJson,
+  pollGraphProposalPolicy,
+  pollRunId,
+} from "@rsetia/prism/node";
+import type { PollConfig } from "@rsetia/prism/node";
 import {
   createAgentExecutorRegistry,
+  createPollSources,
   DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_REASONING_EFFORT,
 } from "./agent-executors.js";
@@ -105,6 +117,12 @@ Commands:
              [--codex-reasoning-effort <level>] [--codex-backend exec|app-server]
              [--greptile-app-slug <slug>]
                                       Execute the graph
+  poll <config> [--json] [--store <db>] [--run-id <id>] [--repo <path>]
+              [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
+              [--codex-reasoning-effort <level>] [--codex-backend exec|app-server]
+                                      Watch a source (Linear) and implement every
+                                      newly matching item; restarting resumes the
+                                      same poll run (default id poll-<name>)
   inspect <run-id> [--store <db>] [--json]
                                       Show a persisted run's node states
   events <run-id> [--store <db>] [--json]
@@ -151,6 +169,16 @@ interface RunInvocation {
   readonly store: string | undefined;
   readonly runId: string | undefined;
   readonly greptileAppSlug: string | undefined;
+  readonly agent: AgentInvocationOptions;
+}
+interface PollInvocation {
+  readonly command: "poll";
+  readonly file: string;
+  readonly json: boolean;
+  readonly store: string | undefined;
+  readonly runId: string | undefined;
+  /** Whether --max-concurrency was passed; otherwise the config decides. */
+  readonly maxConcurrencyExplicit: boolean;
   readonly agent: AgentInvocationOptions;
 }
 interface BeadsDagInvocation {
@@ -248,6 +276,7 @@ type Invocation =
   | GraphInvocation
   | BeadsDagInvocation
   | RunInvocation
+  | PollInvocation
   | ReadInvocation
   | LogsInvocation
   | StatusInvocation
@@ -441,6 +470,27 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
           agent,
         };
       }
+    case "poll": {
+      if (
+        count !== 1 ||
+        first === undefined ||
+        flags.interval !== undefined ||
+        flags.greptileAppSlug !== undefined
+      ) {
+        return undefined;
+      }
+      const agent = parseAgentOptions(flags);
+      if (agent === undefined) return undefined;
+      return {
+        command,
+        file: first,
+        json: flags.json,
+        store: flags.store,
+        runId: flags.runId,
+        maxConcurrencyExplicit: flags.maxConcurrency !== undefined,
+        agent,
+      };
+    }
     case "inspect":
     case "events":
       if (
@@ -1136,6 +1186,7 @@ async function runGraph(
       store,
       registry: agentRegistry,
       maxConcurrency: invocation.agent.maxConcurrency,
+      graphProposalPolicy: pollGraphProposalPolicy,
     });
     const runId =
       invocation.runId ?? (durable ? `run-${randomUUID()}` : undefined);
@@ -1555,6 +1606,7 @@ async function resumeCommand(
       store,
       registry: agentRegistry,
       maxConcurrency: invocation.agent.maxConcurrency,
+      graphProposalPolicy: pollGraphProposalPolicy,
     });
     const handle = engine.resume(invocation.runId);
     io.stderr(`resume ${handle.id}`);
@@ -1562,6 +1614,247 @@ async function resumeCommand(
     return reportOutcome(outcome, invocation.json, io);
   } catch (error: unknown) {
     io.stderr(`cannot resume "${invocation.runId}": ${describeError(error)}`);
+    return EXIT_USAGE;
+  } finally {
+    await agentRegistry?.close();
+    await store?.close?.();
+  }
+}
+
+function agentRegistryFor(
+  agent: AgentInvocationOptions,
+  pollLog?: (line: string) => void,
+): ReturnType<typeof createAgentExecutorRegistry> {
+  return createAgentExecutorRegistry({
+    ...(agent.repo === undefined ? {} : { repoDir: agent.repo }),
+    ...(agent.worktreeDir === undefined
+      ? {}
+      : { worktreeBaseDir: agent.worktreeDir }),
+    ...(agent.codexCommand === undefined
+      ? {}
+      : { codexCommand: agent.codexCommand }),
+    ...(agent.codexModel === undefined ? {} : { codexModel: agent.codexModel }),
+    ...(agent.codexReasoningEffort === undefined
+      ? {}
+      : { codexReasoningEffort: agent.codexReasoningEffort }),
+    codexBackend: agent.codexBackend,
+    ...(pollLog === undefined ? {} : { pollLog }),
+  });
+}
+
+async function readConfigFile(file: string): Promise<unknown> {
+  const source = await readFile(file, "utf8");
+  const extension = extname(file).toLowerCase();
+  return extension === ".yaml" || extension === ".yml"
+    ? (parseYaml(source) as unknown)
+    : (JSON.parse(source) as unknown);
+}
+
+const DEFAULT_POLL_LEASE_DURATION_MS = 30_000;
+
+/**
+ * Lease length for poll runs. It is also the crash-recovery window: after a
+ * poller is killed, a restart waits for its leases to lapse. Overridable so
+ * tests (and impatient operators) can shorten that window.
+ */
+function pollLeaseDurationMs(): number {
+  const raw = process.env["PRISM_LEASE_DURATION_MS"];
+  const parsed = raw === undefined ? Number.NaN : Number(raw);
+  return Number.isSafeInteger(parsed) && parsed >= 500
+    ? parsed
+    : DEFAULT_POLL_LEASE_DURATION_MS;
+}
+
+/**
+ * A killed poller leaves its coordinator and node leases behind until they
+ * expire. Wait them out so a restart resumes instead of failing with a lease
+ * conflict, but refuse when the leases keep getting renewed: that is a live
+ * poller, and two coordinators must never share a run.
+ */
+async function waitForAbandonedLeases(
+  store: RunStore,
+  runId: string,
+  leaseDurationMs: number,
+  io: CliIo,
+): Promise<boolean> {
+  let leases = await store.getRunLeases(runId);
+  if (leases.length === 0) return true;
+  const horizonOf = (current: typeof leases): number =>
+    Math.max(...current.map((lease) => lease.expiresAtMs));
+  let horizon = horizonOf(leases);
+  io.stderr(
+    `waiting up to ${String(Math.max(1, Math.ceil((horizon - Date.now()) / 1_000)))}s for the previous poller's leases on "${runId}" to expire`,
+  );
+  while (true) {
+    await new Promise((resolveWait) =>
+      setTimeout(
+        resolveWait,
+        Math.min(1_000, Math.max(100, leaseDurationMs / 4)),
+      ),
+    );
+    leases = await store.getRunLeases(runId);
+    if (leases.length === 0) return true;
+    const next = horizonOf(leases);
+    if (next > horizon) {
+      io.stderr(
+        `poll run "${runId}" is owned by a running process (its leases are being renewed); stop that prism poll first`,
+      );
+      return false;
+    }
+    horizon = next;
+  }
+}
+
+/** Key-order-independent JSON, so reordering a config file is not drift. */
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableStringify).join(",")}]`;
+  }
+  if (typeof value === "object" && value !== null) {
+    const entries = Object.entries(value as Record<string, unknown>)
+      .filter(([, entry]) => entry !== undefined)
+      .sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
+    return `{${entries
+      .map(([key, entry]) => `${JSON.stringify(key)}:${stableStringify(entry)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+/**
+ * `prism poll <config>`: one durable run per poll config. The first start
+ * creates `poll-<name>` with a single poll node; every later start resumes
+ * that run, so a restarted poller keeps everything it already queued and
+ * re-enters interrupted implementers through the normal resume path.
+ */
+async function pollCommand(
+  invocation: PollInvocation,
+  io: CliIo,
+): Promise<number> {
+  let config: PollConfig;
+  try {
+    config = parsePollConfig(await readConfigFile(invocation.file));
+  } catch (error: unknown) {
+    io.stderr(
+      `invalid poll config "${invocation.file}": ${describeError(error)}`,
+    );
+    return EXIT_USAGE;
+  }
+  const source = createPollSources().find(
+    (candidate) => candidate.kind === config.source.kind,
+  );
+  if (source === undefined) {
+    io.stderr(
+      `invalid poll config "${invocation.file}": unknown source "${config.source.kind}" (available: ${createPollSources()
+        .map((candidate) => candidate.kind)
+        .join(", ")})`,
+    );
+    return EXIT_USAGE;
+  }
+  try {
+    source.validateConfig(config.source);
+  } catch (error: unknown) {
+    io.stderr(
+      `invalid poll config "${invocation.file}": ${describeError(error)}`,
+    );
+    return EXIT_USAGE;
+  }
+  try {
+    const projectPaths = resolvePrismProjectPaths(invocation.agent.repo);
+    if (projectPaths.prismHome === undefined) {
+      throw new Error(executionPrismHomeMessage());
+    }
+  } catch (error: unknown) {
+    io.stderr(`cannot resolve project paths: ${describeError(error)}`);
+    return EXIT_USAGE;
+  }
+  if (source.preflight !== undefined) {
+    try {
+      io.stderr(await source.preflight(config.source));
+    } catch (error: unknown) {
+      io.stderr(`cannot reach ${source.kind}: ${describeError(error)}`);
+      return EXIT_USAGE;
+    }
+  }
+
+  const runId = invocation.runId ?? pollRunId(config);
+  let store: RunStore | undefined;
+  let agentRegistry: ReturnType<typeof createAgentExecutorRegistry> | undefined;
+  try {
+    store = await openPersistentStore(invocation.store, invocation.agent.repo);
+    const existing = await store.getRun(runId);
+    let effective = config;
+    if (existing !== undefined) {
+      const pollNode = existing.graph.nodes[POLL_NODE_ID];
+      if (pollNode === undefined || pollNode.executor !== POLL_EXECUTOR) {
+        io.stderr(`run "${runId}" is not a poll run; choose another --run-id`);
+        return EXIT_USAGE;
+      }
+      if (existing.finished) {
+        io.stderr(
+          `poll run "${runId}" already finished (${existing.outcome.status}); start a new one with --run-id <id>`,
+        );
+        return EXIT_USAGE;
+      }
+      effective = parsePollConfig(pollNode.config);
+      if (
+        stableStringify(pollNode.config) !==
+        stableStringify(pollConfigToJson(config))
+      ) {
+        io.stderr(
+          `warning: "${invocation.file}" differs from the config stored in poll run "${runId}"; resuming with the stored config. Start a new poll run with --run-id <id> to apply the change.`,
+        );
+      }
+    }
+
+    const leaseDurationMs = pollLeaseDurationMs();
+    if (
+      existing !== undefined &&
+      !(await waitForAbandonedLeases(store, runId, leaseDurationMs, io))
+    ) {
+      return EXIT_USAGE;
+    }
+
+    agentRegistry = agentRegistryFor(invocation.agent, (line) => {
+      io.stderr(`${new Date().toISOString()} ${line}`);
+    });
+    const engine = createEngine({
+      store,
+      registry: agentRegistry,
+      leaseDurationMs,
+      // The poll node and a context snapshot hold slots of their own; the
+      // semaphore in the graph is what caps implementers.
+      maxConcurrency: invocation.maxConcurrencyExplicit
+        ? invocation.agent.maxConcurrency
+        : effective.maxParallel + 2,
+      graphProposalPolicy: pollGraphProposalPolicy,
+    });
+
+    let handle: ReturnType<typeof engine.run>;
+    if (existing === undefined) {
+      const parsed = parseGraph(buildPollGraph(effective));
+      if (!parsed.ok) {
+        reportGraphErrors(parsed.errors, io);
+        return EXIT_INTERNAL;
+      }
+      const compiled = compileGraph(parsed.graph);
+      if (!compiled.ok) {
+        reportGraphErrors(compiled.errors, io);
+        return EXIT_INTERNAL;
+      }
+      handle = engine.run(compiled.graph, { runId });
+      io.stderr(`run ${handle.id}`);
+    } else {
+      handle = engine.resume(runId);
+      io.stderr(`resume ${handle.id}`);
+    }
+    io.stderr(
+      `polling ${effective.source.kind} every ${String(effective.intervalSeconds)}s with up to ${String(effective.maxParallel)} implementers; follow with: prism watch ${runId}`,
+    );
+    const outcome = await handle.result;
+    return reportOutcome(outcome, invocation.json, io);
+  } catch (error: unknown) {
+    io.stderr(`cannot poll "${runId}": ${describeError(error)}`);
     return EXIT_USAGE;
   } finally {
     await agentRegistry?.close();
@@ -1707,7 +2000,10 @@ async function watchCommand(
       intervalMs: invocation.intervalMs,
     })) {
       if (io.interactive === true && !invocation.json) {
-        const dashboard = renderWatchDashboard(run.graph, inspection, {
+        // Poll runs (and any run with accepted proposals) grow while they
+        // are watched, so render the current snapshot, not the first one.
+        const graph = (await store.getRun(resolvedRunId))?.graph ?? run.graph;
+        const dashboard = renderWatchDashboard(graph, inspection, {
           ...(io.columns === undefined ? {} : { columns: io.columns }),
           ...(io.rows === undefined ? {} : { rows: io.rows }),
           ...(io.color === undefined ? {} : { color: io.color }),
@@ -1938,6 +2234,9 @@ export async function runCli(
 
     case "resume":
       return resumeCommand(invocation, io);
+
+    case "poll":
+      return pollCommand(invocation, io);
 
     case "abort":
       return abortCommand(invocation, io);

@@ -90,6 +90,50 @@ prism logs
 That is the complete workflow. Prism uses the current Git repository, creates
 a run ID automatically, and runs up to four ready tasks in parallel.
 
+## Poll
+
+Instead of a planned DAG, Prism can watch a source and implement work as it
+appears. Linear is the first source:
+
+```sh
+export LINEAR_API_KEY=lin_api_...   # https://linear.app/settings/account/security
+prism poll examples/linear-poll.yaml
+```
+
+Every `intervalSeconds`, the poller asks Linear for issues that match the
+config: the trigger label, a backlog or unstarted state, assigned to you, and
+the label applied by you. Anyone in a workspace can add a label, and
+implementers run with your credentials, so by default a label a teammate
+applied is skipped and logged. Issues blocked by unfinished work wait until
+the blocker closes.
+
+Each newly matching issue is queued once. Prism snapshots the issue, with its
+description, comments, relations, and attachments, into a context node. It
+then adds an `implement` node that works on Linear's suggested branch and
+loops with Greptile until the review gate passes. The default gate is a final
+5/5 with no actionable findings and green checks. Nothing merges: a finished
+implementer leaves a pull request ready for your review. `maxParallel` caps
+how many implementers run at once, and the rest wait their turn.
+Prism does not move issues in Linear: completed items can keep matching until
+you change their state or label, but deduplication prevents another implementation.
+
+The poll run is durable and named after the config (`poll-<name>`), so
+`prism watch` follows it like any other run and shows what is being watched,
+how often, and where each queued issue stands. Stopping the poller and
+starting it again resumes the same run: queued issues are not queued twice,
+and interrupted implementers pick up their existing branch and pull request.
+A restart right after a crash waits for the old poller's leases to lapse,
+about 30 seconds. Editing the config does not change a running poll; start a
+new one with `--run-id` to apply it.
+
+A failed item stays failed until you retry it. Stop the poller, reset the
+item's implementer, and start the poller again:
+
+```sh
+prism signal poll-agent-implemented implement-linear-eng-2142
+prism poll examples/linear-poll.yaml
+```
+
 ## Data
 
 Prism keeps each project's data under `PRISM_HOME`:
@@ -124,7 +168,16 @@ for the versioned machine-readable timing summary.
 Prism runs Codex, Git, GitHub CLI, Beads, and validation commands as you, with
 your network and credentials in its explicit trusted-local compatibility mode.
 The SDK also provides an isolated environment policy for production adapters.
-Only run trusted-local DAGs you trust.
+Only run trusted-local DAGs and poll configs you trust. A poll config can set
+validation commands and `source.apiUrl`; the latter receives your Linear token
+and defaults to `https://api.linear.app/graphql`. Only override it for an endpoint
+you control (such as a local test server).
+The label-applier check authorizes the trigger, not the issue's contents:
+descriptions, comments, and attachments from other workspace members also reach
+the implementer. Review that content before applying the trigger label, and keep
+`labelAppliedBy: me` unless you trust everyone who can label issues.
+`LINEAR_API_KEY` accepts a personal API key as shown above; for OAuth, provide the
+full `Bearer <access-token>` authorization value in the configured token variable.
 Greptile app selection is enforced through the Codex worker instructions; it
 is not a separate deterministic GitHub review adapter.
 See [SECURITY.md](SECURITY.md) for details.
