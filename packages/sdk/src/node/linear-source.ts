@@ -43,6 +43,9 @@ const SOURCE_KEYS: ReadonlySet<string> = new Set([
   "apiUrl",
 ]);
 const PAGE_SIZE = 50;
+// Nested connections multiply query cost. Keep the candidate query below
+// Linear's 10,000-point limit while retaining full cursor pagination.
+const CANDIDATE_PAGE_SIZE = 20;
 
 export interface LinearSourceConfig {
   readonly label: string;
@@ -157,7 +160,7 @@ function connectionSelection(name: IssueConnection, after = false): string {
 
 const CANDIDATES_QUERY = `query PrismPollCandidates($filter: IssueFilter, $after: String) {
   viewer { id }
-  issues(first: ${String(PAGE_SIZE)}, after: $after, filter: $filter, orderBy: createdAt) {
+  issues(first: ${String(CANDIDATE_PAGE_SIZE)}, after: $after, filter: $filter, orderBy: createdAt) {
     pageInfo { hasNextPage endCursor }
     nodes {
       id identifier title url
