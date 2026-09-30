@@ -259,10 +259,9 @@ describe("prism poll", { timeout: 60_000 }, () => {
       () => resumed.stderr.includes("0 matching, 0 newly queued"),
       () => resumed.stderr,
     );
+    // Whether the restart had to wait out the killed poller's leases depends
+    // on how long this child took to start, so only the resume is asserted.
     expect(resumed.stderr).toMatch(/^resume poll-tickets$/mu);
-    expect(resumed.stderr).toContain(
-      'for the previous poller\'s leases on "poll-tickets" to expire',
-    );
     expect(resumed.stderr).not.toContain("warning:");
     await stop(resumed);
 
