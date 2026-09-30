@@ -189,6 +189,146 @@ describe("audited graph expansion", () => {
     expect(seen).toEqual(["follow"]);
   });
 
+  test("dispatches accepted work while its proposer is still running", async () => {
+    // A long-lived proposer (a poller) never settles on its own. The
+    // scheduler must wake for the accepted expansion instead of waiting for
+    // some unrelated node to finish.
+    const store = createMemoryStore();
+    let releaseProposer: () => void = () => undefined;
+    const followFinished = new Promise<void>((resolve) => {
+      releaseProposer = resolve;
+    });
+    const order: string[] = [];
+    const registry = createExecutorRegistry([
+      {
+        name: "proposer",
+        async execute(context) {
+          const result = await context.submitGraphProposal?.({
+            id: "while-running",
+            proposer: context.nodeId,
+            nodes: { follow: { executor: "follow", dependsOn: [] } },
+          });
+          order.push(`proposal ${result?.status ?? "missing"}`);
+          await followFinished;
+          order.push("proposer done");
+          return { status: "succeeded", output: "polled" } as const;
+        },
+      },
+      {
+        name: "follow",
+        execute() {
+          order.push("follow");
+          releaseProposer();
+          return { status: "succeeded", output: "done" } as const;
+        },
+      },
+    ]);
+    const parsed = parseGraph({
+      version: 1,
+      nodes: { start: { executor: "proposer" } },
+      finalNode: "start",
+    });
+    if (!parsed.ok) throw new Error("fixture parse failed");
+    const compiled = compileGraph(parsed.graph);
+    if (!compiled.ok) throw new Error("fixture compile failed");
+
+    const result = createEngine({
+      store,
+      registry,
+      maxConcurrency: 2,
+      graphProposalPolicy: () => ({ status: "accepted", policy: "test" }),
+    }).run(compiled.graph, { runId: "live-expansion" }).result;
+    const deadlock = new Promise<"deadlock">((resolve) => {
+      setTimeout(resolve, 4_000, "deadlock");
+    });
+
+    const outcome = await Promise.race([result, deadlock]);
+    expect(outcome).toEqual({ status: "succeeded", output: "polled" });
+    expect(order).toEqual(["proposal accepted", "follow", "proposer done"]);
+    const inspection = await inspectRun(store, "live-expansion");
+    expect(
+      Object.fromEntries(
+        inspection.nodes.map((node) => [node.nodeId, node.state]),
+      ),
+    ).toEqual({ start: "succeeded", follow: "succeeded" });
+  });
+
+  test("replaying an accepted proposal keeps later expansions scheduled", async () => {
+    // On resume a poller re-submits every item it already queued. Each replay
+    // returns the historical revision; adopting that revision's graph would
+    // strand everything accepted after it.
+    const store = createMemoryStore();
+    let releaseOne: () => void = () => undefined;
+    const replayed = new Promise<void>((resolve) => {
+      releaseOne = resolve;
+    });
+    let releaseProposer: () => void = () => undefined;
+    const twoFinished = new Promise<void>((resolve) => {
+      releaseProposer = resolve;
+    });
+    const registry = createExecutorRegistry([
+      {
+        name: "proposer",
+        async execute(context) {
+          const first = {
+            id: "first",
+            proposer: context.nodeId,
+            nodes: { one: { executor: "one", dependsOn: [] } },
+          };
+          await context.submitGraphProposal?.(first);
+          await context.submitGraphProposal?.({
+            id: "second",
+            proposer: context.nodeId,
+            nodes: { two: { executor: "two", dependsOn: ["one"] } },
+          });
+          const replay = await context.submitGraphProposal?.(first);
+          expect(replay?.status).toBe("accepted");
+          releaseOne();
+          await twoFinished;
+          return { status: "succeeded", output: "polled" } as const;
+        },
+      },
+      {
+        name: "one",
+        async execute() {
+          await replayed;
+          return { status: "succeeded", output: 1 } as const;
+        },
+      },
+      {
+        name: "two",
+        execute() {
+          releaseProposer();
+          return { status: "succeeded", output: 2 } as const;
+        },
+      },
+    ]);
+    const parsed = parseGraph({
+      version: 1,
+      nodes: { start: { executor: "proposer" } },
+      finalNode: "start",
+    });
+    if (!parsed.ok) throw new Error("fixture parse failed");
+    const compiled = compileGraph(parsed.graph);
+    if (!compiled.ok) throw new Error("fixture compile failed");
+
+    const result = createEngine({
+      store,
+      registry,
+      maxConcurrency: 3,
+      graphProposalPolicy: () => ({ status: "accepted", policy: "test" }),
+    }).run(compiled.graph, { runId: "replay" }).result;
+    const deadlock = new Promise<"deadlock">((resolve) => {
+      setTimeout(resolve, 4_000, "deadlock");
+    });
+
+    expect(await Promise.race([result, deadlock])).toEqual({
+      status: "succeeded",
+      output: "polled",
+    });
+    expect(await store.listGraphRevisions?.("replay")).toHaveLength(2);
+  });
+
   test("durably rejects a proposal with invalid executor config", async () => {
     const store = createMemoryStore();
     let proposalStatus: string | undefined;

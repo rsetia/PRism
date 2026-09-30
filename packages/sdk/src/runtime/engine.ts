@@ -138,12 +138,22 @@ interface RetryCancelled {
   readonly nodeId: string;
 }
 
+/**
+ * An accepted proposal added nodes while other nodes were still running.
+ * Without this wake-up the scheduler would sit in Promise.race until some
+ * unrelated node settled, which a long-lived proposer (a poller) may never do.
+ */
+interface GraphExpanded {
+  readonly kind: "graph_expanded";
+}
+
 type SchedulerEvent =
   | NodeCompletion
   | CancellationRequest
   | CancellationTimeout
   | RetryReady
-  | RetryCancelled;
+  | RetryCancelled
+  | GraphExpanded;
 
 function nodeLeaseFailure(nodeId: string, error: unknown): NodeCompletion {
   return {
@@ -730,6 +740,15 @@ async function executeRun(
   let appendTail = Promise.resolve();
   let currentCoordinatorLease = coordinatorLease;
   let coordinatorRenewalTail = Promise.resolve();
+  let signalGraphExpanded: () => void = () => undefined;
+  function nextGraphExpansion(): Promise<GraphExpanded> {
+    return new Promise((resolveExpansion) => {
+      signalGraphExpanded = () => {
+        resolveExpansion({ kind: "graph_expanded" });
+      };
+    });
+  }
+  let graphExpansion = nextGraphExpansion();
   let coordinatorRenewalFailure: Error | undefined;
 
   function renewCoordinatorLease(): Promise<void> {
@@ -799,7 +818,12 @@ async function executeRun(
       currentCoordinatorLease,
     );
     if (result.status === "accepted" && result.revision.graph !== undefined) {
-      graph = result.revision.graph;
+      // Adopt the store's current snapshot, not the revision's. Re-submitting
+      // an already-accepted proposal id returns that historical revision,
+      // whose graph predates every later expansion; adopting it would drop
+      // the later nodes from scheduling. Revisions are append-only, so the
+      // stored graph always contains everything accepted so far.
+      graph = (await store.getRun(runId))?.graph ?? result.revision.graph;
       for (const nodeId of graph.order) {
         if (!states.has(nodeId)) {
           states.set(nodeId, "pending");
@@ -811,6 +835,7 @@ async function executeRun(
           executors.set(nodeId, executor);
         }
       }
+      signalGraphExpanded();
     }
     return result;
   }
@@ -1290,18 +1315,31 @@ async function executeRun(
         break;
       }
 
-      const candidates = [...inFlight.values()];
+      const candidates: Promise<SchedulerEvent>[] = [...inFlight.values()];
       if (!cancellationObserved) {
         candidates.push(cancellation.requested);
       }
       if (candidates.length === 0) {
         break;
       }
+      if (!cancellation.isRequested()) {
+        candidates.push(graphExpansion);
+      }
 
       const schedulerEvent = await Promise.race(candidates);
       if (schedulerEvent.kind === "cancellation_requested") {
         cancellationObserved = true;
         cancellationAccepted = await acceptCancellation(schedulerEvent);
+        continue;
+      }
+      if (schedulerEvent.kind === "graph_expanded") {
+        // Promote here, inside the scheduler loop, rather than from the
+        // proposer's call stack: promotion and dispatch must never race a
+        // concurrent settlement's own promotion.
+        graphExpansion = nextGraphExpansion();
+        await propagateBlockedNodes();
+        await skipUnmatchedNodes();
+        await promoteReadyNodes();
         continue;
       }
 
