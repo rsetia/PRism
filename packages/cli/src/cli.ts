@@ -163,9 +163,11 @@ Commands:
                                       re-runs the node itself; otherwise it is
                                       applied offline for a later resume
   rerun-node <run-id> <node-id> [--store <db>] [--json] [--timeout <ms>]
-                                      Reset a node and its downstream; a live
-                                      run re-runs them in place, otherwise
-                                      resume re-runs them
+                                      Reset a node and its downstream. A live
+                                      run re-runs them in place (resetting only
+                                      failed/blocked/cancelled/skipped
+                                      dependents); otherwise every dependent,
+                                      even succeeded ones, is reset for resume
 
 Defaults:
   Repository                            Current git repository

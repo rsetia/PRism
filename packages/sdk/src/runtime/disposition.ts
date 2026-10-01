@@ -27,10 +27,12 @@ export interface FailureDescription {
 
 /**
  * Language a worker uses when it stops on a blocker rather than failing the
- * work. Matched only against worker-declared (adjudicated) failures.
+ * work. Deliberately phrase-based: a bare "blocked" ("push blocked by a git
+ * lock", "port blocked") is infrastructure, not a request for input.
+ * Matched only against worker-declared (adjudicated) failures.
  */
 const DECLARED_BLOCKER =
-  /\b(?:blocked|blocker|needs? (?:operator|owner|human|user|your) (?:input|decision|approval)|awaiting (?:operator|owner|human|user) (?:input|decision|approval)|clarification (?:request|needed|required))\b/iu;
+  /\b(?:remains? blocked|(?:is|am|are|was|were|stays?|still) blocked (?:on|by|pending|until)|blocked pending|blocker:|contract gaps?|needs? (?:operator|owner|human|user|your) (?:input|decision|approval|clarification)|awaiting (?:operator|owner|human|user) (?:input|decision|approval)|clarification (?:request|needed|required))/iu;
 
 /** Whether a worker's error text declares a blocker needing an operator. */
 export function isDeclaredBlocker(error: string): boolean {
@@ -38,16 +40,30 @@ export function isDeclaredBlocker(error: string): boolean {
 }
 
 /**
+ * Classes a declared-blocker phrase may override at recording time: a
+ * worker that gives no class, or calls a stop on a blocker "semantic", is
+ * really waiting on an operator. Explicit infrastructure, timeout,
+ * validation and other classes are never overridden.
+ */
+const BLOCKER_OVERRIDABLE: ReadonlySet<FailureClass | undefined> = new Set<
+  FailureClass | undefined
+>([undefined, "semantic_failed"]);
+
+/**
  * The failure class to RECORD for a worker-declared failure: `needs_input`
- * when the worker said so or its error declares a blocker; otherwise the
- * worker's own class, unchanged.
+ * when the worker said so, or when its error declares a blocker and its
+ * class is absent or `semantic_failed`; otherwise the worker's own class.
  */
 export function classifyWorkerFailure(worker: {
   readonly error?: string;
   readonly failureClass?: FailureClass;
 }): FailureClass | undefined {
   if (worker.failureClass === "needs_input") return "needs_input";
-  if (worker.error !== undefined && isDeclaredBlocker(worker.error)) {
+  if (
+    BLOCKER_OVERRIDABLE.has(worker.failureClass) &&
+    worker.error !== undefined &&
+    isDeclaredBlocker(worker.error)
+  ) {
     return "needs_input";
   }
   return worker.failureClass;
@@ -57,7 +73,9 @@ export function failureDisposition(failure: NodeFailure): FailureDisposition {
   if (failure.failureClass === "needs_input") return "needs_input";
   if (isAdjudicated(failure)) {
     const error = causeField(failure.cause, "error");
-    return typeof error === "string" && isDeclaredBlocker(error)
+    return BLOCKER_OVERRIDABLE.has(failure.failureClass) &&
+      typeof error === "string" &&
+      isDeclaredBlocker(error)
       ? "needs_input"
       : "genuine";
   }

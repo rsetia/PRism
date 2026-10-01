@@ -1401,7 +1401,16 @@ async function executeRun(
   /** Drain the store's queued operator requests; true when any reset applied. */
   async function applyAdminRequests(): Promise<boolean> {
     if (adminStore === undefined) return false;
-    const pending = await adminStore.list(runId);
+    let pending: readonly AdminRequest[];
+    try {
+      pending = await adminStore.list(runId);
+    } catch {
+      // Polling is a convenience: a failed read (say, a busy database)
+      // must never fail a healthy run. The next tick reads again. Errors
+      // while APPLYING a request still propagate — they involve the lease
+      // and the event revision.
+      return false;
+    }
     let changed = false;
     for (const request of pending) {
       if (await applyAdminRequest(request)) changed = true;

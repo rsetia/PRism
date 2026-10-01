@@ -393,6 +393,45 @@ describe.each([
   });
 });
 
+describe("admin polling resilience", () => {
+  test("a failing queue read never fails a healthy run", async () => {
+    const base = createMemoryStore();
+    let reads = 0;
+    const flakyStore: RunStore = {
+      ...base,
+      listPendingAdminRequests: (runId: string) => {
+        reads += 1;
+        return reads <= 3
+          ? Promise.reject(new Error("SQLITE_BUSY: database is locked"))
+          : (base.listPendingAdminRequests?.(runId) ?? Promise.resolve([]));
+      },
+    };
+    const slow = gate("slow");
+    const engine = createEngine({
+      store: flakyStore,
+      registry: createExecutorRegistry([...builtinExecutors, slow]),
+      adminPollIntervalMs: 5,
+    });
+    const handle = engine.run(
+      buildGraph({
+        version: 1,
+        nodes: { slow: { executor: "slow" } },
+        finalNode: "slow",
+      }),
+      { runId: "busy" },
+    );
+    await waitFor(
+      () => Promise.resolve(reads > 3 ? true : undefined),
+      "the poll to survive failing reads",
+    );
+    slow.release();
+    await expect(handle.result).resolves.toEqual({
+      status: "succeeded",
+      output: "slow-done",
+    });
+  });
+});
+
 describe("offline fallback", () => {
   test("applies a request to a finished run, reopening it for resume", async () => {
     const store = createMemoryStore();
@@ -703,10 +742,21 @@ describe("failure disposition", () => {
       [{ error: "x", failureClass: "needs_input" }, "needs_input"],
       [
         {
-          error: "stopped: blocked on a frozen contract",
+          error: "stopped: work is blocked on a frozen contract",
           failureClass: "semantic_failed",
         },
         "needs_input",
+      ],
+      [{ error: "B4 remains blocked: contract gap" }, "needs_input"],
+      // Infrastructure language and explicit classes are never overridden.
+      [
+        { error: "push blocked by git lock", failureClass: "transient_infra" },
+        "transient_infra",
+      ],
+      [{ error: "push blocked by git lock" }, undefined],
+      [
+        { error: "work is blocked on a decision", failureClass: "timeout" },
+        "timeout",
       ],
       [
         { error: "tests failed", failureClass: "validation_failed" },
