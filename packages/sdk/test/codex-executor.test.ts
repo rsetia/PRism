@@ -991,6 +991,52 @@ describe("createCodexExecutor failure adjudication", () => {
     },
   );
 
+  test("records a worker-declared blocker as needs_input, keeping the adjudicated code", async () => {
+    const { engine } = scriptedEngine([
+      {
+        status: "failed",
+        error:
+          "B4 remains blocked: frozen CoreCommand lacks AgentUpdate ingress",
+        failureClass: "semantic_failed",
+      },
+    ]);
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: {
+        // No branch or PR: adjudication ends terminal, the worker's
+        // failure stands.
+        reconcile: () => Promise.resolve({ kind: "fresh" as const, notes: [] }),
+      },
+      adjudication: { wait: noWait },
+    });
+    await expect(executor.execute(context())).resolves.toMatchObject({
+      status: "failed",
+      failureClass: "needs_input",
+      cause: { code: "WORKER_FAILURE_ADJUDICATED" },
+    });
+  });
+
+  test("keeps a genuine worker failure's own class", async () => {
+    const { engine } = scriptedEngine([semanticFailure]);
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: {
+        reconcile: () => Promise.resolve({ kind: "fresh" as const, notes: [] }),
+      },
+      adjudication: { wait: noWait },
+    });
+    await expect(executor.execute(context())).resolves.toMatchObject({
+      status: "failed",
+      failureClass: "semantic_failed",
+    });
+  });
+
   test("caps the final poll at the wait ceiling and retains evidence", async () => {
     const { engine } = scriptedEngine([semanticFailure]);
     const waits: number[] = [];

@@ -53,7 +53,14 @@ export type FailureClass =
   | "semantic_failed"
   | "merge_conflict"
   | "policy_denied"
-  | "manual_review_required";
+  | "manual_review_required"
+  /**
+   * The worker stopped on a declared blocker that needs an operator: a
+   * decision, a clarification, or a change it is not permitted to make
+   * (for example a frozen contract). Never retried automatically; the
+   * operator resolves it and continues with `prism rerun-node`.
+   */
+  | "needs_input";
 
 /**
  * An originating node failure. `cause` is already-normalized JSON — the

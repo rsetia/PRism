@@ -1,3 +1,4 @@
+import { describeFailure } from "@rsetia/prism";
 import type { CompiledGraph, NodeState, RunInspection } from "@rsetia/prism";
 
 export interface WatchDashboardOptions {
@@ -43,6 +44,22 @@ const STATE_PRESENTATION: Readonly<Record<NodeState, StatePresentation>> = {
   retry_wait: { symbol: "↻", style: "\u001B[1;33m" },
 };
 
+/** A failed node waiting on the operator rather than broken (needs_input). */
+const NEEDS_INPUT_PRESENTATION: StatePresentation = {
+  symbol: "⏸",
+  style: "\u001B[1;30;43m",
+};
+
+function presentationFor(
+  state: NodeState,
+  nodeId: string,
+  needsInput: ReadonlySet<string>,
+): StatePresentation {
+  return state === "failed" && needsInput.has(nodeId)
+    ? NEEDS_INPUT_PRESENTATION
+    : STATE_PRESENTATION[state];
+}
+
 interface WorkflowStage {
   readonly nodeId: string;
   readonly label: string;
@@ -72,6 +89,17 @@ export function renderWatchDashboard(
   const stateByNode = new Map(
     inspection.nodes.map((node) => [node.nodeId, node.state]),
   );
+  const needsInput = new Set(
+    inspection.failures
+      .map((failure) =>
+        describeFailure(failure, {
+          runId: inspection.runId,
+          finished: inspection.finished,
+        }),
+      )
+      .filter((detail) => detail.disposition === "needs_input")
+      .map((detail) => detail.nodeId),
+  );
   const counts = countStates(inspection);
   const lines = renderHeader(inspection, counts, columns, color, frame);
   const workflows = extractBeadsWorkflows(graph);
@@ -87,7 +115,14 @@ export function renderWatchDashboard(
 
   if (workflows.length > 0) {
     lines.push(
-      ...renderBeadsDag(graph, workflows, stateByNode, columns, color),
+      ...renderBeadsDag(
+        graph,
+        workflows,
+        stateByNode,
+        columns,
+        color,
+        needsInput,
+      ),
     );
   } else if (pollPanel.length > 0) {
     lines.push(
@@ -101,7 +136,9 @@ export function renderWatchDashboard(
       ),
     );
   } else {
-    lines.push(...renderGenericDag(graph, stateByNode, columns, color));
+    lines.push(
+      ...renderGenericDag(graph, stateByNode, columns, color, needsInput),
+    );
   }
 
   appendFooter(lines, inspection, columns, options.rows, color);
@@ -317,6 +354,7 @@ function renderBeadsDag(
   stateByNode: ReadonlyMap<string, NodeState>,
   columns: number,
   color: boolean,
+  needsInput: ReadonlySet<string>,
 ): string[] {
   const waveCount =
     Math.max(...workflows.map((workflow) => workflow.depth)) + 1;
@@ -387,6 +425,7 @@ function renderBeadsDag(
           columns,
           color,
           runtimeWait,
+          needsInput,
         ),
       );
     }
@@ -538,12 +577,22 @@ function renderWorkflowLane(
   columns: number,
   color: boolean,
   runtimeWait: WorkflowRuntimeWait | undefined,
+  needsInput: ReadonlySet<string>,
 ): string {
   const states = workflow.stages.map(
     (stage) => stateByNode.get(stage.nodeId) ?? "pending",
   );
   const workflowState = aggregateState(states);
-  const workflowPresentation = STATE_PRESENTATION[workflowState];
+  const waitingOnOperator =
+    workflowState === "failed" &&
+    workflow.stages.some(
+      (stage) =>
+        needsInput.has(stage.nodeId) &&
+        stateByNode.get(stage.nodeId) === "failed",
+    );
+  const workflowPresentation = waitingOnOperator
+    ? NEEDS_INPUT_PRESENTATION
+    : STATE_PRESENTATION[workflowState];
   const rail = lastInWave ? "╰─" : "├─";
   const id = truncate(displayId(workflow.id), idWidth).padEnd(idWidth);
   const pipelineWidth = workflow.stages.length * 3 - 2;
@@ -581,7 +630,7 @@ function renderWorkflowLane(
   }
   const titleBudget = detailBudget;
   const title = truncate(workflow.title, titleBudget);
-  const pipeline = renderPipeline(workflow.stages, states, color);
+  const pipeline = renderPipeline(workflow.stages, states, color, needsInput);
 
   return [
     style(rail, CYAN, color),
@@ -655,6 +704,7 @@ function renderPipeline(
   stages: readonly WorkflowStage[],
   states: readonly NodeState[],
   color: boolean,
+  needsInput: ReadonlySet<string>,
 ): string {
   const parts: string[] = [];
   for (let index = 0; index < stages.length; index += 1) {
@@ -669,7 +719,11 @@ function renderPipeline(
         ),
       );
     }
-    const presentation = STATE_PRESENTATION[state];
+    const presentation = presentationFor(
+      state,
+      stages[index]?.nodeId ?? "",
+      needsInput,
+    );
     parts.push(style(presentation.symbol, presentation.style, color));
   }
   return parts.join("");
@@ -680,6 +734,7 @@ function renderGenericDag(
   stateByNode: ReadonlyMap<string, NodeState>,
   columns: number,
   color: boolean,
+  needsInput: ReadonlySet<string>,
 ): string[] {
   const waves = buildWaves(graph);
   const lines = [
@@ -702,7 +757,7 @@ function renderGenericDag(
     for (const [nodeIndex, nodeId] of wave.entries()) {
       const node = graph.nodes[nodeId];
       const state = stateByNode.get(nodeId) ?? "pending";
-      const presentation = STATE_PRESENTATION[state];
+      const presentation = presentationFor(state, nodeId, needsInput);
       const dependency =
         node === undefined || node.dependsOn.length === 0
           ? ""
@@ -759,7 +814,7 @@ function appendFooter(
     lines.push(
       style(
         truncate(
-          "✓ done   ▶ running   ◇ ready   ○ queued   ↻ retry   ✕ failed   ⊘ blocked",
+          "✓ done   ▶ running   ◇ ready   ○ queued   ↻ retry   ✕ failed   ⏸ needs input   ⊘ blocked",
           columns,
         ),
         DIM,
@@ -769,28 +824,44 @@ function appendFooter(
     return;
   }
 
-  const availableLines =
-    rows === undefined
-      ? inspection.failures.length
-      : Math.max(1, rows - lines.length);
-  const shown = inspection.failures.slice(0, availableLines);
-  for (const [index, failure] of shown.entries()) {
-    const prefix = index === 0 ? "Failures · " : "           ";
-    lines.push(
-      style(
-        truncate(
-          `${prefix}✕ ${failure.nodeId}: ${JSON.stringify(failure.cause)}`,
-          columns,
-        ),
-        "\u001B[1;31m",
-        color,
-      ),
-    );
+  const details = inspection.failures.map((failure) =>
+    describeFailure(failure, {
+      runId: inspection.runId,
+      finished: inspection.finished,
+    }),
+  );
+  // Blockers waiting on the operator come first and apart from failures:
+  // they are not crashes, and they will not move until someone acts.
+  const waiting = details.filter((d) => d.disposition === "needs_input");
+  const failed = details.filter((d) => d.disposition !== "needs_input");
+  const entries: { readonly text: string; readonly style: string }[] = [];
+  for (const [index, detail] of waiting.entries()) {
+    const prefix = index === 0 ? "Needs your input · " : "                   ";
+    entries.push({
+      text: `${prefix}⏸ ${detail.nodeId}: ${detail.summary}${detail.pullRequestUrl === undefined ? "" : ` · ${detail.pullRequestUrl}`}`,
+      style: YELLOW,
+    });
+    entries.push({ text: `                     → ${detail.hint}`, style: DIM });
   }
-  const hidden = inspection.failures.length - shown.length;
+  for (const [index, detail] of failed.entries()) {
+    const prefix = index === 0 ? "Failures · " : "           ";
+    entries.push({
+      text: `${prefix}✕ ${detail.nodeId}: ${detail.summary}`,
+      style: "\u001B[1;31m",
+    });
+    entries.push({ text: `             → ${detail.hint}`, style: DIM });
+  }
+
+  const availableLines =
+    rows === undefined ? entries.length : Math.max(1, rows - lines.length);
+  const shown = entries.slice(0, availableLines);
+  for (const entry of shown) {
+    lines.push(style(truncate(entry.text, columns), entry.style, color));
+  }
+  const hidden = entries.length - shown.length;
   if (hidden > 0 && (rows === undefined || lines.length < rows)) {
     lines.push(
-      style(`           +${String(hidden)} more`, "\u001B[1;31m", color),
+      style(`           +${String(hidden)} more lines`, "\u001B[1;31m", color),
     );
   }
 }

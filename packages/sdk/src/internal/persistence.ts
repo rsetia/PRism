@@ -15,6 +15,7 @@ const FAILURE_CLASSES = new Set([
   "merge_conflict",
   "policy_denied",
   "manual_review_required",
+  "needs_input",
 ]);
 
 /** Clone and deeply freeze JSON data at a persistence boundary. */

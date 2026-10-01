@@ -1550,11 +1550,16 @@ describe("prism CLI: persisted runs", () => {
       "--json",
     );
     expect(reset.code).toBe(0);
+    // No coordinator holds the finished run, so the request is applied
+    // offline and the run waits for a resume.
     expect(JSON.parse(reset.stdout)).toEqual({
       version: 1,
       runId: "rr",
       reset: "first",
       includeDownstream: true,
+      appliedBy: "offline",
+      resetNodeIds: ["first", "second"],
+      requestId: expect.stringMatching(/^admin-/u) as unknown,
     });
 
     const afterReset = await cli("inspect", "rr", "--store", store);

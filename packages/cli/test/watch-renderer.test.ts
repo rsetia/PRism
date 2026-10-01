@@ -108,7 +108,45 @@ describe("watch dashboard", () => {
 
     expect(output).toContain("FAILED");
     expect(output).toContain("Failures");
-    expect(output).toContain('implement: {"message":"validation failed"}');
+    expect(output).toContain("✕ implement: validation failed");
+    expect(output).toContain("→ inspect the logs: prism logs failed-run");
+  });
+
+  test("lists a needs-input blocker apart from failures, with PR and next action", () => {
+    const blocked: RunInspection = {
+      runId: "blocked-run",
+      finished: false,
+      nodes: [
+        { nodeId: "context", state: "succeeded", timing: null, evidence: null },
+        { nodeId: "implement", state: "failed", timing: null, evidence: null },
+        { nodeId: "review", state: "blocked", timing: null, evidence: null },
+      ],
+      failures: [
+        {
+          nodeId: "implement",
+          cause: {
+            code: "WORKER_FAILURE_ADJUDICATED",
+            error: "remains blocked: frozen contract lacks an ingress",
+            state: { pullRequest: { url: "https://example.test/pr/6" } },
+          },
+          failureClass: "semantic_failed",
+        },
+      ],
+      timing: null,
+    };
+    const output = renderWatchDashboard(graph(), blocked, {
+      color: false,
+      columns: 180,
+    });
+    expect(output).toContain("⏸ implement");
+    expect(output).not.toContain("✕ implement");
+    expect(output).toContain(
+      "Needs your input · ⏸ implement: remains blocked: frozen contract lacks an ingress · https://example.test/pr/6",
+    );
+    expect(output).toContain(
+      "→ resolve the blocker, then: prism rerun-node blocked-run implement",
+    );
+    expect(output).not.toContain("Failures ·");
   });
 
   test("collapses generated Beads plumbing into work-item dependency lanes", () => {

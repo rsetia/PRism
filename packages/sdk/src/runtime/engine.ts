@@ -11,6 +11,7 @@ import {
 import type { PersistedRunEvent, RunEvent } from "./events.js";
 import { normalizeThrownCause } from "./failures.js";
 import type {
+  AdminRequest,
   Clock,
   ExecutionContext,
   ExecutorDefinition,
@@ -20,13 +21,14 @@ import type {
   RunStore,
 } from "./ports.js";
 import {
+  applyJitter,
   computeBackoffMs,
+  isFailureRetryable,
   isRetryable,
   NO_RETRIES,
-  resolveFailureClass,
   type RetryPolicy,
 } from "./retry.js";
-import { resetRun, resumableFailedNodes } from "./admin.js";
+import { planAdminReset, resetRun, resumableFailedNodes } from "./admin.js";
 import { reduceNodeState } from "./transitions.js";
 import type { NodeFailure, NodeState, RunOutcome } from "./types.js";
 import {
@@ -68,6 +70,18 @@ export interface EngineOptions {
   readonly leaseDurationMs?: number;
   /** Policy used for executor-originated graph expansion proposals. */
   readonly graphProposalPolicy?: GraphProposalPolicy;
+  /**
+   * Random source for retry jitter, returning a value in [0, 1). Default
+   * Math.random; tests inject a constant.
+   */
+  readonly random?: () => number;
+  /**
+   * How often a live coordinator checks the store for queued operator
+   * requests (live signal / rerun-node), in milliseconds. Default 2000.
+   * 0 disables live admin requests. Polling only happens when the store
+   * implements the admin-request methods.
+   */
+  readonly adminPollIntervalMs?: number;
 }
 
 export interface RunOptions {
@@ -110,8 +124,8 @@ export interface Engine {
    * unknown run.
    *
    * A run that already finished FAILED is reopened when any failed node's
-   * failure is resumable (transient_infra or timeout — unclassified counts
-   * as transient_infra — and not adjudicated against the work; see
+   * failure is resumable (transient_infra — unclassified counts as
+   * transient_infra — and not adjudicated against the work; see
    * isResumableFailure): those nodes and their blocked dependents are reset
    * and run again, with the original failures kept in the event log.
    * Reopening needs the coordinator lease, so it rejects while another
@@ -120,6 +134,14 @@ export interface Engine {
    */
   resume(runId: string): RunHandle;
 }
+
+/*
+ * Live operator requests: while a coordinator drives a run it polls the
+ * store (EngineOptions.adminPollIntervalMs) for queued signal / rerun-node
+ * requests and applies them under its own lease — resetting failed,
+ * blocked, cancelled or skipped nodes so they run again inside the SAME
+ * run. See planAdminReset for exactly which nodes are reset.
+ */
 
 interface NodeCompletion {
   readonly kind: "node_completion";
@@ -156,13 +178,19 @@ interface GraphExpanded {
   readonly kind: "graph_expanded";
 }
 
+/** Time to check the store for queued operator requests. */
+interface AdminPoll {
+  readonly kind: "admin_poll";
+}
+
 type SchedulerEvent =
   | NodeCompletion
   | CancellationRequest
   | CancellationTimeout
   | RetryReady
   | RetryCancelled
-  | GraphExpanded;
+  | GraphExpanded
+  | AdminPoll;
 
 function nodeLeaseFailure(nodeId: string, error: unknown): NodeCompletion {
   return {
@@ -687,6 +715,8 @@ async function executeRun(
     policy: "disabled",
     reason: "dynamic graph expansion is not enabled for this engine",
   }),
+  random: () => number = Math.random,
+  adminPollIntervalMs = 0,
 ): Promise<RunOutcome> {
   let graph = initialGraph;
   const executors = new Map<string, ExecutorDefinition>();
@@ -759,6 +789,28 @@ async function executeRun(
   }
   let graphExpansion = nextGraphExpansion();
   let coordinatorRenewalFailure: Error | undefined;
+
+  // Live operator requests (plan §16): only when this coordinator holds a
+  // lease and the store can queue and atomically resolve requests.
+  const adminStore =
+    coordinatorLease !== undefined &&
+    adminPollIntervalMs > 0 &&
+    store.listPendingAdminRequests !== undefined &&
+    store.resolveAdminRequest !== undefined
+      ? {
+          list: store.listPendingAdminRequests.bind(store),
+          resolve: store.resolveAdminRequest.bind(store),
+        }
+      : undefined;
+  let adminTimer: ReturnType<typeof setTimeout> | undefined;
+  function nextAdminPoll(): Promise<AdminPoll> {
+    return new Promise((resolvePoll) => {
+      adminTimer = setTimeout(() => {
+        resolvePoll({ kind: "admin_poll" });
+      }, adminPollIntervalMs);
+    });
+  }
+  let adminPoll = adminStore === undefined ? undefined : nextAdminPoll();
 
   function renewCoordinatorLease(): Promise<void> {
     if (currentCoordinatorLease === undefined) return Promise.resolve();
@@ -1011,9 +1063,13 @@ async function executeRun(
 
     if (
       attempt < retryPolicy.maxAttempts &&
-      isRetryable(retryPolicy, resolveFailureClass(failure))
+      isFailureRetryable(retryPolicy, failure)
     ) {
-      const delayMs = computeBackoffMs(retryPolicy, attempt);
+      const delayMs = applyJitter(
+        computeBackoffMs(retryPolicy, attempt),
+        retryPolicy.jitterRatio,
+        random,
+      );
       // Validate the required adapter before persisting retry_wait, so an
       // API configuration error does not strand a durable run in that state.
       if (clock === undefined) {
@@ -1259,6 +1315,109 @@ async function executeRun(
     return true;
   }
 
+  /**
+   * Apply one queued operator request under this coordinator's lease. Runs
+   * inside the serialized append chain so the reset plan sees settled
+   * states and the event revision stays gapless. Returns whether nodes were
+   * reset. A plan the live run cannot honour is rejected durably.
+   */
+  function applyAdminRequest(request: AdminRequest): Promise<boolean> {
+    const work = appendTail.then(async (): Promise<boolean> => {
+      if (adminStore === undefined) return false;
+      await renewCoordinatorLease();
+      const lease = currentCoordinatorLease as RunLease;
+      const plan = cancellation.isRequested()
+        ? ({
+            ok: false,
+            message: `run "${runId}" is cancelling`,
+          } as const)
+        : planAdminReset(graph, states, request.action, request.nodeId, "live");
+      if (!plan.ok) {
+        await adminStore.resolve(
+          {
+            requestId: request.requestId,
+            status: "rejected",
+            resolvedBy: "live",
+            message: plan.message,
+          },
+          lease,
+        );
+        return false;
+      }
+      const events: RunEvent[] = plan.nodeIds.map((nodeId) => ({
+        kind: "node_reset",
+        nodeId,
+      }));
+      const staged = new Map<string, NodeState>();
+      for (const event of events) {
+        const previous = staged.get(event.nodeId) ?? states.get(event.nodeId);
+        if (previous === undefined) {
+          throw new Error(`event targets unknown node "${event.nodeId}"`);
+        }
+        staged.set(event.nodeId, reduceNodeState(previous, event));
+      }
+      const result = await adminStore.resolve(
+        {
+          requestId: request.requestId,
+          status: "applied",
+          resolvedBy: "live",
+          resetNodeIds: plan.nodeIds,
+          events,
+          expectedRevision: revision,
+        },
+        lease,
+      );
+      if (!result.resolved) {
+        // Someone else (the requester withdrawing it) resolved it first.
+        return false;
+      }
+      if (result.persisted.length !== events.length) {
+        throw new Error("store persisted a different number of events");
+      }
+      for (let index = 0; index < result.persisted.length; index += 1) {
+        if (result.persisted[index]?.seq !== revision + index) {
+          throw new Error("store returned a non-gapless event sequence");
+        }
+      }
+      revision += result.persisted.length;
+      for (const [nodeId, state] of staged) {
+        states.set(nodeId, state);
+        // Mirror replayExecutionState's node_reset: the node re-runs fresh.
+        attempts.delete(nodeId);
+        outputs.delete(nodeId);
+        originatingFailures.delete(nodeId);
+        retryDelays.delete(nodeId);
+        resourceWaitResourceIds.delete(nodeId);
+      }
+      return true;
+    });
+    appendTail = work.then(
+      () => undefined,
+      () => undefined,
+    );
+    return work;
+  }
+
+  /** Drain the store's queued operator requests; true when any reset applied. */
+  async function applyAdminRequests(): Promise<boolean> {
+    if (adminStore === undefined) return false;
+    const pending = await adminStore.list(runId);
+    let changed = false;
+    for (const request of pending) {
+      if (await applyAdminRequest(request)) changed = true;
+    }
+    if (changed) {
+      // A reset cancelled node no longer makes the outcome "cancelled".
+      if (!cancellation.isRequested()) {
+        cancellationAccepted = [...states.values()].includes("cancelled");
+      }
+      await propagateBlockedNodes();
+      await skipUnmatchedNodes();
+      await promoteReadyNodes();
+    }
+    return changed;
+  }
+
   let executionFailure: Error | undefined;
   try {
     if (initialState !== undefined) {
@@ -1311,6 +1470,7 @@ async function executeRun(
     await propagateBlockedNodes();
     await skipUnmatchedNodes();
     await promoteReadyNodes();
+    await applyAdminRequests();
 
     while (true) {
       if (!cancellation.isRequested()) {
@@ -1321,6 +1481,11 @@ async function executeRun(
         inFlight.size === 0 &&
         (!cancellation.isRequested() || cancellationObserved)
       ) {
+        // Last look before finishing: a request queued while the final
+        // nodes settled is applied here rather than stranded.
+        if (!cancellation.isRequested() && (await applyAdminRequests())) {
+          continue;
+        }
         break;
       }
 
@@ -1333,9 +1498,15 @@ async function executeRun(
       }
       if (!cancellation.isRequested()) {
         candidates.push(graphExpansion);
+        if (adminPoll !== undefined) candidates.push(adminPoll);
       }
 
       const schedulerEvent = await Promise.race(candidates);
+      if (schedulerEvent.kind === "admin_poll") {
+        adminPoll = nextAdminPoll();
+        await applyAdminRequests();
+        continue;
+      }
       if (schedulerEvent.kind === "cancellation_requested") {
         cancellationObserved = true;
         cancellationAccepted = await acceptCancellation(schedulerEvent);
@@ -1487,6 +1658,9 @@ async function executeRun(
         : new Error("scheduler execution failed", { cause: error });
     throw executionFailure;
   } finally {
+    if (adminTimer !== undefined) {
+      clearTimeout(adminTimer);
+    }
     if (coordinatorRenewalTimer !== undefined) {
       clearInterval(coordinatorRenewalTimer);
     }
@@ -1597,6 +1771,23 @@ export function createEngine(options: EngineOptions): Engine {
   }
 
   const { store, registry, clock, graphProposalPolicy } = options;
+  const random = options.random ?? Math.random;
+  const adminPollIntervalMs = options.adminPollIntervalMs ?? 2_000;
+  if (!Number.isFinite(adminPollIntervalMs) || adminPollIntervalMs < 0) {
+    throw new Error(
+      "adminPollIntervalMs must be a finite number greater than or equal to 0",
+    );
+  }
+  if (
+    retryPolicy.jitterRatio !== undefined &&
+    (!Number.isFinite(retryPolicy.jitterRatio) ||
+      retryPolicy.jitterRatio < 0 ||
+      retryPolicy.jitterRatio >= 1)
+  ) {
+    throw new Error(
+      "retryPolicy.jitterRatio must be a finite number in [0, 1)",
+    );
+  }
   const leaseDurationMs = options.leaseDurationMs ?? 30_000;
   if (!Number.isFinite(leaseDurationMs) || leaseDurationMs <= 0) {
     throw new Error("leaseDurationMs must be a finite number greater than 0");
@@ -1683,6 +1874,8 @@ export function createEngine(options: EngineOptions): Engine {
             leaseOwner,
             leaseDurationMs,
             graphProposalPolicy,
+            random,
+            adminPollIntervalMs,
           );
           lease = await store.renewLease(lease, leaseDurationMs);
           await store.finishRun(runId, outcome, lease);
@@ -1753,6 +1946,8 @@ export function createEngine(options: EngineOptions): Engine {
             leaseOwner,
             leaseDurationMs,
             graphProposalPolicy,
+            random,
+            adminPollIntervalMs,
           );
           lease = await store.renewLease(lease, leaseDurationMs);
           await store.finishRun(runId, outcome, lease);

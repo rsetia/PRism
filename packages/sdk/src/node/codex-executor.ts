@@ -3,6 +3,7 @@ import { join, resolve } from "node:path";
 import type { JsonValue } from "../graph/types.js";
 import { isJsonValue } from "../internal/json.js";
 import { normalizeThrownCause } from "../runtime/failures.js";
+import { classifyWorkerFailure } from "../runtime/disposition.js";
 import { parseProofOfWork } from "../runtime/proof-of-work.js";
 import type {
   ExecutionContext,
@@ -419,6 +420,15 @@ export function createCodexExecutor(
           }
         } else {
           const evidence = (result as AdjudicatedFailure).evidence;
+          // A worker that stopped on a declared blocker is recorded as
+          // needs_input (the cause keeps its code for audit), so the
+          // operator sees it is waiting on them rather than a crash.
+          const failureClass = classifyWorkerFailure({
+            ...(result.error === undefined ? {} : { error: result.error }),
+            ...(result.failureClass === undefined
+              ? {}
+              : { failureClass: result.failureClass }),
+          });
           outcome = {
             status: "failed",
             cause:
@@ -429,9 +439,7 @@ export function createCodexExecutor(
                     error: result.error ?? "codex failed",
                     ...toJson(evidence),
                   },
-            ...(result.failureClass === undefined
-              ? {}
-              : { failureClass: result.failureClass }),
+            ...(failureClass === undefined ? {} : { failureClass }),
           };
         }
       } catch (error: unknown) {

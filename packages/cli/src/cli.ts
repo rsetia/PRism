@@ -12,17 +12,22 @@ import { dirname, extname, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
   abortRun,
+  applyAdminRequestOffline,
   compileGraph,
   createEngine,
   createMemoryStore,
   createSystemClock,
+  describeFailure,
   inspectRun,
   parseGraph,
   resetRun,
+  transientInfraRetryPolicy,
   watchRun,
 } from "@rsetia/prism";
 import type {
+  AdminRequest,
   CompiledGraph,
+  FailureDescription,
   GraphCompileError,
   GraphParseError,
   NodeFailure,
@@ -86,6 +91,10 @@ export const EXIT_USAGE = 2;
 /** Unexpected internal error — our bug. Assigned by main.ts. */
 export const EXIT_INTERNAL = 3;
 export const DEFAULT_MAX_CONCURRENCY = 4;
+/** Automatic in-run retries of explicitly transient_infra failures. */
+export const DEFAULT_MAX_TRANSIENT_RETRIES = 3;
+/** How long signal / rerun-node wait for a live coordinator. */
+export const DEFAULT_ADMIN_TIMEOUT_MS = 60_000;
 
 export const USAGE = `Usage: prism <command> [options]
 
@@ -115,11 +124,14 @@ Commands:
   run <file> [--json] [--store <db>] [--run-id <id>] [--repo <path>]
              [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
              [--codex-reasoning-effort <level>] [--codex-backend exec|app-server]
-             [--greptile-app-slug <slug>]
-                                      Execute the graph
+             [--greptile-app-slug <slug>] [--max-transient-retries <n>]
+                                      Execute the graph (transient infrastructure
+                                      failures, e.g. git lock races, are retried
+                                      in-run; --max-transient-retries 0 disables)
   poll <config> [--json] [--store <db>] [--run-id <id>] [--repo <path>]
               [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
               [--codex-reasoning-effort <level>] [--codex-backend exec|app-server]
+              [--max-transient-retries <n>]
                                       Watch a source (Linear) and implement every
                                       newly matching item; restarting resumes the
                                       same poll run (default id poll-<name>)
@@ -128,22 +140,32 @@ Commands:
   events <run-id> [--store <db>] [--json]
                                       Show a persisted run's event log
   logs [<run-id>] [--store <db>] [--json] [--repo <path>]
-                                      Follow worker output (default latest run)
+                                      Follow worker output (default: every
+                                      unfinished run, lines prefixed by run;
+                                      else the latest run)
   status [--store <db>] [--json]      List persisted runs
   watch [<run-id>] [--store <db>] [--json] [--interval <ms>] [--repo <path>]
-                                      Render the live DAG (default latest running run)
+                                      Render the live DAG (default: every
+                                      unfinished run, stacked; else the latest)
   resume <run-id> [--store <db>] [--json] [--repo <path>]
          [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
          [--codex-reasoning-effort <level>] [--codex-backend exec|app-server]
+         [--max-transient-retries <n>]
                                       Continue an interrupted run to completion
                                       (a finished run is reopened to re-run
-                                      transient failures, e.g. git lock races)
+                                      transient_infra failures, e.g. git lock
+                                      races; timeouts need rerun-node)
   abort <run-id> [--store <db>] [--json]
                                       Force a stuck run to a cancelled, finished state
-  signal <run-id> <node-id> [--store <db>] [--json]
-                                      Reset a node so a later resume re-runs it
-  rerun-node <run-id> <node-id> [--store <db>] [--json]
-                                      Reset a node and its downstream, then resume
+  signal <run-id> <node-id> [--store <db>] [--json] [--timeout <ms>]
+                                      Reset a node (and its blocked/skipped
+                                      dependents). A live run applies it and
+                                      re-runs the node itself; otherwise it is
+                                      applied offline for a later resume
+  rerun-node <run-id> <node-id> [--store <db>] [--json] [--timeout <ms>]
+                                      Reset a node and its downstream; a live
+                                      run re-runs them in place, otherwise
+                                      resume re-runs them
 
 Defaults:
   Repository                            Current git repository
@@ -259,6 +281,8 @@ interface NodeTargetInvocation {
   readonly nodeId: string;
   readonly json: boolean;
   readonly store: string | undefined;
+  /** How long to wait for a live coordinator to acknowledge, in ms. */
+  readonly timeoutMs: number;
 }
 interface SkillsInvocation {
   readonly command: "skills";
@@ -297,6 +321,8 @@ interface AgentInvocationOptions {
   readonly codexReasoningEffort: string | undefined;
   readonly codexBackend: "exec" | "app-server";
   readonly worktreeDir: string | undefined;
+  /** Automatic in-run retries of transient_infra failures; 0 disables. */
+  readonly maxTransientRetries: number;
 }
 
 interface ParsedFlags {
@@ -313,6 +339,8 @@ interface ParsedFlags {
   readonly codexBackend: string | undefined;
   readonly worktreeDir: string | undefined;
   readonly greptileAppSlug: string | undefined;
+  readonly maxTransientRetries: string | undefined;
+  readonly timeout: string | undefined;
 }
 
 /** Positional args plus known scalar flags; an unknown flag is invalid. */
@@ -330,6 +358,8 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
   let codexBackend: string | undefined;
   let worktreeDir: string | undefined;
   let greptileAppSlug: string | undefined;
+  let maxTransientRetries: string | undefined;
+  let timeout: string | undefined;
 
   for (let index = 0; index < rest.length; index += 1) {
     const arg = rest[index];
@@ -347,7 +377,9 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
       arg === "--codex-reasoning-effort" ||
       arg === "--codex-backend" ||
       arg === "--worktree-dir" ||
-      arg === "--greptile-app-slug"
+      arg === "--greptile-app-slug" ||
+      arg === "--max-transient-retries" ||
+      arg === "--timeout"
     ) {
       const value = rest[index + 1];
       if (value === undefined || value.startsWith("--")) return undefined;
@@ -382,6 +414,12 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
       } else if (arg === "--worktree-dir") {
         if (worktreeDir !== undefined) return undefined;
         worktreeDir = value;
+      } else if (arg === "--max-transient-retries") {
+        if (maxTransientRetries !== undefined) return undefined;
+        maxTransientRetries = value;
+      } else if (arg === "--timeout") {
+        if (timeout !== undefined) return undefined;
+        timeout = value;
       } else {
         if (greptileAppSlug !== undefined || value.trim().length === 0) {
           return undefined;
@@ -409,6 +447,8 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
     codexBackend,
     worktreeDir,
     greptileAppSlug,
+    maxTransientRetries,
+    timeout,
   };
 }
 
@@ -428,6 +468,14 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
   }
   const flags = parseFlags(rest);
   if (flags === undefined) return undefined;
+  // --timeout belongs to the live-reset commands only.
+  if (
+    flags.timeout !== undefined &&
+    command !== "signal" &&
+    command !== "rerun-node"
+  ) {
+    return undefined;
+  }
 
   const [first, second] = flags.positionals;
   const count = flags.positionals.length;
@@ -558,7 +606,7 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
       }
       return { command, runId: first, json: flags.json, store: flags.store };
     case "signal":
-    case "rerun-node":
+    case "rerun-node": {
       if (
         count !== 2 ||
         first === undefined ||
@@ -569,13 +617,22 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
       ) {
         return undefined;
       }
+      const timeoutMs =
+        flags.timeout === undefined
+          ? DEFAULT_ADMIN_TIMEOUT_MS
+          : Number(flags.timeout);
+      if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0) {
+        return undefined;
+      }
       return {
         command,
         runId: first,
         nodeId: second,
         json: flags.json,
         store: flags.store,
+        timeoutMs,
       };
+    }
     case "status":
       if (
         count !== 0 ||
@@ -615,6 +672,7 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
 
 function noAgentFlags(flags: ParsedFlags): boolean {
   return (
+    flags.maxTransientRetries === undefined &&
     flags.repo === undefined &&
     flags.maxConcurrency === undefined &&
     flags.codexCommand === undefined &&
@@ -628,6 +686,7 @@ function noAgentFlags(flags: ParsedFlags): boolean {
 
 function noWorkerFlags(flags: ParsedFlags): boolean {
   return (
+    flags.maxTransientRetries === undefined &&
     flags.maxConcurrency === undefined &&
     flags.codexCommand === undefined &&
     flags.codexModel === undefined &&
@@ -652,7 +711,15 @@ function parseAgentOptions(
   if (codexBackend !== "exec" && codexBackend !== "app-server") {
     return undefined;
   }
+  const maxTransientRetries =
+    flags.maxTransientRetries === undefined
+      ? DEFAULT_MAX_TRANSIENT_RETRIES
+      : Number(flags.maxTransientRetries);
+  if (!Number.isSafeInteger(maxTransientRetries) || maxTransientRetries < 0) {
+    return undefined;
+  }
   return {
+    maxTransientRetries,
     repo: flags.repo,
     maxConcurrency,
     codexCommand: flags.codexCommand,
@@ -1189,6 +1256,10 @@ async function runGraph(
       registry: agentRegistry,
       maxConcurrency: invocation.agent.maxConcurrency,
       graphProposalPolicy: pollGraphProposalPolicy,
+      retryPolicy: transientInfraRetryPolicy(
+        invocation.agent.maxTransientRetries,
+      ),
+      clock: createSystemClock(),
     });
     const runId =
       invocation.runId ?? (durable ? `run-${randomUUID()}` : undefined);
@@ -1286,6 +1357,7 @@ async function inspectCommand(
           leases: inspection.leases,
           usage: inspection.usage ?? null,
           scheduler: inspection.scheduler ?? null,
+          failureDetails: describeFailures(inspection),
         }),
       );
     } else {
@@ -1319,9 +1391,7 @@ async function inspectCommand(
           ? "resource-lock utilization: unknown"
           : `resource-lock utilization: ${(resourceLockUtilization * 100).toFixed(1)}%`,
       );
-      for (const failure of inspection.failures) {
-        io.stdout(`failure ${failure.nodeId}: ${stringifyJson(failure.cause)}`);
-      }
+      printFailureLines(inspection, io);
       for (const revision of inspection.graphRevisions ?? []) {
         io.stdout(
           `graph revision ${String(revision.graphRevision)}: ${revision.decision.status} · ${revision.proposal.proposer} · ${revision.addedNodeIds.join(", ") || "no nodes"}`,
@@ -1476,11 +1546,27 @@ function printWorkerLogChunk(
   chunk: string,
   printHeader: boolean,
   io: CliIo,
+  prefix = "",
 ): void {
   if (printHeader) {
-    io.stdout(`==> ${entry.nodeId} (attempt ${String(entry.attempt)}) <==`);
+    io.stdout(
+      `${prefix}==> ${entry.nodeId} (attempt ${String(entry.attempt)}) <==`,
+    );
   }
-  io.stdout(chunk.replace(/\n$/u, ""));
+  const text = chunk.replace(/\n$/u, "");
+  io.stdout(
+    prefix === ""
+      ? text
+      : text
+          .split("\n")
+          .map((line) => `${prefix}${line}`)
+          .join("\n"),
+  );
+}
+
+/** A short, stable label for prefixing one run's output among several. */
+function shortRunId(runId: string): string {
+  return runId.replace(/^run-/u, "").slice(0, 8);
 }
 
 async function followWorkerLogs(
@@ -1488,6 +1574,7 @@ async function followWorkerLogs(
   logBackend: LogBackend,
   runId: string,
   io: CliIo,
+  prefix = "",
 ): Promise<void> {
   const emittedLengths = new Map<string, number>();
   let emittedAny = false;
@@ -1508,7 +1595,7 @@ async function followWorkerLogs(
       const offset = previousLength <= entry.text.length ? previousLength : 0;
       const chunk = entry.text.slice(offset);
       if (chunk.length > 0) {
-        printWorkerLogChunk(entry, chunk, offset === 0, io);
+        printWorkerLogChunk(entry, chunk, offset === 0, io, prefix);
         emittedAny = true;
       }
       emittedLengths.set(key, entry.text.length);
@@ -1551,10 +1638,43 @@ async function logsCommand(
       );
     }
     store = await openPersistentStore(invocation.store, invocation.repo);
-    resolvedRunId = await resolveRunId(store, invocation.runId, true);
     logBackend = createFileLogBackend({
       baseDir: projectPaths.logBaseDir,
     });
+    const unfinished =
+      invocation.runId === undefined
+        ? (await store.listRuns()).filter((run) => !run.finished)
+        : [];
+    if (unfinished.length > 1) {
+      // Several runs are active: show all of them, not just the newest.
+      const runIds = unfinished.map((run) => run.runId);
+      if (invocation.json) {
+        const runs = [];
+        for (const runId of runIds) {
+          runs.push({
+            runId,
+            logs: await collectWorkerLogs(store, logBackend, runId),
+          });
+        }
+        io.stdout(stringifyJson({ version: 1, runs }));
+      } else {
+        const activeStore = store;
+        const activeBackend = logBackend;
+        await Promise.all(
+          runIds.map((runId) =>
+            followWorkerLogs(
+              activeStore,
+              activeBackend,
+              runId,
+              io,
+              `[${shortRunId(runId)}] `,
+            ),
+          ),
+        );
+      }
+      return EXIT_SUCCESS;
+    }
+    resolvedRunId = await resolveRunId(store, invocation.runId, true);
     if (invocation.json) {
       const logs = await collectWorkerLogs(store, logBackend, resolvedRunId);
       io.stdout(stringifyJson({ version: 1, runId: resolvedRunId, logs }));
@@ -1609,6 +1729,10 @@ async function resumeCommand(
       registry: agentRegistry,
       maxConcurrency: invocation.agent.maxConcurrency,
       graphProposalPolicy: pollGraphProposalPolicy,
+      retryPolicy: transientInfraRetryPolicy(
+        invocation.agent.maxTransientRetries,
+      ),
+      clock: createSystemClock(),
     });
     const handle = engine.resume(invocation.runId);
     io.stderr(`resume ${handle.id}`);
@@ -1830,6 +1954,10 @@ async function pollCommand(
         ? invocation.agent.maxConcurrency
         : effective.maxParallel + 2,
       graphProposalPolicy: pollGraphProposalPolicy,
+      retryPolicy: transientInfraRetryPolicy(
+        invocation.agent.maxTransientRetries,
+      ),
+      clock: createSystemClock(),
     });
 
     let handle: ReturnType<typeof engine.run>;
@@ -1894,34 +2022,161 @@ async function resetCommand(
   io: CliIo,
 ): Promise<number> {
   let store: RunStore | undefined;
+  const label = `${invocation.runId}/${invocation.nodeId}`;
   try {
     store = await openPersistentStore(invocation.store);
-    await resetRun(
-      store,
-      invocation.runId,
-      [invocation.nodeId],
-      invocation.command === "rerun-node" ? { includeDownstream: true } : {},
-    );
-    io.stderr(`reset ${invocation.runId}/${invocation.nodeId}`);
-    if (invocation.json) {
-      io.stdout(
-        stringifyJson({
-          version: 1,
-          runId: invocation.runId,
-          reset: invocation.nodeId,
-          includeDownstream: invocation.command === "rerun-node",
-        }),
+    const run = await store.getRun(invocation.runId);
+    if (run === undefined) {
+      throw new Error(`unknown run: "${invocation.runId}"`);
+    }
+    if (run.graph.nodes[invocation.nodeId] === undefined) {
+      throw new Error(
+        `unknown node "${invocation.nodeId}" in run "${invocation.runId}"`,
       );
     }
-    return EXIT_SUCCESS;
+    const includeDownstream = invocation.command === "rerun-node";
+
+    if (
+      store.enqueueAdminRequest === undefined ||
+      store.getAdminRequest === undefined
+    ) {
+      // A store without the admin queue: the historical offline reset.
+      await resetRun(
+        store,
+        invocation.runId,
+        [invocation.nodeId],
+        includeDownstream ? { includeDownstream: true } : {},
+      );
+      return reportReset(
+        invocation,
+        io,
+        label,
+        "offline",
+        undefined,
+        undefined,
+      );
+    }
+
+    const request = await waitForAdminRequest(
+      store,
+      await store.enqueueAdminRequest({
+        requestId: `admin-${randomUUID()}`,
+        runId: invocation.runId,
+        action: invocation.command,
+        nodeId: invocation.nodeId,
+      }),
+      invocation.timeoutMs,
+    );
+    if (request.status === "applied") {
+      return reportReset(
+        invocation,
+        io,
+        label,
+        request.resolvedBy ?? "offline",
+        request.resetNodeIds,
+        request.requestId,
+      );
+    }
+    io.stderr(
+      `cannot ${invocation.command} "${label}": ${request.message ?? request.status}`,
+    );
+    return EXIT_USAGE;
   } catch (error: unknown) {
     io.stderr(
-      `cannot ${invocation.command} "${invocation.runId}/${invocation.nodeId}": ${describeError(error)}`,
+      `cannot ${invocation.command} "${label}": ${describeError(error)}`,
     );
     return EXIT_USAGE;
   } finally {
     await store?.close?.();
   }
+}
+
+/**
+ * Drive a queued admin request to a resolution. While a coordinator holds
+ * the run, wait for it to apply (or reject) the request. When none does —
+ * the run finished, was abandoned, or its coordinator ended mid-wait — apply
+ * it offline under the administrative lease. If a live coordinator never
+ * acknowledges within the timeout (for example, a coordinator running an
+ * older prism that cannot read the queue), withdraw the request so it can
+ * never fire later by surprise.
+ */
+async function waitForAdminRequest(
+  store: RunStore,
+  queued: AdminRequest,
+  timeoutMs: number,
+): Promise<AdminRequest> {
+  const getRequest = store.getAdminRequest?.bind(store);
+  if (getRequest === undefined) {
+    throw new Error("this run store does not support admin requests");
+  }
+  const clock = createSystemClock();
+  const deadline = clock.now() + timeoutMs;
+  let request = queued;
+  while (true) {
+    request = (await getRequest(request.requestId)) ?? request;
+    if (request.status !== "pending") {
+      return request;
+    }
+    const leases = await store.getRunLeases(request.runId);
+    if (!leases.some((lease) => lease.kind === "coordinator")) {
+      try {
+        return (await applyAdminRequestOffline(store, request.requestId))
+          .request;
+      } catch (error: unknown) {
+        // A coordinator started between the lease check and the offline
+        // attempt; keep waiting for it instead.
+        if (
+          !(error instanceof Error) ||
+          !error.message.includes("active coordinator lease")
+        ) {
+          throw error;
+        }
+      }
+    }
+    if (clock.now() >= deadline) {
+      const withdrawn = await store.cancelAdminRequest?.(
+        request.requestId,
+        `no live coordinator acknowledged the request within ${String(timeoutMs)}ms`,
+      );
+      if (withdrawn !== undefined && withdrawn.status !== "cancelled") {
+        return withdrawn;
+      }
+      throw new Error(
+        `run "${request.runId}" has an active coordinator that did not apply the request within ${String(timeoutMs)}ms (it may be running an older prism without live admin requests); the request was withdrawn — retry after the run finishes, or with a longer --timeout`,
+      );
+    }
+    await clock.wait(250);
+  }
+}
+
+function reportReset(
+  invocation: NodeTargetInvocation,
+  io: CliIo,
+  label: string,
+  appliedBy: "live" | "offline",
+  resetNodeIds: readonly string[] | undefined,
+  requestId: string | undefined,
+): number {
+  const also = (resetNodeIds ?? []).filter((id) => id !== invocation.nodeId);
+  io.stderr(
+    appliedBy === "live"
+      ? `reset ${label} (applied by the live coordinator; it re-runs now)${also.length > 0 ? `; also reset: ${also.join(", ")}` : ""}`
+      : `reset ${label} (applied offline; run \`prism resume ${invocation.runId}\` to re-run it)${also.length > 0 ? `; also reset: ${also.join(", ")}` : ""}`,
+  );
+  if (invocation.json) {
+    io.stdout(
+      stringifyJson({
+        version: 1,
+        runId: invocation.runId,
+        reset: invocation.nodeId,
+        includeDownstream: invocation.command === "rerun-node",
+        appliedBy,
+        ...(resetNodeIds === undefined ? {} : { resetNodeIds }),
+        ...(requestId === undefined ? {} : { requestId }),
+      }),
+    );
+  }
+  return EXIT_SUCCESS;
 }
 
 async function statusCommand(
@@ -1932,11 +2187,38 @@ async function statusCommand(
   try {
     store = await openPersistentStore(invocation.store);
     const runs = await store.listRuns();
+    const needsInputByRun = new Map<string, readonly FailureDescription[]>();
+    for (const run of runs) {
+      const inspection = await inspectRun(store, run.runId).catch(
+        () => undefined,
+      );
+      if (inspection === undefined) continue;
+      const waiting = describeFailures(inspection).filter(
+        (detail) => detail.disposition === "needs_input",
+      );
+      if (waiting.length > 0) needsInputByRun.set(run.runId, waiting);
+    }
     if (invocation.json) {
-      io.stdout(stringifyJson({ version: 1, runs }));
+      io.stdout(
+        stringifyJson({
+          version: 1,
+          runs: runs.map((run) => {
+            const waiting = needsInputByRun.get(run.runId);
+            return waiting === undefined
+              ? run
+              : { ...run, needsInput: waiting };
+          }),
+        }),
+      );
     } else {
       for (const run of runs) {
         io.stdout(`${run.runId}\t${run.finished ? "finished" : "running"}`);
+        for (const detail of needsInputByRun.get(run.runId) ?? []) {
+          io.stdout(
+            `  ⏸ needs input ${detail.nodeId}: ${detail.summary}${detail.pullRequestUrl === undefined ? "" : ` · ${detail.pullRequestUrl}`}`,
+          );
+          io.stdout(`    → ${detail.hint}`);
+        }
       }
     }
     return EXIT_SUCCESS;
@@ -1961,6 +2243,7 @@ function printWatchSnapshot(
         finished: inspection.finished,
         nodes: inspection.nodes,
         failures: inspection.failures,
+        failureDetails: describeFailures(inspection),
         leases: inspection.leases,
       }),
     );
@@ -1973,8 +2256,39 @@ function printWatchSnapshot(
   for (const node of inspection.nodes) {
     io.stdout(`${node.nodeId}: ${node.state}`);
   }
-  for (const failure of inspection.failures) {
+  printFailureLines(inspection, io);
+}
+
+function describeFailures(
+  inspection: RunInspection,
+): readonly FailureDescription[] {
+  return inspection.failures.map((failure) =>
+    describeFailure(failure, {
+      runId: inspection.runId,
+      finished: inspection.finished,
+    }),
+  );
+}
+
+/**
+ * Failures, split for the operator: blockers waiting on them ("needs
+ * input", with the PR) apart from failures, each with its next action.
+ * `failure <node>: <cause JSON>` lines stay byte-stable for scripts.
+ */
+function printFailureLines(inspection: RunInspection, io: CliIo): void {
+  const details = describeFailures(inspection);
+  for (const [index, failure] of inspection.failures.entries()) {
+    const detail = details[index];
+    if (detail?.disposition === "needs_input") continue;
     io.stdout(`failure ${failure.nodeId}: ${stringifyJson(failure.cause)}`);
+    if (detail !== undefined) io.stdout(`  next: ${detail.hint}`);
+  }
+  for (const detail of details) {
+    if (detail.disposition !== "needs_input") continue;
+    io.stdout(
+      `needs input ${detail.nodeId}: ${detail.summary}${detail.pullRequestUrl === undefined ? "" : ` · ${detail.pullRequestUrl}`}`,
+    );
+    io.stdout(`  next: ${detail.hint}`);
   }
 }
 
@@ -1990,6 +2304,19 @@ async function watchCommand(
   let resolvedRunId: string | undefined;
   try {
     store = await openPersistentStore(invocation.store, invocation.repo);
+    if (invocation.runId === undefined) {
+      const unfinished = (await store.listRuns()).filter(
+        (summary) => !summary.finished,
+      );
+      if (unfinished.length > 1) {
+        return await watchManyRuns(
+          store,
+          unfinished.map((summary) => summary.runId),
+          invocation,
+          io,
+        );
+      }
+    }
     resolvedRunId = await resolveRunId(store, invocation.runId, true);
     const run = await store.getRun(resolvedRunId);
     if (run === undefined) {
@@ -2033,6 +2360,68 @@ async function watchCommand(
     return EXIT_USAGE;
   } finally {
     await store?.close?.();
+  }
+}
+
+/**
+ * Watch several unfinished runs at once: stacked dashboards with run
+ * headers when interactive, otherwise one snapshot per run per tick. Ends
+ * when every watched run has finished; exits 1 if any did not succeed.
+ */
+async function watchManyRuns(
+  store: RunStore,
+  runIds: readonly string[],
+  invocation: WatchInvocation,
+  io: CliIo,
+): Promise<number> {
+  const clock = createSystemClock();
+  let frame = 0;
+  while (true) {
+    const inspections: RunInspection[] = [];
+    for (const runId of runIds) {
+      inspections.push(await inspectRun(store, runId));
+    }
+    if (io.interactive === true && !invocation.json) {
+      const rowsPerRun =
+        io.rows === undefined
+          ? undefined
+          : Math.max(6, Math.floor(io.rows / runIds.length) - 1);
+      const panels: string[] = [];
+      for (const inspection of inspections) {
+        const graph = (await store.getRun(inspection.runId))?.graph;
+        if (graph === undefined) continue;
+        panels.push(
+          `── run ${inspection.runId} ${"─".repeat(
+            Math.max(0, (io.columns ?? 100) - inspection.runId.length - 8),
+          )}`,
+        );
+        panels.push(
+          renderWatchDashboard(graph, inspection, {
+            ...(io.columns === undefined ? {} : { columns: io.columns }),
+            ...(rowsPerRun === undefined ? {} : { rows: rowsPerRun }),
+            ...(io.color === undefined ? {} : { color: io.color }),
+            frame,
+          }),
+        );
+      }
+      const screen = `\u001B[2J\u001B[H${panels.join("\n")}\n`;
+      if (io.write === undefined) {
+        io.stdout(screen);
+      } else {
+        io.write(screen);
+      }
+    } else {
+      for (const inspection of inspections) {
+        printWatchSnapshot(inspection, invocation.json, io);
+      }
+    }
+    if (inspections.every((inspection) => inspection.finished)) {
+      return inspections.some(inspectionFailed)
+        ? EXIT_RUN_FAILED
+        : EXIT_SUCCESS;
+    }
+    frame += 1;
+    await clock.wait(invocation.intervalMs);
   }
 }
 
