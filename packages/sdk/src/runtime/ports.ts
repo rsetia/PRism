@@ -1,5 +1,5 @@
 import type { CompiledGraph, JsonValue, NodeKind } from "../graph/types.js";
-import type { GraphRevision } from "./graph-revision.js";
+import type { GraphRefresh, GraphRevision } from "./graph-revision.js";
 import type {
   GraphExpansionProposal,
   GraphProposalResult,
@@ -198,6 +198,13 @@ export interface AdminRequest {
   /** Nodes reset when applied (graph order); explanation when rejected. */
   readonly resetNodeIds?: readonly string[];
   readonly message?: string;
+  /**
+   * `rerun-node --refresh` / `signal --refresh`: replacement frozen configs
+   * applied as an audited graph revision together with the reset. A
+   * coordinator that cannot apply a refresh must reject the request rather
+   * than reset without it.
+   */
+  readonly refresh?: GraphRefresh;
 }
 
 export interface EnqueueAdminRequestInput {
@@ -205,6 +212,7 @@ export interface EnqueueAdminRequestInput {
   readonly runId: string;
   readonly action: AdminRequestAction;
   readonly nodeId: string;
+  readonly refresh?: GraphRefresh;
 }
 
 /**
@@ -222,6 +230,15 @@ export interface ResolveAdminRequestInput {
   /** Required with events: the run's next event sequence. */
   readonly expectedRevision?: number;
   readonly reopen?: boolean;
+  /**
+   * An accepted refresh revision persisted in the same transaction, before
+   * `events`: the run's graph snapshot is replaced only if the run is still
+   * at `expectedGraphRevision`.
+   */
+  readonly graphRevision?: {
+    readonly revision: GraphRevision;
+    readonly expectedGraphRevision: number;
+  };
 }
 
 export interface ResolveAdminRequestResult {
@@ -229,6 +246,8 @@ export interface ResolveAdminRequestResult {
   readonly resolved: boolean;
   readonly request: AdminRequest;
   readonly persisted: readonly PersistedRunEvent[];
+  /** The persisted refresh revision, when one was applied. */
+  readonly graphRevision?: GraphRevision;
 }
 
 /**

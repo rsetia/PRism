@@ -22,7 +22,7 @@ import type {
   StoredRun,
 } from "../runtime/ports.js";
 import type { RunOutcome } from "../runtime/types.js";
-import type { GraphRevision } from "../runtime/graph-revision.js";
+import type { GraphRefresh, GraphRevision } from "../runtime/graph-revision.js";
 
 export interface SqliteStoreOptions {
   /**
@@ -99,7 +99,9 @@ function openDatabase(path: string): Database {
  * Admin requests live in an additive `admin_requests` table created on the
  * first admin-request WRITE, never on open, and without a schema-version
  * bump: an older release ignores the table, so a rollback still opens the
- * file, and read-only opens stay byte-identical.
+ * file, and read-only opens stay byte-identical. Its nullable `refresh_json`
+ * column (rerun-node --refresh) is likewise added on the first refresh
+ * write to a table created before it existed.
  */
 export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   const schemaVersion = 2;
@@ -308,6 +310,7 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
         resolved_at_ms INTEGER,
         reset_node_ids_json TEXT,
         message TEXT,
+        refresh_json TEXT,
         FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
       ) STRICT;
       CREATE INDEX IF NOT EXISTS admin_requests_by_run_status
@@ -316,11 +319,25 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     hasAdminTable = true;
   }
 
+  /** Tables created before refresh support lack the column; add it once. */
+  function ensureRefreshColumn(): void {
+    const columns = db
+      .prepare("PRAGMA table_info(admin_requests)")
+      .all()
+      .map((row) => readString(row, "name"));
+    if (!columns.includes("refresh_json")) {
+      db.exec("ALTER TABLE admin_requests ADD COLUMN refresh_json TEXT");
+    }
+  }
+
   function decodeAdminRequest(row: Record<string, unknown>): AdminRequest {
     const resetJson = readNullableString(row, "reset_node_ids_json");
     const resolvedBy = readNullableString(row, "resolved_by");
     const resolvedAtMs = readNullableNumber(row, "resolved_at_ms");
     const message = readNullableString(row, "message");
+    const refreshJson = Object.hasOwn(row, "refresh_json")
+      ? readNullableString(row, "refresh_json")
+      : undefined;
     return Object.freeze({
       requestId: readString(row, "request_id"),
       runId: readString(row, "run_id"),
@@ -340,6 +357,9 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
             ),
           }),
       ...(message === undefined ? {} : { message }),
+      ...(refreshJson === undefined
+        ? {}
+        : { refresh: JSON.parse(refreshJson) as GraphRefresh }),
     });
   }
 
@@ -806,9 +826,23 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
       if (selectAdminRequest(input.requestId) !== undefined) {
         throw new Error(`admin request already exists: "${input.requestId}"`);
       }
-      db.prepare(
-        "INSERT INTO admin_requests (request_id, run_id, action, node_id, status, created_at_ms) VALUES (?, ?, ?, ?, 'pending', ?)",
-      ).run(input.requestId, input.runId, input.action, input.nodeId, now());
+      if (input.refresh === undefined) {
+        db.prepare(
+          "INSERT INTO admin_requests (request_id, run_id, action, node_id, status, created_at_ms) VALUES (?, ?, ?, ?, 'pending', ?)",
+        ).run(input.requestId, input.runId, input.action, input.nodeId, now());
+      } else {
+        ensureRefreshColumn();
+        db.prepare(
+          "INSERT INTO admin_requests (request_id, run_id, action, node_id, status, created_at_ms, refresh_json) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+        ).run(
+          input.requestId,
+          input.runId,
+          input.action,
+          input.nodeId,
+          now(),
+          JSON.stringify(input.refresh),
+        );
+      }
       const created = selectAdminRequest(input.requestId);
       if (created === undefined) {
         throw new Error(
@@ -873,11 +907,57 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
         }
         const events = input.events ?? [];
         const finished = readNumber(run, "finished") === 1;
+        const refresh =
+          input.status === "applied" ? input.graphRevision : undefined;
         let persisted: readonly PersistedRunEvent[] = [];
-        if (events.length > 0) {
-          if (finished && input.reopen !== true) {
+        let persistedRevision: GraphRevision | undefined;
+        if ((events.length > 0 || refresh !== undefined) && finished) {
+          if (input.reopen !== true) {
             throw new Error(`run is already finished: "${request.runId}"`);
           }
+        }
+        if (refresh !== undefined) {
+          const current = Object.hasOwn(run, "graph_revision")
+            ? readNumber(run, "graph_revision")
+            : 0;
+          if (current !== refresh.expectedGraphRevision) {
+            throw new Error(
+              `graph revision conflict: expected ${String(refresh.expectedGraphRevision)}, actual ${String(current)}`,
+            );
+          }
+          if (
+            refresh.revision.decision.status !== "accepted" ||
+            refresh.revision.graph === undefined
+          ) {
+            throw new Error("refresh revision must be accepted with a graph");
+          }
+          if (finished) reopenRunStatement.run(request.runId);
+          const count = readNumber(
+            selectGraphRevisionCount.get(request.runId),
+            "count",
+          );
+          persistedRevision = Object.freeze({
+            ...refresh.revision,
+            sequence: count,
+            graphRevision: current + 1,
+            timestampMs: now(),
+            addedNodeIds: Object.freeze([...refresh.revision.addedNodeIds]),
+          });
+          insertGraphRevision.run(
+            request.runId,
+            count,
+            refresh.revision.proposal.id,
+            JSON.stringify(persistedRevision),
+          );
+          db.prepare(
+            "UPDATE runs SET graph_json = ?, graph_revision = ? WHERE run_id = ?",
+          ).run(
+            JSON.stringify(refresh.revision.graph),
+            current + 1,
+            request.runId,
+          );
+        }
+        if (events.length > 0) {
           let sequence = readNumber(
             selectNextSequence.get(request.runId),
             "next_seq",
@@ -890,7 +970,9 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
               `run revision conflict: expected ${String(input.expectedRevision)}, actual ${String(sequence)}`,
             );
           }
-          if (finished) reopenRunStatement.run(request.runId);
+          if (finished && refresh === undefined) {
+            reopenRunStatement.run(request.runId);
+          }
           persisted = events.map((event) => {
             const saved = snapshotRunEvent(event, sequence, now());
             insertEvent.run(request.runId, sequence, JSON.stringify(saved));
@@ -916,7 +998,14 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
         if (resolved === undefined) {
           throw new Error(`admin request vanished: "${input.requestId}"`);
         }
-        return { resolved: true, request: resolved, persisted };
+        return {
+          resolved: true,
+          request: resolved,
+          persisted,
+          ...(persistedRevision === undefined
+            ? {}
+            : { graphRevision: persistedRevision }),
+        };
       } catch (error: unknown) {
         if (db.isTransaction) db.exec("ROLLBACK");
         throw error;

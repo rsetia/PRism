@@ -1,4 +1,9 @@
-import type { GraphDefinition, JsonValue } from "../graph/types.js";
+import type {
+  CompiledGraph,
+  GraphDefinition,
+  JsonValue,
+} from "../graph/types.js";
+import type { GraphRefresh } from "../runtime/graph-revision.js";
 import { isJsonValue, isPlainObject } from "../internal/json.js";
 
 /**
@@ -414,6 +419,98 @@ export function buildBeadsGraph(
       : {}),
     nodes,
     finalNode,
+  };
+}
+
+/**
+ * Re-snapshot one Beads work item into refresh configs for an existing
+ * graph (plan §16, `rerun-node --refresh`). The target must be a task node
+ * whose `workItem` is a Bead; its first dependency must be the constant
+ * context node buildBeadsGraph made for the same Bead. Only the work item
+ * text changes: the context node gets the fresh record (keeping its
+ * recorded dependencies and, unless a new one is given, its frozen spec),
+ * and the task node gets the fresh title — every other setting is kept.
+ */
+export function refreshBeadsNodeConfigs(
+  graph: CompiledGraph,
+  targetNodeId: string,
+  bead: Bead,
+  spec?: BeadsSpecDocument,
+): GraphRefresh {
+  const target = graph.nodes[targetNodeId];
+  if (target === undefined) {
+    throw new Error(`unknown node "${targetNodeId}"`);
+  }
+  const config = isPlainObject(target.config) ? target.config : undefined;
+  const workItem = isPlainObject(config?.["workItem"])
+    ? config["workItem"]
+    : undefined;
+  if (config === undefined || workItem?.["provider"] !== "beads") {
+    throw new Error(
+      `node "${targetNodeId}" has no Beads work item; --refresh supports Beads-backed nodes only`,
+    );
+  }
+  const id = normalizeBeadId(bead.id);
+  if (id !== workItem["id"]) {
+    throw new Error(
+      `refreshed Bead id "${id}" does not match the node's work item ${JSON.stringify(workItem["id"])}`,
+    );
+  }
+  const contextNodeId = target.dependsOn[0];
+  const context =
+    contextNodeId === undefined ? undefined : graph.nodes[contextNodeId];
+  const contextValue = isPlainObject(context?.config)
+    ? context.config["value"]
+    : undefined;
+  if (
+    contextNodeId === undefined ||
+    context?.executor !== "constant" ||
+    !isPlainObject(contextValue) ||
+    contextValue["id"] !== id
+  ) {
+    throw new Error(
+      `node "${targetNodeId}" has no constant context node for Bead "${id}"`,
+    );
+  }
+  const dependencies = Array.isArray(contextValue["dependencies"])
+    ? contextValue["dependencies"].filter(
+        (entry): entry is string => typeof entry === "string",
+      )
+    : [];
+  const frozenSpec = isPlainObject(contextValue["specDocument"])
+    ? contextValue["specDocument"]
+    : undefined;
+  const keptSpec: BeadsSpecDocument | undefined =
+    spec ??
+    (typeof frozenSpec?.["content"] === "string"
+      ? {
+          content: frozenSpec["content"],
+          ...(typeof frozenSpec["source"] === "string"
+            ? { source: frozenSpec["source"] }
+            : {}),
+        }
+      : undefined);
+  const fresh = id === bead.id ? bead : { ...bead, id };
+  return {
+    targetNodeId,
+    configs: {
+      [contextNodeId]: { value: beadContext(fresh, dependencies, keptSpec) },
+      [targetNodeId]: {
+        ...config,
+        workItem: {
+          provider: "beads",
+          id,
+          url: `beads://${id}`,
+          ...(typeof fresh.title === "string" ? { title: fresh.title } : {}),
+        },
+      },
+    },
+    source: {
+      workItemId: id,
+      ...(spec === undefined
+        ? {}
+        : { specSource: spec.source ?? "(inline spec)" }),
+    },
   };
 }
 

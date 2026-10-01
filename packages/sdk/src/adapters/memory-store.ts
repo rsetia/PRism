@@ -468,6 +468,7 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
       nodeId: input.nodeId,
       status: "pending",
       createdAtMs: now(),
+      ...(input.refresh === undefined ? {} : { refresh: input.refresh }),
     });
     adminRequests.set(input.requestId, request);
     return Promise.resolve(request);
@@ -507,10 +508,27 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
         return Promise.resolve({ resolved: false, request, persisted: [] });
       }
       const events = input.events ?? [];
-      if (events.length > 0) {
+      const refresh =
+        input.status === "applied" ? input.graphRevision : undefined;
+      if (events.length > 0 || refresh !== undefined) {
         if (run.finished && input.reopen !== true) {
           throw new Error(`run is already finished: "${request.runId}"`);
         }
+      }
+      if (refresh !== undefined) {
+        if (refresh.expectedGraphRevision !== run.graphRevision) {
+          throw new Error(
+            `graph revision conflict: expected ${String(refresh.expectedGraphRevision)}, actual ${String(run.graphRevision)}`,
+          );
+        }
+        if (
+          refresh.revision.decision.status !== "accepted" ||
+          refresh.revision.graph === undefined
+        ) {
+          throw new Error("refresh revision must be accepted with a graph");
+        }
+      }
+      if (events.length > 0) {
         const nextSequence = run.events.length;
         if (
           input.expectedRevision === undefined ||
@@ -524,9 +542,22 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
       const persisted = events.map((event, index) =>
         snapshotRunEvent(event, run.events.length + index, now()),
       );
-      if (events.length > 0 && run.finished) {
+      if ((events.length > 0 || refresh !== undefined) && run.finished) {
         run.finished = false;
         run.outcome = undefined;
+      }
+      let persistedRevision: GraphRevision | undefined;
+      if (refresh !== undefined) {
+        persistedRevision = Object.freeze({
+          ...refresh.revision,
+          sequence: run.graphRevisions.length,
+          graphRevision: run.graphRevision + 1,
+          timestampMs: now(),
+          addedNodeIds: Object.freeze([...refresh.revision.addedNodeIds]),
+        });
+        run.graphRevisions.push(persistedRevision);
+        run.graph = refresh.revision.graph as CompiledGraph;
+        run.graphRevision += 1;
       }
       run.events.push(...persisted);
       const resolved: AdminRequest = Object.freeze({
@@ -545,6 +576,9 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
         resolved: true,
         request: resolved,
         persisted: Object.freeze(persisted),
+        ...(persistedRevision === undefined
+          ? {}
+          : { graphRevision: persistedRevision }),
       });
     } catch (error: unknown) {
       return Promise.reject(asError(error, "admin request resolution failed"));

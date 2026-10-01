@@ -245,6 +245,41 @@ describe("watch dashboard", () => {
   });
 });
 
+describe("refresh revisions", () => {
+  test("watch says which node's work item was refreshed, and when", () => {
+    const output = renderWatchDashboard(
+      graph(),
+      {
+        ...inspection(),
+        graphRevisions: [
+          {
+            sequence: 0,
+            graphRevision: 1,
+            timestampMs: Date.UTC(2026, 9, 1, 8, 30),
+            proposal: {
+              id: "refresh:req",
+              proposer: "operator:rerun-node --refresh",
+              nodes: {},
+              refresh: {
+                targetNodeId: "implement",
+                configs: {},
+                source: { workItemId: "xondom-kko.9" },
+              },
+            },
+            decision: { status: "accepted", policy: "operator-refresh" },
+            addedNodeIds: [],
+            refreshedNodeIds: ["context", "implement"],
+          },
+        ],
+      },
+      { columns: 120, color: false },
+    );
+    expect(output).toContain(
+      "↻ refreshed work item for implement (xondom-kko.9) at 2026-10-01T08:30:00.000Z",
+    );
+  });
+});
+
 describe("poll mode dashboard", () => {
   // Imported lazily so the Beads-only tests above do not depend on poll exports.
   async function pollFixture(withItem: boolean) {

@@ -28,7 +28,13 @@ import {
   NO_RETRIES,
   type RetryPolicy,
 } from "./retry.js";
-import { planAdminReset, resetRun, resumableFailedNodes } from "./admin.js";
+import {
+  planAdminReset,
+  planRefreshReset,
+  refreshRevisionFor,
+  resetRun,
+  resumableFailedNodes,
+} from "./admin.js";
 import { reduceNodeState } from "./transitions.js";
 import type { NodeFailure, NodeState, RunOutcome } from "./types.js";
 import {
@@ -1326,12 +1332,52 @@ async function executeRun(
       if (adminStore === undefined) return false;
       await renewCoordinatorLease();
       const lease = currentCoordinatorLease as RunLease;
+      // A refresh first proves the replacement configs are structurally
+      // safe and acceptable to their executors; anything else is rejected
+      // durably rather than silently reset without the new input.
+      const refreshed =
+        request.refresh === undefined
+          ? undefined
+          : refreshRevisionFor(graph, request);
+      let refreshError =
+        refreshed !== undefined && !refreshed.ok
+          ? refreshed.message
+          : undefined;
+      if (refreshed?.ok === true && refreshError === undefined) {
+        for (const nodeId of refreshed.revision.refreshedNodeIds ?? []) {
+          const node = refreshed.revision.graph?.nodes[nodeId];
+          try {
+            executors.get(nodeId)?.validateConfig?.(node?.config);
+          } catch (error: unknown) {
+            refreshError = `invalid refreshed config for "${nodeId}": ${
+              error instanceof Error ? error.message : String(error)
+            }`;
+            break;
+          }
+        }
+      }
       const plan = cancellation.isRequested()
         ? ({
             ok: false,
             message: `run "${runId}" is cancelling`,
           } as const)
-        : planAdminReset(graph, states, request.action, request.nodeId, "live");
+        : refreshError !== undefined
+          ? ({ ok: false, message: refreshError } as const)
+          : request.refresh === undefined
+            ? planAdminReset(
+                graph,
+                states,
+                request.action,
+                request.nodeId,
+                "live",
+              )
+            : planRefreshReset(
+                graph,
+                states,
+                request.action,
+                request.refresh,
+                "live",
+              );
       if (!plan.ok) {
         await adminStore.resolve(
           {
@@ -1356,6 +1402,10 @@ async function executeRun(
         }
         staged.set(event.nodeId, reduceNodeState(previous, event));
       }
+      const expectedGraphRevision =
+        refreshed?.ok === true
+          ? (await store.getRun(runId))?.graphRevision
+          : undefined;
       const result = await adminStore.resolve(
         {
           requestId: request.requestId,
@@ -1364,6 +1414,14 @@ async function executeRun(
           resetNodeIds: plan.nodeIds,
           events,
           expectedRevision: revision,
+          ...(refreshed?.ok === true && expectedGraphRevision !== undefined
+            ? {
+                graphRevision: {
+                  revision: refreshed.revision,
+                  expectedGraphRevision,
+                },
+              }
+            : {}),
         },
         lease,
       );
@@ -1380,6 +1438,13 @@ async function executeRun(
         }
       }
       revision += result.persisted.length;
+      if (result.graphRevision?.graph !== undefined) {
+        // Adopt the refreshed snapshot: same nodes and edges, new frozen
+        // input for the refreshed nodes. Executors are keyed by node and
+        // unchanged, so only dispatch-time config reads see the difference.
+        graph =
+          (await store.getRun(runId))?.graph ?? result.graphRevision.graph;
+      }
       for (const [nodeId, state] of staged) {
         states.set(nodeId, state);
         // Mirror replayExecutionState's node_reset: the node re-runs fresh.

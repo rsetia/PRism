@@ -17,7 +17,11 @@ export type {
   ResourceDefinition,
 } from "./graph/types.js";
 export type { GraphCompileError, GraphParseError } from "./graph/errors.js";
-export { buildBeadsGraph, parseBeadsJsonl } from "./beads/generate.js";
+export {
+  buildBeadsGraph,
+  parseBeadsJsonl,
+  refreshBeadsNodeConfigs,
+} from "./beads/generate.js";
 export type {
   Bead,
   BeadsGraphOptions,
@@ -81,12 +85,18 @@ export type {
   SchedulerUtilization,
   WatchRunOptions,
 } from "./runtime/inspect.js";
-export { submitGraphProposal } from "./runtime/graph-revision.js";
+export {
+  buildRefreshRevision,
+  compileRefresh,
+  isRefreshRevision,
+  submitGraphProposal,
+} from "./runtime/graph-revision.js";
 export type {
   GraphExpansionProposal,
   GraphProposalDecision,
   GraphProposalPolicy,
   GraphProposalResult,
+  GraphRefresh,
   GraphRevision,
 } from "./runtime/graph-revision.js";
 export {
@@ -94,6 +104,8 @@ export {
   applyAdminRequestOffline,
   LIVE_RESETTABLE_STATES,
   planAdminReset,
+  planRefreshReset,
+  refreshRevisionFor,
   resetRun,
   resumableFailedNodes,
 } from "./runtime/admin.js";

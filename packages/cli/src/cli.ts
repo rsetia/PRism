@@ -20,6 +20,7 @@ import {
   describeFailure,
   inspectRun,
   parseGraph,
+  refreshBeadsNodeConfigs,
   resetRun,
   transientInfraRetryPolicy,
   watchRun,
@@ -30,6 +31,7 @@ import type {
   FailureDescription,
   GraphCompileError,
   GraphParseError,
+  GraphRefresh,
   NodeFailure,
   ProofOfWorkV1,
   PhaseDuration,
@@ -57,7 +59,11 @@ import {
   DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_REASONING_EFFORT,
 } from "./agent-executors.js";
-import { generateBeadsDag } from "./beads-dag.js";
+import {
+  generateBeadsDag,
+  readSpecDocument,
+  snapshotBead,
+} from "./beads-dag.js";
 import { applyGreptileAppSlug } from "./review-policy.js";
 import {
   missingPrismHomeMessage,
@@ -158,16 +164,23 @@ Commands:
   abort <run-id> [--store <db>] [--json]
                                       Force a stuck run to a cancelled, finished state
   signal <run-id> <node-id> [--store <db>] [--json] [--timeout <ms>]
+         [--refresh [--spec-file <path>] [--beads-repo <path>]]
                                       Reset a node (and its blocked/skipped
                                       dependents). A live run applies it and
                                       re-runs the node itself; otherwise it is
                                       applied offline for a later resume
   rerun-node <run-id> <node-id> [--store <db>] [--json] [--timeout <ms>]
+             [--refresh [--spec-file <path>] [--beads-repo <path>]]
                                       Reset a node and its downstream. A live
                                       run re-runs them in place (resetting only
                                       failed/blocked/cancelled/skipped
                                       dependents); otherwise every dependent,
-                                      even succeeded ones, is reset for resume
+                                      even succeeded ones, is reset for resume.
+                                      --refresh re-reads the node's Bead (and
+                                      --spec-file) into the run as an audited
+                                      graph revision before resetting it, in
+                                      the same run; nodes that succeeded or are
+                                      running cannot be refreshed
 
 Defaults:
   Repository                            Current git repository
@@ -285,6 +298,11 @@ interface NodeTargetInvocation {
   readonly store: string | undefined;
   /** How long to wait for a live coordinator to acknowledge, in ms. */
   readonly timeoutMs: number;
+  /** --refresh: re-snapshot the node's work item (and optionally spec). */
+  readonly refresh?: {
+    readonly specFile?: string;
+    readonly beadsRepo?: string;
+  };
 }
 interface SkillsInvocation {
   readonly command: "skills";
@@ -343,6 +361,9 @@ interface ParsedFlags {
   readonly greptileAppSlug: string | undefined;
   readonly maxTransientRetries: string | undefined;
   readonly timeout: string | undefined;
+  readonly refresh: boolean;
+  readonly specFile: string | undefined;
+  readonly beadsRepo: string | undefined;
 }
 
 /** Positional args plus known scalar flags; an unknown flag is invalid. */
@@ -362,12 +383,18 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
   let greptileAppSlug: string | undefined;
   let maxTransientRetries: string | undefined;
   let timeout: string | undefined;
+  let refresh = false;
+  let specFile: string | undefined;
+  let beadsRepo: string | undefined;
 
   for (let index = 0; index < rest.length; index += 1) {
     const arg = rest[index];
     if (arg === "--json") {
       if (json) return undefined;
       json = true;
+    } else if (arg === "--refresh") {
+      if (refresh) return undefined;
+      refresh = true;
     } else if (
       arg === "--store" ||
       arg === "--run-id" ||
@@ -381,7 +408,9 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
       arg === "--worktree-dir" ||
       arg === "--greptile-app-slug" ||
       arg === "--max-transient-retries" ||
-      arg === "--timeout"
+      arg === "--timeout" ||
+      arg === "--spec-file" ||
+      arg === "--beads-repo"
     ) {
       const value = rest[index + 1];
       if (value === undefined || value.startsWith("--")) return undefined;
@@ -422,6 +451,12 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
       } else if (arg === "--timeout") {
         if (timeout !== undefined) return undefined;
         timeout = value;
+      } else if (arg === "--spec-file") {
+        if (specFile !== undefined) return undefined;
+        specFile = value;
+      } else if (arg === "--beads-repo") {
+        if (beadsRepo !== undefined) return undefined;
+        beadsRepo = value;
       } else {
         if (greptileAppSlug !== undefined || value.trim().length === 0) {
           return undefined;
@@ -451,6 +486,9 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
     greptileAppSlug,
     maxTransientRetries,
     timeout,
+    refresh,
+    specFile,
+    beadsRepo,
   };
 }
 
@@ -470,11 +508,18 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
   }
   const flags = parseFlags(rest);
   if (flags === undefined) return undefined;
-  // --timeout belongs to the live-reset commands only.
+  // --timeout and --refresh belong to the live-reset commands only, and
+  // --spec-file / --beads-repo only make sense with --refresh.
   if (
-    flags.timeout !== undefined &&
+    (flags.timeout !== undefined || flags.refresh) &&
     command !== "signal" &&
     command !== "rerun-node"
+  ) {
+    return undefined;
+  }
+  if (
+    !flags.refresh &&
+    (flags.specFile !== undefined || flags.beadsRepo !== undefined)
   ) {
     return undefined;
   }
@@ -633,6 +678,18 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
         json: flags.json,
         store: flags.store,
         timeoutMs,
+        ...(flags.refresh
+          ? {
+              refresh: {
+                ...(flags.specFile === undefined
+                  ? {}
+                  : { specFile: flags.specFile }),
+                ...(flags.beadsRepo === undefined
+                  ? {}
+                  : { beadsRepo: flags.beadsRepo }),
+              },
+            }
+          : {}),
       };
     }
     case "status":
@@ -1395,8 +1452,11 @@ async function inspectCommand(
       );
       printFailureLines(inspection, io);
       for (const revision of inspection.graphRevisions ?? []) {
+        const refresh = revision.proposal.refresh;
         io.stdout(
-          `graph revision ${String(revision.graphRevision)}: ${revision.decision.status} · ${revision.proposal.proposer} · ${revision.addedNodeIds.join(", ") || "no nodes"}`,
+          refresh === undefined
+            ? `graph revision ${String(revision.graphRevision)}: ${revision.decision.status} · ${revision.proposal.proposer} · ${revision.addedNodeIds.join(", ") || "no nodes"}`
+            : `graph revision ${String(revision.graphRevision)}: ${describeRefresh(revision)}`,
         );
       }
       if (inspection.timing === null) {
@@ -2037,11 +2097,20 @@ async function resetCommand(
       );
     }
     const includeDownstream = invocation.command === "rerun-node";
+    const refresh =
+      invocation.refresh === undefined
+        ? undefined
+        : await buildRefresh(run.graph, invocation.nodeId, invocation.refresh);
 
     if (
       store.enqueueAdminRequest === undefined ||
       store.getAdminRequest === undefined
     ) {
+      if (refresh !== undefined) {
+        throw new Error(
+          "--refresh needs a run store with admin requests (the persistent SQLite store)",
+        );
+      }
       // A store without the admin queue: the historical offline reset.
       await resetRun(
         store,
@@ -2066,6 +2135,7 @@ async function resetCommand(
         runId: invocation.runId,
         action: invocation.command,
         nodeId: invocation.nodeId,
+        ...(refresh === undefined ? {} : { refresh }),
       }),
       invocation.timeoutMs,
     );
@@ -2090,6 +2160,94 @@ async function resetCommand(
     return EXIT_USAGE;
   } finally {
     await store?.close?.();
+  }
+}
+
+/**
+ * Re-snapshot a node's work item (plan §16, `--refresh`). Beads nodes are
+ * re-read through `bd` exactly as beads-dag reads them. The Beads repo is,
+ * in order: --beads-repo, the run's own beads_update node for that Bead,
+ * the project's resolved Beads workspace, then the current directory.
+ */
+async function buildRefresh(
+  graph: CompiledGraph,
+  nodeId: string,
+  options: { readonly specFile?: string; readonly beadsRepo?: string },
+): Promise<GraphRefresh> {
+  const workItem = recordValue(
+    recordValue(graph.nodes[nodeId]?.config)?.["workItem"],
+  );
+  const id = workItem?.["id"];
+  if (workItem?.["provider"] !== "beads" || typeof id !== "string") {
+    throw new Error(
+      `node "${nodeId}" has no Beads work item; --refresh supports Beads-backed nodes only`,
+    );
+  }
+  const beadsRepo =
+    options.beadsRepo ?? beadsRepoFromGraph(graph, id) ?? defaultBeadsRepo();
+  const bead = await snapshotBead(id, beadsRepo);
+  const spec =
+    options.specFile === undefined
+      ? undefined
+      : await readSpecDocument(options.specFile);
+  return refreshBeadsNodeConfigs(graph, nodeId, bead, spec);
+}
+
+function beadsRepoFromGraph(
+  graph: CompiledGraph,
+  beadId: string,
+): string | undefined {
+  for (const nodeId of graph.order) {
+    const node = graph.nodes[nodeId];
+    const config = recordValue(node?.config);
+    const beadsRepo = config?.["beadsRepo"];
+    if (
+      node?.executor === "beads_update" &&
+      config?.["beadId"] === beadId &&
+      typeof beadsRepo === "string"
+    ) {
+      return beadsRepo;
+    }
+  }
+  return undefined;
+}
+
+/** "refreshed work item for <node> (<item>) at <ISO time>[ · spec <source>]". */
+export function describeRefresh(revision: {
+  readonly timestampMs: number;
+  readonly proposal: {
+    readonly refresh?: {
+      readonly targetNodeId: string;
+      readonly source?: unknown;
+    };
+  };
+}): string {
+  const refresh = revision.proposal.refresh;
+  const source = recordValue(refresh?.source);
+  const item =
+    typeof source?.["workItemId"] === "string"
+      ? ` (${source["workItemId"]})`
+      : "";
+  const spec =
+    typeof source?.["specSource"] === "string"
+      ? ` · spec ${source["specSource"]}`
+      : "";
+  return `refreshed work item for ${refresh?.targetNodeId ?? "?"}${item} at ${new Date(revision.timestampMs).toISOString()}${spec}`;
+}
+
+function recordValue(
+  value: unknown,
+): Readonly<Record<string, unknown>> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : undefined;
+}
+
+function defaultBeadsRepo(): string {
+  try {
+    return resolvePrismProjectPaths().beadsRepoDir ?? process.cwd();
+  } catch {
+    return process.cwd();
   }
 }
 
@@ -2160,10 +2318,12 @@ function reportReset(
   requestId: string | undefined,
 ): number {
   const also = (resetNodeIds ?? []).filter((id) => id !== invocation.nodeId);
+  const verb =
+    invocation.refresh === undefined ? "reset" : "refreshed and reset";
   io.stderr(
     appliedBy === "live"
-      ? `reset ${label} (applied by the live coordinator; it re-runs now)${also.length > 0 ? `; also reset: ${also.join(", ")}` : ""}`
-      : `reset ${label} (applied offline; run \`prism resume ${invocation.runId}\` to re-run it)${also.length > 0 ? `; also reset: ${also.join(", ")}` : ""}`,
+      ? `${verb} ${label} (applied by the live coordinator; it re-runs now)${also.length > 0 ? `; also reset: ${also.join(", ")}` : ""}`
+      : `${verb} ${label} (applied offline; run \`prism resume ${invocation.runId}\` to re-run it)${also.length > 0 ? `; also reset: ${also.join(", ")}` : ""}`,
   );
   if (invocation.json) {
     io.stdout(
@@ -2172,6 +2332,7 @@ function reportReset(
         runId: invocation.runId,
         reset: invocation.nodeId,
         includeDownstream: invocation.command === "rerun-node",
+        ...(invocation.refresh === undefined ? {} : { refreshed: true }),
         appliedBy,
         ...(resetNodeIds === undefined ? {} : { resetNodeIds }),
         ...(requestId === undefined ? {} : { requestId }),
