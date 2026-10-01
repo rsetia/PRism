@@ -1718,6 +1718,10 @@ export function createEngine(options: EngineOptions): Engine {
           if (targets.length === 0) {
             return stored.outcome;
           }
+          // resetRun holds its own administrative lease; the coordinator
+          // lease below is acquired separately. If another coordinator wins
+          // that gap, acquisition rejects clearly and the reopened run waits
+          // for the next resume — recoverable, never double-driven.
           await resetRun(store, runId, targets, { includeDownstream: true });
           const reopened = await store.getRun(runId);
           if (reopened === undefined || reopened.finished) {

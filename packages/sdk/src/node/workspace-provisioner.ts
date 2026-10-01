@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { access, mkdir, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { encodePathComponent } from "./path-component.js";
 
@@ -284,9 +284,13 @@ const repoLocks = new Map<string, Promise<unknown>>();
  * (config, refs, worktrees) that concurrent commands otherwise fight over.
  */
 async function withRepoLock<T>(
-  repoDir: string,
+  repoDirInput: string,
   fn: () => Promise<T>,
 ): Promise<T> {
+  // Key on the canonical path so `/r`, `/r/` and a symlink share one lock.
+  const repoDir = await realpath(resolve(repoDirInput)).catch(() =>
+    resolve(repoDirInput),
+  );
   const previous = repoLocks.get(repoDir) ?? Promise.resolve();
   const run = previous.then(fn, fn);
   const settled = run.then(
@@ -304,7 +308,7 @@ async function withRepoLock<T>(
 }
 
 const GIT_LOCK_ERROR =
-  /could not lock config file|Unable to create '[^']*\.lock'|cannot lock ref|\.lock': File exists|index\.lock/i;
+  /could not lock config file|Unable to create '[^']*\.lock'|cannot lock ref/i;
 
 /** Whether a git failure is transient lock contention worth retrying. @internal */
 export function isGitLockError(error: unknown): boolean {
@@ -337,7 +341,12 @@ async function retryOnGitLock<T>(
       }
       await delay(50 * attempt + Math.floor(Math.random() * 100));
       if (beforeRetry !== undefined) {
-        await beforeRetry();
+        try {
+          await beforeRetry();
+        } catch {
+          // Cleanup is best effort: never let it mask the lock error the
+          // caller would otherwise see if the next attempt also fails.
+        }
       }
     }
   }

@@ -142,6 +142,37 @@ describe("createGitWorktreeProvisioner under concurrency", () => {
     expect(calls).toBe(1);
   });
 
+  test("release retries a lock error on worktree remove", async () => {
+    let removeFailures = 0;
+    const flakyRemove: GitRunner = async (cwd, args) => {
+      if (
+        args[0] === "worktree" &&
+        args[1] === "remove" &&
+        removeFailures === 0
+      ) {
+        removeFailures += 1;
+        throw new Error(
+          "git worktree remove failed: fatal: Unable to create '/r/.git/worktrees/x/locked.lock': File exists.",
+        );
+      }
+      return realGit(cwd, args);
+    };
+    const p = createGitWorktreeProvisioner({
+      repoDir,
+      baseDir: worktreesDir,
+      git: flakyRemove,
+    });
+    const handle = await p.provision({
+      runId: "release",
+      nodeId: "node",
+      attempt: 1,
+      baseBranch: "integration",
+    });
+    await p.release(handle);
+    expect(removeFailures).toBe(1);
+    expect(existsSync(handle.dir)).toBe(false);
+  });
+
   test("classifies git lock contention", () => {
     expect(
       isGitLockError(
