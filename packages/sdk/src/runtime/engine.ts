@@ -26,6 +26,7 @@ import {
   resolveFailureClass,
   type RetryPolicy,
 } from "./retry.js";
+import { resetRun, resumableFailedNodes } from "./admin.js";
 import { reduceNodeState } from "./transitions.js";
 import type { NodeFailure, NodeState, RunOutcome } from "./types.js";
 import {
@@ -106,8 +107,16 @@ export interface Engine {
    * so resuming also re-runs nodes interrupted during cancellation.
    * The engine then drives the run to completion. The graph
    * comes from the stored snapshot, not the caller. Rejects for an
-   * unknown run; a run already finished resolves to its recorded outcome
-   * without re-running anything.
+   * unknown run.
+   *
+   * A run that already finished FAILED is reopened when any failed node's
+   * failure is resumable (transient_infra or timeout — unclassified counts
+   * as transient_infra — and not adjudicated against the work; see
+   * isResumableFailure): those nodes and their blocked dependents are reset
+   * and run again, with the original failures kept in the event log.
+   * Reopening needs the coordinator lease, so it rejects while another
+   * coordinator owns the run. Any other finished run resolves to its
+   * recorded outcome without re-running anything.
    */
   resume(runId: string): RunHandle;
 }
@@ -1696,12 +1705,28 @@ export function createEngine(options: EngineOptions): Engine {
       });
       const ready = loading.then(() => undefined);
       const result = (async (): Promise<RunOutcome> => {
-        const stored = await loading;
+        let stored = await loading;
+        if (stored.finished) {
+          // A run that finished FAILED because of transient failures (a lost
+          // git lock, an interrupted worker) is reopened: those nodes and
+          // their blocked dependents are reset and run again. Genuine
+          // failures, succeeded runs and cancelled runs are returned as-is.
+          if (stored.outcome.status !== "failed") {
+            return stored.outcome;
+          }
+          const targets = await resumableFailedNodes(store, runId);
+          if (targets.length === 0) {
+            return stored.outcome;
+          }
+          await resetRun(store, runId, targets, { includeDownstream: true });
+          const reopened = await store.getRun(runId);
+          if (reopened === undefined || reopened.finished) {
+            throw new Error(`run "${runId}" could not be reopened for resume`);
+          }
+          stored = reopened;
+        }
         const events = await readEventSnapshot(store, runId, stored.revision);
         const execution = replayExecutionState(stored.graph, events);
-        if (stored.finished) {
-          return stored.outcome;
-        }
         let lease = await store.acquireCoordinatorLease(
           runId,
           leaseOwner,

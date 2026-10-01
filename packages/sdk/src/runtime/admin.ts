@@ -1,5 +1,6 @@
 import type { RunEvent } from "./events.js";
 import type { RunLease, RunStore } from "./ports.js";
+import { isResumableFailure } from "./retry.js";
 import { reduceNodeState } from "./transitions.js";
 import { TERMINAL_NODE_STATES } from "./types.js";
 import type { NodeFailure, NodeState } from "./types.js";
@@ -119,6 +120,26 @@ export async function abortRun(store: RunStore, runId: string): Promise<void> {
       );
     },
   );
+}
+
+/**
+ * Nodes a plain `resume` should re-run on a finished run: those currently
+ * `failed` with a resumable failure (see isResumableFailure). Their recorded
+ * failures stay in the event log; resetRun only appends node_reset events.
+ */
+export async function resumableFailedNodes(
+  store: RunStore,
+  runId: string,
+): Promise<string[]> {
+  const { states, order, failures } = await replayStates(store, runId);
+  const failureByNode = new Map(
+    failures.map((failure) => [failure.nodeId, failure]),
+  );
+  return order.filter((nodeId) => {
+    if (states.get(nodeId) !== "failed") return false;
+    const failure = failureByNode.get(nodeId);
+    return failure !== undefined && isResumableFailure(failure);
+  });
 }
 
 export interface ResetRunOptions {

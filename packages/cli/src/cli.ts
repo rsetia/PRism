@@ -136,6 +136,8 @@ Commands:
          [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
          [--codex-reasoning-effort <level>] [--codex-backend exec|app-server]
                                       Continue an interrupted run to completion
+                                      (a finished run is reopened to re-run
+                                      transient failures, e.g. git lock races)
   abort <run-id> [--store <db>] [--json]
                                       Force a stuck run to a cancelled, finished state
   signal <run-id> <node-id> [--store <db>] [--json]

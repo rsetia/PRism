@@ -80,3 +80,30 @@ export function computeBackoffMs(policy: RetryPolicy, attempt: number): number {
   }
   return Math.min(policy.baseDelayMs * 2 ** (attempt - 1), policy.maxDelayMs);
 }
+
+/** Classes a plain `resume` re-runs on a finished, failed run. */
+export const RESUMABLE_FAILURE_CLASSES: ReadonlySet<FailureClass> =
+  new Set<FailureClass>(["transient_infra", "timeout"]);
+
+/**
+ * Whether `resume` should re-run a node that ended the run in this failure.
+ *
+ * True for transient classes (unclassified counts as transient_infra, per
+ * resolveFailureClass). A failure the executor adjudicated against the pull
+ * request — `cause.code === "WORKER_FAILURE_ADJUDICATED"` — is a verdict on
+ * the work, not bad luck, so it stays failed whatever its class.
+ */
+export function isResumableFailure(failure: {
+  readonly failureClass?: FailureClass;
+  readonly cause?: unknown;
+}): boolean {
+  const cause = failure.cause;
+  if (
+    typeof cause === "object" &&
+    cause !== null &&
+    (cause as { code?: unknown }).code === "WORKER_FAILURE_ADJUDICATED"
+  ) {
+    return false;
+  }
+  return RESUMABLE_FAILURE_CLASSES.has(resolveFailureClass(failure));
+}

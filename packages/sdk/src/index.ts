@@ -52,8 +52,10 @@ export type {
 export {
   computeBackoffMs,
   DEFAULT_FAILURE_CLASS,
+  isResumableFailure,
   isRetryable,
   NO_RETRIES,
+  RESUMABLE_FAILURE_CLASSES,
   resolveFailureClass,
   RETRY_TRANSIENT,
 } from "./runtime/retry.js";
@@ -83,7 +85,7 @@ export type {
   GraphProposalResult,
   GraphRevision,
 } from "./runtime/graph-revision.js";
-export { abortRun, resetRun } from "./runtime/admin.js";
+export { abortRun, resetRun, resumableFailedNodes } from "./runtime/admin.js";
 export type { ResetRunOptions } from "./runtime/admin.js";
 export type {
   NodePhase,

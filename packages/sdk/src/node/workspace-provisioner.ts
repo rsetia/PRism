@@ -65,7 +65,20 @@ export interface GitWorktreeProvisionerOptions {
   readonly baseRef?: string;
   /** Branch-name prefix for provisioned worktrees. Default "prism/". */
   readonly branchPrefix?: string;
+  /**
+   * Git command runner. Tests inject faults here; production uses `git`
+   * directly. @internal
+   */
+  readonly git?: GitRunner;
+  /** Attempts for a git mutation that fails on a transient lock. Default 3. */
+  readonly lockRetryAttempts?: number;
 }
+
+/** Runs one git command in `cwd`, resolving with stdout. @internal */
+export type GitRunner = (
+  cwd: string,
+  args: readonly string[],
+) => Promise<string>;
 
 /**
  * Provision worktrees with `git worktree` (plan §14). Each provision is an
@@ -79,6 +92,15 @@ export function createGitWorktreeProvisioner(
   const baseDir = resolve(options.baseDir);
   const baseRef = options.baseRef ?? "HEAD";
   const branchPrefix = sanitizeBranchName(options.branchPrefix ?? "prism/");
+  const git = options.git ?? runGit;
+  const lockRetryAttempts = Math.max(1, options.lockRetryAttempts ?? 3);
+  // Every mutation of the shared repository (fetch, worktree add/remove/prune,
+  // branch -D) goes through this per-repository lock, and transient lock
+  // contention from other processes is retried.
+  const mutate = (args: readonly string[]): Promise<string> =>
+    withRepoLock(repoDir, () =>
+      retryOnGitLock(() => git(repoDir, args), lockRetryAttempts),
+    );
 
   return Object.freeze({
     isolation: "host" as const,
@@ -102,16 +124,50 @@ export function createGitWorktreeProvisioner(
       );
 
       try {
-        const branchExists = await localBranchExists(repoDir, branch);
-        const startPoint = branchExists
-          ? undefined
-          : await resolveStartPoint(repoDir, input, baseRef);
-        await runGit(
-          repoDir,
-          branchExists
+        await withRepoLock(repoDir, async () => {
+          const branchExisted = await localBranchExists(repoDir, branch);
+          const startPoint = branchExisted
+            ? undefined
+            : await resolveStartPoint(repoDir, input, baseRef, (args) =>
+                retryOnGitLock(() => git(repoDir, args), lockRetryAttempts),
+              );
+          // `--no-track`: a new branch started from a remote-tracking ref
+          // would otherwise write upstream configuration into the shared
+          // .git/config, and concurrent provisions race on its lock. Nothing
+          // in PRism relies on upstream tracking.
+          const args = branchExisted
             ? ["worktree", "add", dir, branch]
-            : ["worktree", "add", "-b", branch, dir, startPoint ?? baseRef],
-        );
+            : [
+                "worktree",
+                "add",
+                "--no-track",
+                "-b",
+                branch,
+                dir,
+                startPoint ?? baseRef,
+              ];
+          await retryOnGitLock(
+            () => git(repoDir, args),
+            lockRetryAttempts,
+            async () => {
+              // Undo a partial `worktree add` so the retry starts clean: drop
+              // stale worktree metadata, empty the target directory, and
+              // delete a branch this attempt created but never checked out.
+              await git(repoDir, ["worktree", "prune"]).catch(() => undefined);
+              await rm(dir, { recursive: true, force: true });
+              await mkdir(dir, { recursive: true });
+              if (
+                !branchExisted &&
+                (await localBranchExists(repoDir, branch)) &&
+                !(await branchCheckedOut(git, repoDir, branch))
+              ) {
+                await git(repoDir, ["branch", "-D", branch]).catch(
+                  () => undefined,
+                );
+              }
+            },
+          );
+        });
       } catch (error: unknown) {
         await rm(dir, { recursive: true, force: true }).catch(() => undefined);
         throw error;
@@ -126,23 +182,21 @@ export function createGitWorktreeProvisioner(
     ): Promise<void> {
       const dir = resolve(handle.dir);
       try {
-        await runGit(repoDir, ["worktree", "remove", "--force", dir]);
+        await mutate(["worktree", "remove", "--force", dir]);
       } catch (error: unknown) {
         // `release` is deliberately idempotent. A missing directory means
         // there is no workspace left to protect; prune stale git metadata.
         if (await pathExists(dir)) {
           throw error;
         }
-        await runGit(repoDir, ["worktree", "prune"]).catch(() => undefined);
+        await mutate(["worktree", "prune"]).catch(() => undefined);
       }
 
       if (
         releaseOptions.preserveBranch !== true &&
         handle.branch !== undefined
       ) {
-        await runGit(repoDir, ["branch", "-D", handle.branch]).catch(
-          () => undefined,
-        );
+        await mutate(["branch", "-D", handle.branch]).catch(() => undefined);
       }
     },
   });
@@ -158,6 +212,7 @@ async function resolveStartPoint(
   repoDir: string,
   input: ProvisionInput,
   baseRef: string,
+  gitMutate: (args: readonly string[]) => Promise<string>,
 ): Promise<string> {
   if (input.baseBranch === undefined) {
     return baseRef;
@@ -177,7 +232,7 @@ async function resolveStartPoint(
   }
   const target = `refs/remotes/${remote}/${base}`;
   try {
-    await runGit(repoDir, [
+    await gitMutate([
       "fetch",
       "--quiet",
       remote,
@@ -219,6 +274,90 @@ async function localBranchExists(
       },
     );
   });
+}
+
+const repoLocks = new Map<string, Promise<unknown>>();
+
+/**
+ * Serializes `fn` with every other mutation of the same repository in this
+ * process. Parallel nodes share one `.git` directory; git takes file locks
+ * (config, refs, worktrees) that concurrent commands otherwise fight over.
+ */
+async function withRepoLock<T>(
+  repoDir: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const previous = repoLocks.get(repoDir) ?? Promise.resolve();
+  const run = previous.then(fn, fn);
+  const settled = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  repoLocks.set(repoDir, settled);
+  try {
+    return await run;
+  } finally {
+    if (repoLocks.get(repoDir) === settled) {
+      repoLocks.delete(repoDir);
+    }
+  }
+}
+
+const GIT_LOCK_ERROR =
+  /could not lock config file|Unable to create '[^']*\.lock'|cannot lock ref|\.lock': File exists|index\.lock/i;
+
+/** Whether a git failure is transient lock contention worth retrying. @internal */
+export function isGitLockError(error: unknown): boolean {
+  let current: unknown = error;
+  while (current instanceof Error) {
+    if (GIT_LOCK_ERROR.test(current.message)) {
+      return true;
+    }
+    current = current.cause;
+  }
+  return false;
+}
+
+/**
+ * Runs `fn`, retrying lock contention (typically another process touching
+ * the same repository) with short jittered backoff. `beforeRetry` repairs
+ * any partial state the failed attempt left behind.
+ */
+async function retryOnGitLock<T>(
+  fn: () => Promise<T>,
+  attempts: number,
+  beforeRetry?: () => Promise<void>,
+): Promise<T> {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return await fn();
+    } catch (error: unknown) {
+      if (attempt >= attempts || !isGitLockError(error)) {
+        throw error;
+      }
+      await delay(50 * attempt + Math.floor(Math.random() * 100));
+      if (beforeRetry !== undefined) {
+        await beforeRetry();
+      }
+    }
+  }
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolvePromise) => setTimeout(resolvePromise, ms));
+}
+
+async function branchCheckedOut(
+  git: GitRunner,
+  repoDir: string,
+  branch: string,
+): Promise<boolean> {
+  const list = await git(repoDir, ["worktree", "list", "--porcelain"]).catch(
+    () => "",
+  );
+  return list
+    .split(/\r?\n/)
+    .some((line) => line.trim() === `branch refs/heads/${branch}`);
 }
 
 async function runGit(cwd: string, args: readonly string[]): Promise<string> {
