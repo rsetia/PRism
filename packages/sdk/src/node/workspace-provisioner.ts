@@ -123,9 +123,10 @@ export function createGitWorktreeProvisioner(
         ),
       );
 
+      let branchExisted: boolean | undefined;
       try {
         await withRepoLock(repoDir, async () => {
-          const branchExisted = await localBranchExists(repoDir, branch);
+          branchExisted = await localBranchExists(repoDir, branch);
           const startPoint = branchExisted
             ? undefined
             : await resolveStartPoint(repoDir, input, baseRef, (args) =>
@@ -170,6 +171,21 @@ export function createGitWorktreeProvisioner(
         });
       } catch (error: unknown) {
         await rm(dir, { recursive: true, force: true }).catch(() => undefined);
+        // Never leave behind a branch this provision created but could not
+        // check out (for example after the last lock retry failed).
+        if (branchExisted === false) {
+          await withRepoLock(repoDir, async () => {
+            await git(repoDir, ["worktree", "prune"]).catch(() => undefined);
+            if (
+              (await localBranchExists(repoDir, branch).catch(() => false)) &&
+              !(await branchCheckedOut(git, repoDir, branch))
+            ) {
+              await git(repoDir, ["branch", "-D", branch]).catch(
+                () => undefined,
+              );
+            }
+          }).catch(() => undefined);
+        }
         throw error;
       }
 

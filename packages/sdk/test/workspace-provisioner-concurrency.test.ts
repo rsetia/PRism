@@ -173,6 +173,46 @@ describe("createGitWorktreeProvisioner under concurrency", () => {
     expect(existsSync(handle.dir)).toBe(false);
   });
 
+  test("removes the branch it created when every lock retry fails", async () => {
+    const alwaysLocked: GitRunner = async (cwd, args) => {
+      if (args[0] === "worktree" && args[1] === "add") {
+        const branchIndex = args.indexOf("-b");
+        if (branchIndex !== -1) {
+          await realGit(cwd, [
+            "branch",
+            "--no-track",
+            args[branchIndex + 1] ?? "",
+            args.at(-1) ?? "HEAD",
+          ]).catch(() => "");
+        }
+        throw new Error(
+          "error: could not lock config file .git/config: File exists",
+        );
+      }
+      return realGit(cwd, args);
+    };
+    const p = createGitWorktreeProvisioner({
+      repoDir,
+      baseDir: worktreesDir,
+      git: alwaysLocked,
+    });
+    await expect(
+      p.provision({
+        runId: "exhausted",
+        nodeId: "node",
+        attempt: 1,
+        baseBranch: "integration",
+      }),
+    ).rejects.toThrow(/could not lock config file/);
+    const leftovers = await git(
+      repoDir,
+      "branch",
+      "--list",
+      "prism/exhausted/*",
+    );
+    expect(leftovers).toBe("");
+  });
+
   test("classifies git lock contention", () => {
     expect(
       isGitLockError(
