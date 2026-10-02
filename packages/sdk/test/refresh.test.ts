@@ -435,6 +435,65 @@ describe.each([
     await store.close?.();
   });
 
+  test("live: a refresh the store cannot record is rejected, never degraded to a plain reset", async () => {
+    const inner = makeStore();
+    // A store that does not report graphRevision: the coordinator cannot
+    // record the refreshed snapshot, so it must reject rather than reset.
+    const delegated = Object.fromEntries(
+      Object.entries(inner).map(([key, value]) => [
+        key,
+        typeof value === "function"
+          ? (value as (...args: unknown[]) => unknown).bind(inner)
+          : value,
+      ]),
+    ) as unknown as typeof inner;
+    const store: typeof inner = {
+      ...delegated,
+      getRun: async (runId: string) => {
+        const run = await inner.getRun(runId);
+        if (run === undefined) return undefined;
+        return Object.fromEntries(
+          Object.entries(run).filter(([key]) => key !== "graphRevision"),
+        ) as unknown as typeof run;
+      },
+    };
+    const implement = recordingImplement();
+    const slow = gate("slow");
+    const engine = createEngine({
+      store,
+      registry: createExecutorRegistry([...builtinExecutors, implement, slow]),
+      maxConcurrency: 4,
+      adminPollIntervalMs: 10,
+    });
+    const graph = beadsGraph(true);
+    const handle = engine.run(graph, { runId: "norev" });
+    await waitFor(
+      async () =>
+        (await stateOf(store, "norev", IMPL)) === "failed" ? true : undefined,
+      "the first attempt to fail",
+    );
+
+    await store.enqueueAdminRequest?.({
+      requestId: "norev-refresh",
+      runId: "norev",
+      action: "rerun-node",
+      nodeId: IMPL,
+      refresh: refreshBeadsNodeConfigs(graph, IMPL, beadV2),
+    });
+    const request = await waitFor(
+      () => resolved(store, "norev-refresh"),
+      "the live coordinator to resolve the refresh",
+    );
+    expect(request).toMatchObject({ status: "rejected", resolvedBy: "live" });
+    expect(await stateOf(store, "norev", IMPL)).toBe("failed");
+    expect(
+      implement.seen.every((seen) => seen.description !== beadV2.description),
+    ).toBe(true);
+    slow.release();
+    await handle.result;
+    await inner.close?.();
+  });
+
   test("refusals: a succeeded node, or a refresh that would touch another node", async () => {
     const store = makeStore();
     const implement: ExecutorDefinition = {

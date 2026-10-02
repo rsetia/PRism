@@ -1406,25 +1406,66 @@ async function executeRun(
         refreshed?.ok === true
           ? (await store.getRun(runId))?.graphRevision
           : undefined;
-      const result = await adminStore.resolve(
-        {
-          requestId: request.requestId,
-          status: "applied",
-          resolvedBy: "live",
-          resetNodeIds: plan.nodeIds,
-          events,
-          expectedRevision: revision,
-          ...(refreshed?.ok === true && expectedGraphRevision !== undefined
-            ? {
-                graphRevision: {
-                  revision: refreshed.revision,
-                  expectedGraphRevision,
-                },
-              }
-            : {}),
-        },
-        lease,
-      );
+      if (refreshed?.ok === true && expectedGraphRevision === undefined) {
+        // A refresh that cannot be recorded must not degrade into a plain
+        // reset: the node would re-run with its old frozen input while the
+        // operator is told it was refreshed (see AdminRequest.refresh).
+        await adminStore.resolve(
+          {
+            requestId: request.requestId,
+            status: "rejected",
+            resolvedBy: "live",
+            message:
+              "cannot refresh: the store did not report the run's graph revision",
+          },
+          lease,
+        );
+        return false;
+      }
+      let result: Awaited<ReturnType<typeof adminStore.resolve>>;
+      try {
+        result = await adminStore.resolve(
+          {
+            requestId: request.requestId,
+            status: "applied",
+            resolvedBy: "live",
+            resetNodeIds: plan.nodeIds,
+            events,
+            expectedRevision: revision,
+            ...(refreshed?.ok === true && expectedGraphRevision !== undefined
+              ? {
+                  graphRevision: {
+                    revision: refreshed.revision,
+                    expectedGraphRevision,
+                  },
+                }
+              : {}),
+          },
+          lease,
+        );
+      } catch (error: unknown) {
+        // A concurrent graph expansion between reading the graph revision and
+        // resolving makes the refresh stale. Reject this request so the
+        // operator can retry; never fail the coordinator over it. Any other
+        // error (lease, event revision) still propagates.
+        if (
+          refreshed?.ok === true &&
+          error instanceof Error &&
+          error.message.startsWith("graph revision conflict")
+        ) {
+          await adminStore.resolve(
+            {
+              requestId: request.requestId,
+              status: "rejected",
+              resolvedBy: "live",
+              message: `cannot refresh: ${error.message}; retry the request`,
+            },
+            lease,
+          );
+          return false;
+        }
+        throw error;
+      }
       if (!result.resolved) {
         // Someone else (the requester withdrawing it) resolved it first.
         return false;
