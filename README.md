@@ -64,6 +64,8 @@ Override either setting for a run or resume with `--codex-model <id>` and
 A session that goes 30 minutes without output or a phase change is terminated
 as stalled and retried or continued from its pull request;
 `--codex-stall-timeout-minutes <n>` changes the limit (0 disables).
+On macOS, `run`, `resume`, and `poll` keep the host awake while they execute;
+pass `--allow-sleep` to opt out. Worker log lines are timestamped.
 
 If both production and staging Greptile apps review the same pull requests,
 select the production GitHub App for the whole run:

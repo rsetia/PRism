@@ -116,6 +116,10 @@ Codex-backed nodes default to `gpt-5.6-terra` with `medium` reasoning. Both
 A Codex session that produces no output or phase change for 30 minutes is
 terminated as stalled and handled like any transient infrastructure failure;
 `--codex-stall-timeout-minutes <n>` changes the limit (0 disables).
+On macOS, `run`, `resume`, and `poll` keep the host from idle-sleeping while
+they execute (`caffeinate -i`); `--allow-sleep` opts out. Every worker log
+line starts with an ISO-8601 UTC timestamp, so a gap in the log shows when
+output stopped.
 
 Prism executors run real commands (`codex`, `gh`, `bd`, your validation
 commands) with no sandbox — see
