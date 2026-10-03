@@ -27,6 +27,7 @@ import type {
   CodexEngine,
   CodexExecutionInput,
   ProvisionInput,
+  ReconcileOutcome,
   WorkerResult,
   WorkspaceHandle,
   WorkspaceProvisioner,
@@ -1214,6 +1215,47 @@ describe("createCodexExecutor failure adjudication", () => {
       reinvocations: 0,
     });
     expect(contracts).toHaveLength(1);
+  });
+
+  test("leaves an infrastructure failure before any pull request retryable", async () => {
+    const stalled: WorkerResult = {
+      status: "failed",
+      error:
+        "codex produced no output or phase change for 30 minutes; terminated as stalled",
+      failureClass: "transient_infra",
+    };
+    const outcomes: ReconcileOutcome[] = [
+      { kind: "fresh", notes: [] },
+      {
+        kind: "resume",
+        state: {
+          executor: "implement",
+          branch: "prism/mc-1",
+          targetBranch: "main",
+          branchExists: true,
+          ci: "none",
+          notes: [],
+        },
+      },
+    ];
+    for (const reconciled of outcomes) {
+      const { engine, contracts } = scriptedEngine([stalled]);
+      const executor = createCodexExecutor({
+        name: "implement",
+        engine,
+        cwd: tempDir,
+        nodeDirBase: tempDir,
+        reconciler: { reconcile: () => Promise.resolve(reconciled) },
+        adjudication: { wait: noWait },
+      });
+      const outcome = await executor.execute(context());
+      expect(outcome).toEqual({
+        status: "failed",
+        cause: stalled.error,
+        failureClass: "transient_infra",
+      });
+      expect(contracts).toHaveLength(1);
+    }
   });
 
   test("worker failures stay final without adjudication configured", async () => {

@@ -95,6 +95,14 @@ export interface CodexEngineOptions {
   readonly heartbeatIntervalMs?: number;
   /** SIGTERM grace before SIGKILL. Default 5000ms. */
   readonly killGraceMs?: number;
+  /**
+   * Terminate a session that has produced no output and no worker phase
+   * change for this long. Undefined or 0 disables it. The parent rewrites
+   * heartbeat.json itself, so the heartbeat is not progress. Detection only
+   * applies when output is observed (`onOutput` set); with inherited or
+   * ignored stdio the session is unobservable and never declared stalled.
+   */
+  readonly stallTimeoutMs?: number;
   /** Child output mode. Default "inherit" so a worker log can capture it. */
   readonly stdio?: "inherit" | "ignore";
   /** Host-side child environment, isolation, and redaction policy. */
@@ -192,6 +200,7 @@ export function createCodexEngine(
   const pollIntervalMs = options.pollIntervalMs ?? 250;
   const heartbeatIntervalMs = options.heartbeatIntervalMs ?? 10_000;
   const killGraceMs = options.killGraceMs ?? 5_000;
+  const stallTimeoutMs = options.stallTimeoutMs ?? 0;
   const executionPolicy = mergeLegacyEnvironment(
     options.executionPolicy ?? SAFE_AGENT_EXECUTION_POLICY,
     options.env,
@@ -201,6 +210,7 @@ export function createCodexEngine(
   validateDuration("pollIntervalMs", pollIntervalMs);
   validateDuration("heartbeatIntervalMs", heartbeatIntervalMs);
   validateDuration("killGraceMs", killGraceMs);
+  validateDuration("stallTimeoutMs", stallTimeoutMs);
 
   return Object.freeze({
     validateContract(contract: CodexExecutorContract): void {
@@ -253,7 +263,19 @@ export function createCodexEngine(
           input.onOutput === undefined ? (options.stdio ?? "inherit") : "pipe",
         ],
       });
-      const outputDrained = captureChildOutput(child, input.onOutput, redact);
+      const onOutput = input.onOutput;
+      const stallDetection = stallTimeoutMs > 0 && onOutput !== undefined;
+      let lastProgress = Date.now();
+      const outputDrained = captureChildOutput(
+        child,
+        onOutput === undefined
+          ? undefined
+          : (chunk) => {
+              lastProgress = Date.now();
+              onOutput(chunk);
+            },
+        redact,
+      );
       const settled = processSettlement(child);
       child.stdin?.on("error", () => {
         // Codex may exit before consuming all stdin. Its process result and
@@ -276,11 +298,15 @@ export function createCodexEngine(
       let lastPhase: NodePhase | undefined;
       try {
         while (settlement === undefined) {
-          lastPhase = await observeWorkerPhase(
+          const observedPhase = await observeWorkerPhase(
             phasePath,
             lastPhase,
             input.onPhase,
           );
+          if (observedPhase !== lastPhase) {
+            lastPhase = observedPhase;
+            lastProgress = Date.now();
+          }
           const resultRead = await readWorkerResult(resultPath);
           if (resultRead.kind === "valid") {
             await terminateProcess(child, settled, killGraceMs);
@@ -300,6 +326,21 @@ export function createCodexEngine(
           }
 
           const now = Date.now();
+          if (stallDetection && now - lastProgress >= stallTimeoutMs) {
+            await terminateProcess(child, settled, killGraceMs);
+            await outputDrained;
+            // A result written during the grace period still wins.
+            const lateResult = await readWorkerResult(resultPath);
+            if (lateResult.kind === "valid") {
+              const result = redactWorkerResult(lateResult.result, redact);
+              await persistWorkerResult(resultPath, result);
+              return result;
+            }
+            return persistInfrastructureFailure(
+              resultPath,
+              `codex produced no output or phase change for ${describeDuration(stallTimeoutMs)}; terminated as stalled`,
+            );
+          }
           if (now - lastHeartbeat >= heartbeatIntervalMs) {
             await writeHeartbeat(heartbeatPath);
             lastHeartbeat = now;
@@ -644,6 +685,12 @@ async function readLastMessage(path: string): Promise<string> {
     }
     throw error;
   }
+}
+
+function describeDuration(ms: number): string {
+  return ms >= 60_000 && ms % 60_000 === 0
+    ? `${String(ms / 60_000)} minutes`
+    : `${String(ms)} ms`;
 }
 
 function validateDuration(name: string, value: number): void {

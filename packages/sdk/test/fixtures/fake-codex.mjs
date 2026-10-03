@@ -80,6 +80,24 @@ if (mode === "secret-output") {
   process.exitCode = 7;
 } else if (mode === "stall") {
   setInterval(() => undefined, 1_000);
+} else if (mode === "chatty" || mode === "phase-progress") {
+  // Keep making progress for longer than a short stall timeout, then finish.
+  const phases = ["implementation", "validation"];
+  for (let tick = 0; tick < 20; tick += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    if (mode === "chatty") {
+      process.stdout.write(`still working ${String(tick)}\n`);
+    } else {
+      await writeFile(
+        phasePath,
+        JSON.stringify({ phase: phases[tick % phases.length] }),
+      );
+    }
+  }
+  await writeFile(
+    resultPath,
+    JSON.stringify({ status: "succeeded", output: spec.input }),
+  );
 } else {
   process.exitCode = 21;
 }

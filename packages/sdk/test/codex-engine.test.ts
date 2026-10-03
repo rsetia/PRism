@@ -339,3 +339,59 @@ describe("createCodexEngine", () => {
     expect(result.error).toContain("cancelled");
   });
 });
+
+describe("createCodexEngine stall detection", () => {
+  test("terminates a session that stops producing output", async () => {
+    const output: string[] = [];
+    const result = await engine({ stallTimeoutMs: 150 }).execute({
+      ...paths(),
+      spec: spec("stall"),
+      contract,
+      onOutput: (chunk) => output.push(chunk),
+    });
+    expect(result).toEqual({
+      status: "failed",
+      error:
+        "codex produced no output or phase change for 150 ms; terminated as stalled",
+      failureClass: "transient_infra",
+    });
+    expect(output.join("")).toContain("fake codex stdout");
+  });
+
+  test.each(["chatty", "phase-progress"])(
+    "keeps a session alive while it makes progress (%s)",
+    async (mode) => {
+      const result = await engine({ stallTimeoutMs: 150 }).execute({
+        ...paths(),
+        spec: spec(mode),
+        contract,
+        onOutput: () => undefined,
+      });
+      expect(result).toEqual({
+        status: "succeeded",
+        output: { task: "fix it" },
+      });
+    },
+  );
+
+  test("never declares a session with unobserved output stalled", async () => {
+    const controller = new AbortController();
+    const execution = engine({ stallTimeoutMs: 20 }).execute({
+      ...paths(),
+      spec: spec("stall"),
+      contract,
+      signal: controller.signal,
+    });
+    setTimeout(() => controller.abort(), 200);
+    const result = await execution;
+    expect(result.status).toBe("failed");
+    if (result.status !== "failed") {
+      throw new Error("expected infrastructure failure");
+    }
+    expect(result.error).toContain("cancelled");
+  });
+
+  test("rejects an invalid stall timeout", () => {
+    expect(() => engine({ stallTimeoutMs: -1 })).toThrow("stallTimeoutMs");
+  });
+});

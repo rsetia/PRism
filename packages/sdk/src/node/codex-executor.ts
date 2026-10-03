@@ -372,6 +372,16 @@ export function createCodexExecutor(
               result = { status: "succeeded", output: verdict.output };
               break;
             }
+            // An infrastructure failure (a crash or a stalled session) before
+            // a pull request exists is bad luck, not a verdict on the work:
+            // keep it unadjudicated so retry and resume still apply.
+            if (
+              verdict.kind === "terminal" &&
+              verdict.state?.pullRequest === undefined &&
+              workerFailure.failureClass === "transient_infra"
+            ) {
+              break;
+            }
             if (verdict.kind === "reinvoke" && reinvocations < budget) {
               reinvocations += 1;
               sessionSpec = {
