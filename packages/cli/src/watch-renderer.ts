@@ -810,6 +810,29 @@ function appendFooter(
   rows: number | undefined,
   color: boolean,
 ): void {
+  // Operator refreshes re-wrote a node's frozen input mid-run; say so, so a
+  // re-running node is never mistaken for a plain retry of stale input.
+  const refreshes = (inspection.graphRevisions ?? []).filter(
+    (revision) => revision.proposal.refresh !== undefined,
+  );
+  for (const revision of refreshes.slice(-3)) {
+    const refresh = revision.proposal.refresh;
+    const source = objectValue(refresh?.source);
+    const item =
+      typeof source?.["workItemId"] === "string"
+        ? ` (${source["workItemId"]})`
+        : "";
+    lines.push(
+      style(
+        truncate(
+          `↻ refreshed work item for ${refresh?.targetNodeId ?? "?"}${item} at ${new Date(revision.timestampMs).toISOString()}`,
+          columns,
+        ),
+        DIM,
+        color,
+      ),
+    );
+  }
   if (inspection.failures.length === 0) {
     lines.push(
       style(

@@ -225,6 +225,59 @@ export async function generateBeadsDag(
   return graph;
 }
 
+/**
+ * Snapshot one Bead exactly as beads-dag does (`bd export`, then hydrate
+ * with `bd show --json --long`), for `rerun-node --refresh`.
+ */
+export async function snapshotBead(
+  id: string,
+  beadsRepoDir: string,
+  bdCommand = "bd",
+  runner: CommandRunner = createExecFileRunner(),
+): Promise<Bead> {
+  const cwd = resolve(beadsRepoDir);
+  const exported = await runner.run(
+    bdCommand,
+    ["export", "--no-memories", "--readonly"],
+    { cwd },
+  );
+  if (exported.exitCode !== 0) {
+    throw new Error(
+      commandError("bd export", exported.stderr, exported.stdout),
+    );
+  }
+  const found = parseBeadsJsonl(exported.stdout).find((bead) => bead.id === id);
+  if (found === undefined) {
+    throw new Error(`Bead "${id}" was not found in ${cwd}`);
+  }
+  const [hydrated] = await hydrateBeads([found], cwd, bdCommand, runner);
+  if (hydrated === undefined) {
+    throw new Error(`Bead "${id}" could not be hydrated`);
+  }
+  return hydrated;
+}
+
+/** Read a spec file the same way beads-dag does (non-empty, absolute source). */
+export async function readSpecDocument(
+  specFile: string,
+): Promise<{ readonly source: string; readonly content: string }> {
+  const specPath = resolve(specFile);
+  let content: string;
+  try {
+    content = await readFile(specPath, "utf8");
+  } catch (error: unknown) {
+    throw new Error(
+      `cannot read spec file "${specPath}": ${
+        error instanceof Error ? error.message : String(error)
+      }`,
+    );
+  }
+  if (content.trim().length === 0) {
+    throw new Error(`spec file "${specPath}" is empty`);
+  }
+  return { source: specPath, content };
+}
+
 async function hydrateBeads(
   beads: readonly Bead[],
   cwd: string,

@@ -4,6 +4,7 @@ import type {
   JsonValue,
   NodeDefinition,
 } from "../graph/types.js";
+import { isPlainObject } from "../internal/json.js";
 import type { RunLease, RunStore } from "./ports.js";
 
 /** A proposed append-only change to a running graph. */
@@ -12,12 +13,38 @@ export interface GraphExpansionProposal {
   readonly id: string;
   /** Node/executor/operator identity retained in the durable audit record. */
   readonly proposer: string;
-  /** New nodes only. Existing node definitions are never editable. */
+  /**
+   * New nodes only. Existing node definitions are never editable through an
+   * expansion; an operator refresh (below) is the one sanctioned exception.
+   */
   readonly nodes: Readonly<Record<string, NodeDefinition>>;
   /** Optional replacement final node. It must name an existing or added node. */
   readonly finalNode?: string;
   /** Opaque, JSON-safe context explaining why the expansion was requested. */
   readonly rationale?: JsonValue;
+  /**
+   * Present only on operator refresh revisions (`rerun-node --refresh`):
+   * the re-snapshotted configs that replaced existing nodes' frozen input.
+   * Refresh revisions add no nodes (`nodes` is empty).
+   */
+  readonly refresh?: GraphRefresh;
+}
+
+/**
+ * An operator re-snapshot of a node's frozen input (plan §16,
+ * `rerun-node --refresh`). Only the listed nodes' `config` changes; ids,
+ * dependencies, executors, kinds, resources and conditions stay identical.
+ */
+export interface GraphRefresh {
+  /** The node the operator targeted (for example an implement node). */
+  readonly targetNodeId: string;
+  /**
+   * Replacement configs. Allowed keys: the target, and direct dependencies
+   * of the target whose only dependent is the target (its context node).
+   */
+  readonly configs: Readonly<Record<string, JsonValue>>;
+  /** Audit context, e.g. `{ workItemId, specSource }`. */
+  readonly source?: JsonValue;
 }
 
 export type GraphProposalDecision =
@@ -36,6 +63,8 @@ export interface GraphRevision {
   readonly proposal: GraphExpansionProposal;
   readonly decision: GraphProposalDecision;
   readonly addedNodeIds: readonly string[];
+  /** Nodes whose frozen config a refresh revision replaced (graph order). */
+  readonly refreshedNodeIds?: readonly string[];
   readonly graph?: import("../graph/types.js").CompiledGraph;
 }
 
@@ -166,4 +195,224 @@ function compileExpansion(
     );
   }
   return compiled.graph;
+}
+
+/**
+ * Compile a refresh (pure): replace only the listed nodes' `config` and
+ * prove nothing structural moved. Throws with an operator-facing reason
+ * when the refresh is not allowed:
+ * - a refreshed node is unknown, or is neither the target nor a direct
+ *   dependency of the target whose only dependent is the target;
+ * - a work item identity changes (`workItem.id`/`workItem.provider` on a
+ *   task config, or `value.id` on a constant context config);
+ * - any implement/task setting other than the work item changes (review,
+ *   target branch, validation, branch name, ...);
+ * - the recompiled graph's ids, order, dependencies, executors, kinds,
+ *   resources or conditions differ.
+ */
+export function compileRefresh(
+  graph: import("../graph/types.js").CompiledGraph,
+  refresh: GraphRefresh,
+): {
+  readonly graph: import("../graph/types.js").CompiledGraph;
+  readonly refreshedNodeIds: readonly string[];
+} {
+  const target = graph.nodes[refresh.targetNodeId];
+  if (target === undefined) {
+    throw new Error(`unknown node "${refresh.targetNodeId}"`);
+  }
+  const keys = Object.keys(refresh.configs);
+  if (!keys.includes(refresh.targetNodeId)) {
+    throw new Error(
+      `refresh must replace the target node "${refresh.targetNodeId}"`,
+    );
+  }
+  for (const nodeId of keys) {
+    const node = graph.nodes[nodeId];
+    if (node === undefined) {
+      throw new Error(`refresh names unknown node "${nodeId}"`);
+    }
+    if (nodeId === refresh.targetNodeId) continue;
+    const isOwnedInput =
+      target.dependsOn.includes(nodeId) &&
+      node.dependents.length === 1 &&
+      node.dependents[0] === refresh.targetNodeId;
+    if (!isOwnedInput) {
+      throw new Error(
+        `refresh may only replace "${refresh.targetNodeId}" and inputs only it consumes; "${nodeId}" is not one`,
+      );
+    }
+  }
+  for (const nodeId of keys) {
+    assertSameIdentity(
+      nodeId,
+      graph.nodes[nodeId]?.config,
+      refresh.configs[nodeId],
+    );
+  }
+
+  const nodes: Record<string, NodeDefinition> = {};
+  for (const nodeId of graph.order) {
+    const node = graph.nodes[nodeId];
+    if (node === undefined) continue;
+    const config = Object.hasOwn(refresh.configs, nodeId)
+      ? refresh.configs[nodeId]
+      : node.config;
+    nodes[nodeId] = {
+      executor: node.executor,
+      dependsOn: node.dependsOn,
+      kind: node.kind,
+      resources: node.resources,
+      ...(config === undefined ? {} : { config }),
+      ...(node.when === undefined ? {} : { when: node.when }),
+    };
+  }
+  const compiled = compileGraph({
+    version: graph.version,
+    resources: graph.resources,
+    nodes,
+    finalNode: graph.finalNode,
+  });
+  if (!compiled.ok) {
+    throw new Error(
+      `refresh rejected by compiler: ${compiled.errors.map((e) => e.code).join(", ")}`,
+    );
+  }
+  const next = compiled.graph;
+  if (
+    stableJson(next.order) !== stableJson(graph.order) ||
+    next.finalNode !== graph.finalNode ||
+    stableJson(next.resources) !== stableJson(graph.resources)
+  ) {
+    throw new Error("refresh would change the graph structure");
+  }
+  for (const nodeId of graph.order) {
+    const before = graph.nodes[nodeId];
+    const after = next.nodes[nodeId];
+    if (
+      before === undefined ||
+      after === undefined ||
+      before.executor !== after.executor ||
+      before.kind !== after.kind ||
+      stableJson(before.dependsOn) !== stableJson(after.dependsOn) ||
+      stableJson(before.dependents) !== stableJson(after.dependents) ||
+      stableJson(before.resources) !== stableJson(after.resources) ||
+      stableJson(before.when ?? null) !== stableJson(after.when ?? null)
+    ) {
+      throw new Error(`refresh would change the structure of node "${nodeId}"`);
+    }
+  }
+  return {
+    graph: next,
+    refreshedNodeIds: graph.order.filter((nodeId) => keys.includes(nodeId)),
+  };
+}
+
+/**
+ * Build the audited, accepted revision for a refresh (pure). The store
+ * assigns `sequence`, `graphRevision` and `timestampMs` when persisting.
+ */
+export function buildRefreshRevision(
+  graph: import("../graph/types.js").CompiledGraph,
+  refresh: GraphRefresh,
+  options: { readonly id: string; readonly proposer: string },
+): GraphRevision {
+  const compiled = compileRefresh(graph, refresh);
+  return {
+    sequence: -1,
+    graphRevision: -1,
+    timestampMs: 0,
+    proposal: {
+      id: options.id,
+      proposer: options.proposer,
+      nodes: {},
+      refresh,
+      ...(refresh.source === undefined ? {} : { rationale: refresh.source }),
+    },
+    decision: { status: "accepted", policy: "operator-refresh" },
+    addedNodeIds: [],
+    refreshedNodeIds: compiled.refreshedNodeIds,
+    graph: compiled.graph,
+  };
+}
+
+/** Whether a revision is an operator refresh (vs. an expansion). */
+export function isRefreshRevision(revision: GraphRevision): boolean {
+  return revision.proposal.refresh !== undefined;
+}
+
+function assertSameIdentity(
+  nodeId: string,
+  before: JsonValue | undefined,
+  after: JsonValue | undefined,
+): void {
+  if (after === undefined) {
+    throw new Error(`refresh config for "${nodeId}" is missing`);
+  }
+  const previous = isPlainObject(before) ? before : undefined;
+  const replacement = isPlainObject(after) ? after : undefined;
+  const previousItem = isPlainObject(previous?.["workItem"])
+    ? previous["workItem"]
+    : undefined;
+  if (previousItem !== undefined) {
+    const nextItem = isPlainObject(replacement?.["workItem"])
+      ? replacement["workItem"]
+      : undefined;
+    if (
+      nextItem === undefined ||
+      nextItem["id"] !== previousItem["id"] ||
+      nextItem["provider"] !== previousItem["provider"]
+    ) {
+      throw new Error(
+        `refreshed work item for "${nodeId}" is ${describeItem(nextItem)}, expected ${describeItem(previousItem)}`,
+      );
+    }
+    // Everything but the work item snapshot is a run setting (review gate,
+    // target branch, branch name, validation, iterations) and must not move.
+    const settings = (value: Record<string, unknown> | undefined) =>
+      stableJson(
+        Object.fromEntries(
+          Object.entries(value ?? {}).filter(([key]) => key !== "workItem"),
+        ),
+      );
+    if (settings(previous) !== settings(replacement)) {
+      throw new Error(
+        `refresh may only change the work item of "${nodeId}"; its settings must stay unchanged`,
+      );
+    }
+    return;
+  }
+  const previousValue = isPlainObject(previous?.["value"])
+    ? previous["value"]
+    : undefined;
+  if (previousValue !== undefined && previousValue["id"] !== undefined) {
+    const nextValue = isPlainObject(replacement?.["value"])
+      ? replacement["value"]
+      : undefined;
+    if (nextValue?.["id"] !== previousValue["id"]) {
+      throw new Error(
+        `refreshed context for "${nodeId}" is for ${JSON.stringify(nextValue?.["id"] ?? null)}, expected ${JSON.stringify(previousValue["id"])}`,
+      );
+    }
+  }
+}
+
+function describeItem(item: Record<string, unknown> | undefined): string {
+  if (item === undefined) return "missing";
+  const part = (value: unknown): string =>
+    typeof value === "string" ? value : JSON.stringify(value ?? "?");
+  return `${part(item["provider"])}:${part(item["id"])}`;
+}
+
+/** Key-order-independent JSON for structural comparison. */
+function stableJson(value: unknown): string {
+  return JSON.stringify(value, (_key, nested: unknown) =>
+    isPlainObject(nested)
+      ? Object.fromEntries(
+          Object.keys(nested)
+            .sort()
+            .map((key) => [key, nested[key]]),
+        )
+      : nested,
+  );
 }

@@ -1,5 +1,7 @@
 import type { CompiledGraph } from "../graph/types.js";
 import type { RunEvent } from "./events.js";
+import { buildRefreshRevision } from "./graph-revision.js";
+import type { GraphRefresh, GraphRevision } from "./graph-revision.js";
 import type {
   AdminRequest,
   AdminRequestAction,
@@ -296,6 +298,76 @@ export function planAdminReset(
   };
 }
 
+/**
+ * The reset plan for a refresh request (pure). The target must not be
+ * running or succeeded — in either mode — since a refresh exists to give
+ * failed or waiting work new input. On top of planAdminReset's nodes it
+ * resets every other refreshed node (the target's context input), so the
+ * target receives the re-snapshotted value rather than a cached output.
+ * Those inputs are only consumed by the target, so resetting a succeeded
+ * input never discards work anything else depends on.
+ */
+export function planRefreshReset(
+  graph: CompiledGraph,
+  states: ReadonlyMap<string, NodeState>,
+  action: AdminRequestAction,
+  refresh: GraphRefresh,
+  mode: "live" | "offline",
+): AdminResetPlan {
+  const target = refresh.targetNodeId;
+  const state = states.get(target);
+  if (state === "running" || state === "succeeded" || state === "cancelling") {
+    return {
+      ok: false,
+      message: `node "${target}" is ${state}; refresh only re-runs nodes that have not succeeded and are not running`,
+    };
+  }
+  const plan = planAdminReset(graph, states, action, target, mode);
+  if (!plan.ok) return plan;
+  const ids = new Set([...plan.nodeIds, ...Object.keys(refresh.configs)]);
+  return { ok: true, nodeIds: graph.order.filter((id) => ids.has(id)) };
+}
+
+/**
+ * Build the refresh revision for a request, or the reason it cannot apply.
+ * The proposal id is derived from the request id, so a retried resolution
+ * cannot record two revisions for one request.
+ */
+export function refreshRevisionFor(
+  graph: CompiledGraph,
+  request: AdminRequest,
+):
+  | { readonly ok: true; readonly revision: GraphRevision }
+  | {
+      readonly ok: false;
+      readonly message: string;
+    } {
+  const refresh = request.refresh;
+  if (refresh === undefined) {
+    return { ok: false, message: "request carries no refresh" };
+  }
+  if (refresh.targetNodeId !== request.nodeId) {
+    return {
+      ok: false,
+      message: `refresh targets "${refresh.targetNodeId}" but the request targets "${request.nodeId}"`,
+    };
+  }
+  try {
+    return {
+      ok: true,
+      revision: buildRefreshRevision(graph, refresh, {
+        id: `refresh:${request.requestId}`,
+        proposer: `operator:${request.action} --refresh`,
+      }),
+    };
+  } catch (error: unknown) {
+    return {
+      ok: false,
+      message: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
+
 export interface OfflineAdminResult {
   /** The request after the attempt (applied offline, or already resolved). */
   readonly request: AdminRequest;
@@ -346,13 +418,28 @@ export async function applyAdminRequestOffline(
         throw new Error(`unknown run: "${request.runId}"`);
       }
       const { states } = await replayStates(store, request.runId);
-      const plan = planAdminReset(
-        stored.graph,
-        states,
-        request.action,
-        request.nodeId,
-        "offline",
-      );
+      const refreshed =
+        request.refresh === undefined
+          ? undefined
+          : refreshRevisionFor(stored.graph, request);
+      const plan =
+        refreshed !== undefined && !refreshed.ok
+          ? ({ ok: false, message: refreshed.message } as const)
+          : request.refresh === undefined
+            ? planAdminReset(
+                stored.graph,
+                states,
+                request.action,
+                request.nodeId,
+                "offline",
+              )
+            : planRefreshReset(
+                stored.graph,
+                states,
+                request.action,
+                request.refresh,
+                "offline",
+              );
       const result = plan.ok
         ? await resolve(
             {
@@ -366,6 +453,14 @@ export async function applyAdminRequestOffline(
               })),
               expectedRevision: stored.revision,
               reopen: stored.finished,
+              ...(refreshed?.ok === true
+                ? {
+                    graphRevision: {
+                      revision: refreshed.revision,
+                      expectedGraphRevision: stored.graphRevision,
+                    },
+                  }
+                : {}),
             },
             await currentLease(),
           )

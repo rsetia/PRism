@@ -1,10 +1,18 @@
 import { execFile } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import {
+  buildBeadsGraph,
   builtinExecutors,
   compileGraph,
   createEngine,
@@ -44,7 +52,10 @@ interface CliResult {
 }
 
 async function cli(
-  options: { readonly cwd?: string },
+  options: {
+    readonly cwd?: string;
+    readonly env?: Readonly<Record<string, string>>;
+  },
   ...args: readonly string[]
 ): Promise<CliResult> {
   try {
@@ -54,7 +65,7 @@ async function cli(
       {
         timeout: 20_000,
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-        env: { ...process.env, PRISM_HOME: prismHome },
+        env: { ...process.env, PRISM_HOME: prismHome, ...options.env },
       },
     );
     return { code: 0, stdout, stderr };
@@ -399,5 +410,153 @@ describe("prism CLI: several unfinished runs", () => {
     expect(logs.stdout).toContain("[bbbb2222] newer output");
     expect(logs.stdout).toContain("[aaaa1111] ==> first (attempt 1) <==");
     await store.close?.();
+  });
+});
+
+describe("prism CLI: rerun-node --refresh", () => {
+  /** A fake `bd` that serves one Bead record, as `bd export` and `bd show`. */
+  function fakeBd(bead: Record<string, unknown>): string {
+    const dir = mkdtempSync(join(tempDir, "bd-"));
+    writeFileSync(join(dir, "export.jsonl"), `${JSON.stringify(bead)}\n`);
+    writeFileSync(join(dir, "show.json"), JSON.stringify([bead]));
+    const script = join(dir, "bd");
+    writeFileSync(
+      script,
+      [
+        "#!/bin/sh",
+        `if [ "$1" = "export" ]; then cat "${join(dir, "export.jsonl")}"; exit 0; fi`,
+        `if [ "$1" = "show" ]; then cat "${join(dir, "show.json")}"; exit 0; fi`,
+        "exit 1",
+      ].join("\n"),
+    );
+    chmodSync(script, 0o755);
+    return dir;
+  }
+
+  test("re-snapshots a failed node's Bead and spec into the same run, offline", async () => {
+    const path = db();
+    const store = createSqliteStore({ path });
+    const bead = {
+      id: "xondom-kko.9",
+      title: "B4 v1",
+      status: "open",
+      description: "v1",
+    };
+    const definition = buildBeadsGraph([bead], {
+      review: "none",
+      includeMerge: false,
+      includeBeadsUpdate: false,
+    });
+    let calls = 0;
+    const implement: ExecutorDefinition = {
+      name: "implement",
+      execute: () => {
+        calls += 1;
+        return calls === 1
+          ? blockerOutcome
+          : { status: "succeeded", output: "ok" };
+      },
+    };
+    const engine = createEngine({
+      store,
+      registry: createExecutorRegistry([...builtinExecutors, implement]),
+    });
+    const graph = buildGraph(definition);
+    expect(
+      (await engine.run(graph, { runId: "refresh-1" }).result).status,
+    ).toBe("failed");
+    await store.close?.();
+
+    const bdDir = fakeBd({ ...bead, title: "B4 v2", description: "v2" });
+    const specFile = join(tempDir, "spec-v2.md");
+    writeFileSync(specFile, "SPEC v2\n");
+    const refreshed = await cli(
+      { env: { PATH: `${bdDir}:${process.env["PATH"] ?? ""}` } },
+      "rerun-node",
+      "refresh-1",
+      "implement-xondom-kko-9",
+      "--store",
+      path,
+      "--refresh",
+      "--spec-file",
+      specFile,
+      "--beads-repo",
+      bdDir,
+      "--json",
+    );
+    expect(refreshed.stderr).toContain(
+      "refreshed and reset refresh-1/implement-xondom-kko-9 (applied offline",
+    );
+    expect(refreshed.code).toBe(0);
+    expect(JSON.parse(refreshed.stdout)).toMatchObject({
+      refreshed: true,
+      appliedBy: "offline",
+      resetNodeIds: ["context-xondom-kko-9", "implement-xondom-kko-9"],
+    });
+
+    const inspected = await cli({}, "inspect", "refresh-1", "--store", path);
+    expect(inspected.stdout).toMatch(
+      /graph revision 1: refreshed work item for implement-xondom-kko-9 \(xondom-kko\.9\) at \d{4}-\d\d-\d\dT[^ ]+ · spec .*spec-v2\.md/u,
+    );
+
+    const reopened = createSqliteStore({ path });
+    const context = (await reopened.getRun("refresh-1"))?.graph.nodes[
+      "context-xondom-kko-9"
+    ]?.config as { value: Record<string, unknown> };
+    expect(context.value["description"]).toBe("v2");
+    expect(context.value["specDocument"]).toMatchObject({
+      content: "SPEC v2\n",
+    });
+    await reopened.close?.();
+  });
+
+  test("refuses a succeeded node and non-Beads nodes; flags need --refresh", async () => {
+    const path = db();
+    const store = createSqliteStore({ path });
+    const engine = createEngine({
+      store,
+      registry: createExecutorRegistry(builtinExecutors),
+    });
+    const plain = buildGraph({
+      version: 1,
+      nodes: { a: { executor: "constant", config: { value: 1 } } },
+      finalNode: "a",
+    });
+    await engine.run(plain, { runId: "plain" }).result;
+    await store.close?.();
+
+    const nonBeads = await cli(
+      {},
+      "rerun-node",
+      "plain",
+      "a",
+      "--store",
+      path,
+      "--refresh",
+    );
+    expect(nonBeads.code).toBe(2);
+    expect(nonBeads.stderr).toContain("Beads-backed nodes only");
+
+    const specWithoutRefresh = await cli(
+      {},
+      "rerun-node",
+      "plain",
+      "a",
+      "--store",
+      path,
+      "--spec-file",
+      "x.md",
+    );
+    expect(specWithoutRefresh.code).toBe(2);
+    expect(specWithoutRefresh.stderr).toContain("Usage:");
+    const refreshElsewhere = await cli(
+      {},
+      "inspect",
+      "plain",
+      "--store",
+      path,
+      "--refresh",
+    );
+    expect(refreshElsewhere.code).toBe(2);
   });
 });
