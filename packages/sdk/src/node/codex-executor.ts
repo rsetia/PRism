@@ -299,6 +299,7 @@ export function createCodexExecutor(
           return outcome;
         };
         let reconciled = await reconcile();
+        let directMergeNote: string | undefined;
         const directMerger = options.directMerger;
         if (
           name === "merge_resolve" &&
@@ -323,19 +324,28 @@ export function createCodexExecutor(
               : `[prism] direct merge: ${merge.reason}; falling back to the agent session\n`,
           );
           if (merge.merged) {
-            const after = await reconcile();
-            if (after !== undefined && after.kind !== "fresh") {
-              reconciled = after;
-            }
-            if (reconciled.kind !== "satisfied") {
+            // Never fall back to the pre-merge state: it says the pull
+            // request is open, which `gh pr merge` just made untrue.
+            reconciled = await reconcile();
+            if (reconciled?.kind !== "satisfied") {
               onOutput?.(
                 "[prism] direct merge: reconciliation did not confirm the merge; falling back to the agent session\n",
               );
+              directMergeNote = `The orchestrator already ran \`gh pr merge\` for pull request #${String(pullRequest.number)} and it reported success, but the merge could not be confirmed. Check whether the pull request is merged before taking any action.`;
             }
           }
         }
         if (reconciled?.kind === "resume") {
-          contract = withReconciledState(baseContract, reconciled.state);
+          contract = withReconciledState(
+            baseContract,
+            reconciled.state,
+            directMergeNote,
+          );
+        } else if (directMergeNote !== undefined) {
+          contract = Object.freeze({
+            ...baseContract,
+            instructions: `${baseContract.instructions}\n\n${directMergeNote}`,
+          });
         }
 
         const runAgent = async (): Promise<WorkerResult> => {

@@ -945,6 +945,36 @@ describe("createCodexExecutor direct merge", () => {
     expect(inputs).toHaveLength(1);
   });
 
+  test("an unconfirmed merge never hands the agent the pre-merge state", async () => {
+    const { engine, inputs } = fakeEngine({
+      status: "succeeded",
+      output: proof("agent merged"),
+    });
+    const { merger, calls } = fakeMerger({ merged: true });
+    const executor = createCodexExecutor({
+      name: "merge_resolve",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: {
+        reconcile: () =>
+          Promise.resolve(
+            calls.length > 0
+              ? { kind: "fresh" as const, notes: ["gh pr list failed"] }
+              : { kind: "resume" as const, state: mergeState("CLEAN") },
+          ),
+      },
+      directMerger: merger,
+    });
+    await executor.execute(context([], { config: mergeConfig }));
+    expect(inputs).toHaveLength(1);
+    const instructions = inputs[0]?.contract.instructions ?? "";
+    expect(instructions).not.toContain("CLEAN");
+    expect(instructions).toContain(
+      "already ran `gh pr merge` for pull request #5",
+    );
+  });
+
   test.each(["DIRTY", "BEHIND", "BLOCKED", "UNSTABLE", "DRAFT", "UNKNOWN"])(
     "a %s pull request goes to the agent without a direct merge",
     async (status) => {

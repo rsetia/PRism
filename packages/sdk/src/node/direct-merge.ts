@@ -93,10 +93,12 @@ export function createGitHubDirectMerger(
         };
       }
       if (result.exitCode !== 0) {
-        const detail = (result.stderr || result.stdout).trim().split("\n")[0];
+        input.signal?.throwIfAborted();
+        const detail =
+          (result.stderr || result.stdout).trim().split("\n")[0] ?? "";
         return {
           merged: false,
-          reason: `gh pr merge exited ${String(result.exitCode)}${detail === undefined || detail.length === 0 ? "" : `: ${detail}`}`,
+          reason: `gh pr merge exited ${String(result.exitCode)}${detail.length === 0 ? "" : `: ${detail}`}`,
         };
       }
       return { merged: true };
