@@ -2438,7 +2438,7 @@ async function statsCommand(
       // Oldest first, so the runs read as a timeline above the totals.
       selected = [...runs].reverse();
     } else if (invocation.runIds.length > 0) {
-      selected = invocation.runIds.map((runId) => {
+      selected = [...new Set(invocation.runIds)].map((runId) => {
         const run = runs.find((candidate) => candidate.runId === runId);
         if (run === undefined) throw new Error(`unknown run: "${runId}"`);
         return run;

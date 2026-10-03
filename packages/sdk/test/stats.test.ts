@@ -221,6 +221,24 @@ describe("computeRunStats", () => {
     expect(agentMerge?.merges).toEqual({ direct: 0, agent: 1, reconciled: 0 });
   });
 
+  test("classifies a merge by the attempt that succeeded", () => {
+    const retried = computeRunStats(
+      graph,
+      log([
+        [0, ready("merge-a")],
+        [0, started("merge-a")],
+        [0, phase("merge-a", "integration_update")],
+        [1, failed("merge-a")],
+        [2, reset("merge-a")],
+        [2, ready("merge-a")],
+        [2, started("merge-a")],
+        [2, phase("merge-a", "merge")],
+        [3, succeeded("merge-a")],
+      ]),
+    );
+    expect(retried?.merges).toEqual({ direct: 1, agent: 0, reconciled: 0 });
+  });
+
   test("skips events without timestamps and says how many", () => {
     const partial = computeRunStats(
       graph,

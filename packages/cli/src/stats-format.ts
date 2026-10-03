@@ -104,7 +104,10 @@ function formatShares(phases: readonly PhaseShare[]): string {
 
 /** 45s, 12.5m, 3.2h. */
 export function formatSpan(durationMs: number): string {
-  if (durationMs < 60_000) return `${String(Math.round(durationMs / 1_000))}s`;
-  if (durationMs < 3_600_000) return `${(durationMs / 60_000).toFixed(1)}m`;
+  // Choose the unit from the rounded value so 59.6s prints as 1.0m, not 60s.
+  const seconds = Math.round(durationMs / 1_000);
+  if (seconds < 60) return `${String(seconds)}s`;
+  const minutes = Number((durationMs / 60_000).toFixed(1));
+  if (minutes < 60) return `${minutes.toFixed(1)}m`;
   return `${(durationMs / 3_600_000).toFixed(1)}h`;
 }

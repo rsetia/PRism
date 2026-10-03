@@ -1381,7 +1381,8 @@ describe("prism CLI: persisted runs", () => {
       "second",
     ]);
 
-    const text = await cli("stats", "t2", "t3", "--store", store);
+    const text = await cli("stats", "t2", "t3", "t2", "--store", store);
+    // A repeated id is reported once.
     expect(text.stdout).toMatch(/^all runs \(2 timed of 2\)$/mu);
   });
 

@@ -254,6 +254,9 @@ export function computeRunStats(
       case "node_reset":
         counts.reset += 1;
         succeededSeq.delete(nodeId);
+        // Merge classification describes the attempt that succeeded, not
+        // one an operator threw away.
+        seenPhases.delete(nodeId);
         running.delete(nodeId);
         close(nodeId, atMs);
         break;
@@ -302,7 +305,8 @@ export function computeRunStats(
 
 /**
  * Stats for a persisted run, read as a bounded snapshot like inspect so an
- * in-progress run is measured up to now without waiting for more events.
+ * in-progress run is measured up to its last event without waiting for more.
+ * Time after the last event (a live run's current wait) is not counted.
  */
 export async function readRunStats(
   store: RunStore,
