@@ -13,6 +13,7 @@ import {
   createCodexExecutor,
   createFileAgentSessionStore,
   createFileLogBackend,
+  createGitHubDirectMerger,
   createGitHubReconciler,
   createGitWorktreeProvisioner,
   createLinearPollSource,
@@ -124,6 +125,11 @@ export function createAgentExecutorRegistry(
       // Worker-declared failures are checked against the pull request before
       // they count: an open PR with budget left means "keep going".
       adjudication: {},
+      // A cleanly mergeable pull request is merged without an agent session;
+      // conflicts and anything GitHub will not merge as-is still get one.
+      ...(name === "merge_resolve"
+        ? { directMerger: createGitHubDirectMerger() }
+        : {}),
       ...(sessionBackend === undefined ? {} : { sessionBackend }),
       ...(sessionBackend === undefined
         ? {}

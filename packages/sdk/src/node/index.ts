@@ -149,6 +149,16 @@ export type {
 } from "./codex-executor.js";
 export { createCodexExecutor } from "./codex-executor.js";
 export type {
+  DirectMergeInput,
+  DirectMergeResult,
+  DirectMerger,
+  GitHubDirectMergerOptions,
+} from "./direct-merge.js";
+export {
+  createGitHubDirectMerger,
+  isDirectlyMergeable,
+} from "./direct-merge.js";
+export type {
   BranchDivergence,
   CiState,
   GitHubReconcilerOptions,

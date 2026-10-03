@@ -20,12 +20,18 @@ import {
   createCodexExecutor,
   createFileLogBackend,
   createFileAgentSessionStore,
+  createGitHubDirectMerger,
 } from "../src/node/index.js";
 import type {
   AgentSessionBackend,
   AgentSessionInput,
   CodexEngine,
   CodexExecutionInput,
+  CommandRunner,
+  DirectMergeInput,
+  DirectMergeResult,
+  DirectMerger,
+  NodeReconciler,
   ProvisionInput,
   WorkerResult,
   WorkspaceHandle,
@@ -796,6 +802,314 @@ describe("createCodexExecutor reconciliation", () => {
     });
     await executor.execute(context());
     expect(inputs[0]?.contract.instructions).not.toContain("reconciled");
+  });
+});
+
+describe("createCodexExecutor direct merge", () => {
+  const mergeConfig = {
+    targetBranch: "main",
+    sourceBranchFrom: "implement-mc-1",
+    mergeMethod: "rebase",
+  };
+  const pullRequest = {
+    number: 5,
+    url: "https://github.com/example/repo/pull/5",
+    state: "open" as const,
+    headSha: "abc123",
+  };
+  const mergeState = (mergeStateStatus: string) => ({
+    executor: "merge_resolve",
+    branch: "prism/mc-1",
+    targetBranch: "main",
+    branchExists: true,
+    pullRequest: { ...pullRequest, mergeStateStatus },
+    ci: "none" as const,
+    notes: [],
+  });
+
+  function fakeMerger(result: DirectMergeResult): {
+    merger: DirectMerger;
+    calls: DirectMergeInput[];
+  } {
+    const calls: DirectMergeInput[] = [];
+    return {
+      calls,
+      merger: {
+        merge(input) {
+          calls.push(input);
+          return Promise.resolve(result);
+        },
+      },
+    };
+  }
+
+  /** Reconciles to `first`, then to `satisfied` once a merge has run. */
+  function reconcilerAfterMerge(
+    first: string,
+    merged: () => boolean,
+  ): NodeReconciler {
+    return {
+      reconcile: () =>
+        Promise.resolve(
+          merged()
+            ? {
+                kind: "satisfied" as const,
+                state: mergeState("UNKNOWN"),
+                output: proof("reconciled merge"),
+              }
+            : { kind: "resume" as const, state: mergeState(first) },
+        ),
+    };
+  }
+
+  test("a clean pull request is merged without an agent session", async () => {
+    const { engine, inputs } = fakeEngine({
+      status: "succeeded",
+      output: proof("should not run"),
+    });
+    const { merger, calls } = fakeMerger({ merged: true });
+    const phases: NodePhase[] = [];
+    const executor = createCodexExecutor({
+      name: "merge_resolve",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: reconcilerAfterMerge("CLEAN", () => calls.length > 0),
+      directMerger: merger,
+    });
+    const outcome = await executor.execute(
+      context([], {
+        config: mergeConfig,
+        reportPhase: async (phase) => {
+          await Promise.resolve();
+          phases.push(phase);
+        },
+      }),
+    );
+    expect(outcome).toEqual({
+      status: "succeeded",
+      output: proof("reconciled merge"),
+    });
+    expect(inputs).toHaveLength(0);
+    expect(calls).toHaveLength(1);
+    expect(calls[0]?.mergeMethod).toBe("rebase");
+    expect(calls[0]?.pullRequest.headSha).toBe("abc123");
+    expect(phases).toContain("merge");
+    expect(phases).not.toContain("integration_update");
+  });
+
+  test("a failed direct merge falls back to the agent session", async () => {
+    const { engine, inputs } = fakeEngine({
+      status: "succeeded",
+      output: proof("agent merged"),
+    });
+    const { merger, calls } = fakeMerger({
+      merged: false,
+      reason: "gh pr merge exited 1",
+    });
+    const executor = createCodexExecutor({
+      name: "merge_resolve",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: reconcilerAfterMerge("CLEAN", () => false),
+      directMerger: merger,
+    });
+    const outcome = await executor.execute(
+      context([], { config: mergeConfig }),
+    );
+    expect(calls).toHaveLength(1);
+    expect(inputs).toHaveLength(1);
+    expect(outcome).toEqual({
+      status: "succeeded",
+      output: proof("agent merged"),
+    });
+  });
+
+  test("a merge reconciliation cannot confirm falls back to the agent session", async () => {
+    const { engine, inputs } = fakeEngine({
+      status: "succeeded",
+      output: proof("agent merged"),
+    });
+    const { merger, calls } = fakeMerger({ merged: true });
+    const executor = createCodexExecutor({
+      name: "merge_resolve",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: reconcilerAfterMerge("CLEAN", () => false),
+      directMerger: merger,
+    });
+    await executor.execute(context([], { config: mergeConfig }));
+    expect(calls).toHaveLength(1);
+    expect(inputs).toHaveLength(1);
+  });
+
+  test("an unconfirmed merge never hands the agent the pre-merge state", async () => {
+    const { engine, inputs } = fakeEngine({
+      status: "succeeded",
+      output: proof("agent merged"),
+    });
+    const { merger, calls } = fakeMerger({ merged: true });
+    const executor = createCodexExecutor({
+      name: "merge_resolve",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: {
+        reconcile: () =>
+          Promise.resolve(
+            calls.length > 0
+              ? { kind: "fresh" as const, notes: ["gh pr list failed"] }
+              : { kind: "resume" as const, state: mergeState("CLEAN") },
+          ),
+      },
+      directMerger: merger,
+    });
+    await executor.execute(context([], { config: mergeConfig }));
+    expect(inputs).toHaveLength(1);
+    const instructions = inputs[0]?.contract.instructions ?? "";
+    expect(instructions).not.toContain("CLEAN");
+    expect(instructions).toContain(
+      "already ran `gh pr merge` for pull request #5",
+    );
+  });
+
+  test.each(["DIRTY", "BEHIND", "BLOCKED", "UNSTABLE", "DRAFT", "UNKNOWN"])(
+    "a %s pull request goes to the agent without a direct merge",
+    async (status) => {
+      const { engine, inputs } = fakeEngine({
+        status: "succeeded",
+        output: proof(),
+      });
+      const { merger, calls } = fakeMerger({ merged: true });
+      const executor = createCodexExecutor({
+        name: "merge_resolve",
+        engine,
+        cwd: tempDir,
+        nodeDirBase: tempDir,
+        reconciler: reconcilerAfterMerge(status, () => false),
+        directMerger: merger,
+      });
+      await executor.execute(context([], { config: mergeConfig }));
+      expect(calls).toHaveLength(0);
+      expect(inputs).toHaveLength(1);
+    },
+  );
+
+  test("without a direct merger a clean pull request still goes to the agent", async () => {
+    const { engine, inputs } = fakeEngine({
+      status: "succeeded",
+      output: proof(),
+    });
+    const executor = createCodexExecutor({
+      name: "merge_resolve",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: reconcilerAfterMerge("CLEAN", () => false),
+    });
+    await executor.execute(context([], { config: mergeConfig }));
+    expect(inputs).toHaveLength(1);
+  });
+
+  test("other executors never merge directly", async () => {
+    const { engine, inputs } = fakeEngine({
+      status: "succeeded",
+      output: proof(),
+    });
+    const { merger, calls } = fakeMerger({ merged: true });
+    const executor = createCodexExecutor({
+      name: "implement",
+      engine,
+      cwd: tempDir,
+      nodeDirBase: tempDir,
+      reconciler: reconcilerAfterMerge("CLEAN", () => false),
+      directMerger: merger,
+    });
+    await executor.execute(context());
+    expect(calls).toHaveLength(0);
+    expect(inputs).toHaveLength(1);
+  });
+});
+
+describe("createGitHubDirectMerger", () => {
+  function recordingRunner(
+    exitCode: number,
+    stderr = "",
+  ): {
+    runner: CommandRunner;
+    calls: { command: string; args: readonly string[]; cwd?: string }[];
+  } {
+    const calls: { command: string; args: readonly string[]; cwd?: string }[] =
+      [];
+    return {
+      calls,
+      runner: {
+        run(command, args, options) {
+          calls.push({
+            command,
+            args,
+            ...(options?.cwd === undefined ? {} : { cwd: options.cwd }),
+          });
+          return Promise.resolve({ exitCode, stdout: "", stderr });
+        },
+      },
+    };
+  }
+
+  test("merges with the configured method pinned to the reconciled head", async () => {
+    const { runner, calls } = recordingRunner(0);
+    const result = await createGitHubDirectMerger({ runner }).merge({
+      pullRequest: {
+        number: 7,
+        url: "https://github.com/example/repo/pull/7",
+        state: "open",
+        headSha: "def456",
+      },
+      mergeMethod: "squash",
+      worktreeDir: tempDir,
+    });
+    expect(result).toEqual({ merged: true });
+    expect(calls).toEqual([
+      {
+        command: "gh",
+        args: ["pr", "merge", "7", "--squash", "--match-head-commit", "def456"],
+        cwd: tempDir,
+      },
+    ]);
+  });
+
+  test("omits the head pin when the head is unknown", async () => {
+    const { runner, calls } = recordingRunner(0);
+    await createGitHubDirectMerger({ runner, gh: "/bin/gh" }).merge({
+      pullRequest: {
+        number: 7,
+        url: "https://github.com/example/repo/pull/7",
+        state: "open",
+      },
+      mergeMethod: "merge",
+      worktreeDir: tempDir,
+    });
+    expect(calls[0]?.command).toBe("/bin/gh");
+    expect(calls[0]?.args).toEqual(["pr", "merge", "7", "--merge"]);
+  });
+
+  test("reports a non-zero exit as an unmerged result", async () => {
+    const { runner } = recordingRunner(1, "Pull request is not mergeable\n");
+    const result = await createGitHubDirectMerger({ runner }).merge({
+      pullRequest: {
+        number: 7,
+        url: "https://github.com/example/repo/pull/7",
+        state: "open",
+      },
+      mergeMethod: "squash",
+      worktreeDir: tempDir,
+    });
+    expect(result).toEqual({
+      merged: false,
+      reason: "gh pr merge exited 1: Pull request is not mergeable",
+    });
   });
 });
 
