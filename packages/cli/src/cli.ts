@@ -2399,10 +2399,20 @@ function parseStatsInvocation(
   rest: readonly string[],
 ): StatsInvocation | undefined {
   // --all is stats-only, so it is taken out before the shared flag parser.
-  const allCount = rest.filter((arg) => arg === "--all").length;
-  if (allCount > 1) return undefined;
-  const all = allCount === 1;
-  const flags = parseFlags(rest.filter((arg) => arg !== "--all"));
+  // Only a standalone token counts: `--store --all` is a missing store path,
+  // which the shared parser rejects.
+  const remaining: string[] = [];
+  let all = false;
+  for (let index = 0; index < rest.length; index += 1) {
+    const arg = rest[index] as string;
+    if (arg === "--all" && rest[index - 1] !== "--store") {
+      if (all) return undefined;
+      all = true;
+    } else {
+      remaining.push(arg);
+    }
+  }
+  const flags = parseFlags(remaining);
   if (
     flags === undefined ||
     flags.runId !== undefined ||
@@ -2452,11 +2462,22 @@ async function statsCommand(
     }
     const reports: RunStatsReport[] = [];
     for (const run of selected) {
-      reports.push({
-        runId: run.runId,
-        finished: run.finished,
-        stats: await readRunStats(store, run.runId),
-      });
+      try {
+        reports.push({
+          runId: run.runId,
+          finished: run.finished,
+          stats: await readRunStats(store, run.runId),
+        });
+      } catch (error: unknown) {
+        // One unreadable run should not discard a batch comparison.
+        if (selected.length === 1) throw error;
+        reports.push({
+          runId: run.runId,
+          finished: run.finished,
+          stats: null,
+          error: describeError(error),
+        });
+      }
     }
     if (invocation.json) {
       io.stdout(stringifyJson({ version: 1, runs: reports }));

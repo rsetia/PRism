@@ -1,11 +1,15 @@
-import { combineCriticalPathPhases } from "@rsetia/prism";
-import type { PhaseShare, RunStats } from "@rsetia/prism";
+import { combineCriticalPathPhases, combineReviewRounds } from "@rsetia/prism";
+import type { PhaseShare, ReviewRounds, RunStats } from "@rsetia/prism";
 
-/** A run's stats as `prism stats` prints them; null stats means untimed. */
+/**
+ * A run's stats as `prism stats` prints them. Null stats means the log is
+ * untimed, or, with `error` set, that the run could not be read.
+ */
 export interface RunStatsReport {
   readonly runId: string;
   readonly finished: boolean;
   readonly stats: RunStats | null;
+  readonly error?: string;
 }
 
 /**
@@ -15,6 +19,9 @@ export interface RunStatsReport {
 export function formatRunStats(report: RunStatsReport): string[] {
   const { stats } = report;
   const header = `${report.runId} (${report.finished ? "finished" : "running"})`;
+  if (report.error !== undefined) {
+    return [header, `  cannot read run: ${report.error}`];
+  }
   if (stats === null) {
     return [
       header,
@@ -41,12 +48,7 @@ export function formatRunStats(report: RunStatsReport): string[] {
     );
   }
 
-  const rounds = stats.reviewRounds;
-  lines.push(
-    rounds.mean === null
-      ? "  review rounds: none"
-      : `  review rounds: mean ${rounds.mean.toFixed(1)} · max ${String(rounds.max)} over ${String(rounds.nodes.length)} node(s)`,
-  );
+  lines.push(formatReviewRounds(stats.reviewRounds));
 
   lines.push(`  idle (no worker running): ${formatSpan(stats.idle.totalMs)}`);
   for (const gap of stats.idle.gaps) {
@@ -78,16 +80,18 @@ export function formatCombinedStats(
   if (timed.length === 0) return [];
   const wallMs = timed.reduce((sum, stats) => sum + stats.wallMs, 0);
   const idleMs = timed.reduce((sum, stats) => sum + stats.idle.totalMs, 0);
-  const reviewed = timed.flatMap((stats) => stats.reviewRounds.nodes);
-  const rounds = reviewed.reduce((sum, node) => sum + node.rounds, 0);
   return [
     `all runs (${String(timed.length)} timed of ${String(reports.length)})`,
     `  wall ${formatSpan(wallMs)} · idle ${formatSpan(idleMs)}`,
     `  critical paths: ${formatShares(combineCriticalPathPhases(timed))}`,
-    reviewed.length === 0
-      ? "  review rounds: none"
-      : `  review rounds: mean ${(rounds / reviewed.length).toFixed(1)} · max ${String(reviewed.reduce((max, node) => Math.max(max, node.rounds), 0))} over ${String(reviewed.length)} node(s)`,
+    formatReviewRounds(combineReviewRounds(timed)),
   ];
+}
+
+function formatReviewRounds(rounds: ReviewRounds): string {
+  return rounds.mean === null
+    ? "  review rounds: none"
+    : `  review rounds: mean ${rounds.mean.toFixed(1)} · max ${String(rounds.max)} over ${String(rounds.nodes.length)} node(s)`;
 }
 
 function formatShares(phases: readonly PhaseShare[]): string {

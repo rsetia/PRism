@@ -1393,6 +1393,7 @@ describe("prism CLI: persisted runs", () => {
     expect(unknown.code).toBe(2);
     expect(unknown.stderr).toContain('unknown run: "ghost"');
     expect((await cli("stats", "--all", "t4", "--store", store)).code).toBe(2);
+    expect((await cli("stats", "--store", "--all")).code).toBe(2);
   });
 
   test("watch emits a finished JSON snapshot and exits successfully", async () => {

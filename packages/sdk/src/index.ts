@@ -73,6 +73,7 @@ export type { ManualClock } from "./adapters/clock.js";
 export { inspectRun, watchRun } from "./runtime/inspect.js";
 export {
   combineCriticalPathPhases,
+  combineReviewRounds,
   computeRunStats,
   readRunStats,
 } from "./runtime/stats.js";

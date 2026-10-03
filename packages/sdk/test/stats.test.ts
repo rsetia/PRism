@@ -1,5 +1,6 @@
 import { describe, expect, test } from "vitest";
 import {
+  combineReviewRounds,
   compileGraph,
   computeRunStats,
   createMemoryStore,
@@ -258,6 +259,27 @@ describe("computeRunStats", () => {
       computeRunStats(graph, log([[null, ready("context-a")]])),
     ).toBeNull();
     expect(computeRunStats(graph, [])).toBeNull();
+  });
+});
+
+describe("combineReviewRounds", () => {
+  test("weights every reviewed node across runs equally", () => {
+    const first = computeRunStats(graph, events);
+    const second = computeRunStats(
+      graph,
+      log([
+        [0, ready("implement-c")],
+        [0, started("implement-c")],
+        [1, phase("implement-c", "review_wait")],
+        [2, succeeded("implement-c")],
+      ]),
+    );
+    if (first === null || second === null) throw new Error("expected stats");
+    const combined = combineReviewRounds([first, second]);
+    expect(combined.nodes.map((node) => node.rounds)).toEqual([2, 2, 1]);
+    expect(combined.mean).toBeCloseTo(5 / 3);
+    expect(combined.max).toBe(2);
+    expect(combineReviewRounds([]).mean).toBeNull();
   });
 });
 

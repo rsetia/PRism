@@ -186,7 +186,10 @@ failed/reset/blocked counts and direct versus agent merges. With no run id
 it reports the latest run; `--all` reports every run oldest first, followed
 by totals across them, which is the before/after view for a change to the
 orchestrator. Time is measured up to a run's last event, so a live run's
-current wait is not yet counted. Events recorded before timestamps existed
+current wait is not yet counted, and only silences between events count as
+idle. "Outside them" on the critical-path line is wall time the path's
+phases do not cover: operator waits on a finished run, and on a failed or
+unfinished run also any work after its last success. Events recorded before timestamps existed
 are skipped. The
 same numbers are available from `readRunStats` and `computeRunStats` in the
 SDK, and as JSON with `--json`.

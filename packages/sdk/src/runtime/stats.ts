@@ -340,6 +340,11 @@ export function combineCriticalPathPhases(
   return shares(totals);
 }
 
+/** Review rounds across several runs, every reviewed node weighted equally. */
+export function combineReviewRounds(stats: readonly RunStats[]): ReviewRounds {
+  return summarizeReviewRounds(stats.flatMap((run) => run.reviewRounds.nodes));
+}
+
 /**
  * Walk back from the last node to succeed, each step taking the dependency
  * that succeeded last: the chain that actually gated the run's end. This is
@@ -418,14 +423,19 @@ function reviewRounds(
   graph: CompiledGraph,
   entries: ReadonlyMap<string, number>,
 ): ReviewRounds {
-  const nodes = graph.order
-    .filter((nodeId) => entries.has(nodeId))
-    .map((nodeId) =>
-      Object.freeze({ nodeId, rounds: entries.get(nodeId) as number }),
-    );
+  return summarizeReviewRounds(
+    graph.order
+      .filter((nodeId) => entries.has(nodeId))
+      .map((nodeId) =>
+        Object.freeze({ nodeId, rounds: entries.get(nodeId) as number }),
+      ),
+  );
+}
+
+function summarizeReviewRounds(nodes: ReviewRounds["nodes"]): ReviewRounds {
   const total = nodes.reduce((sum, node) => sum + node.rounds, 0);
   return Object.freeze({
-    nodes: Object.freeze(nodes),
+    nodes: Object.freeze([...nodes]),
     mean: nodes.length === 0 ? null : total / nodes.length,
     max: nodes.reduce((max, node) => Math.max(max, node.rounds), 0),
   });
