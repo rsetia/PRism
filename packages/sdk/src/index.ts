@@ -71,6 +71,22 @@ export type { RetryPolicy } from "./runtime/retry.js";
 export { createManualClock, createSystemClock } from "./adapters/clock.js";
 export type { ManualClock } from "./adapters/clock.js";
 export { inspectRun, watchRun } from "./runtime/inspect.js";
+export {
+  combineCriticalPathPhases,
+  computeRunStats,
+  readRunStats,
+} from "./runtime/stats.js";
+export type {
+  IdleGap,
+  IdleStats,
+  MergeStats,
+  PhaseShare,
+  PhaseStat,
+  RealizedCriticalPath,
+  ReviewRounds,
+  RunStats,
+  RunStatsOptions,
+} from "./runtime/stats.js";
 export { summarizeUsage } from "./runtime/usage.js";
 export type { AttemptUsage, UsageTotals } from "./runtime/usage.js";
 export type {

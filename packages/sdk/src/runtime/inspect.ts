@@ -610,7 +610,8 @@ function closeActivePhase(timing: MutableTiming, timestampMs: number): void {
   timing.activeSinceMs = timestampMs;
 }
 
-async function readEventSnapshot(
+/** Exactly `revision` events, without following a live run. */
+export async function readEventSnapshot(
   store: RunStore,
   runId: string,
   revision: number,

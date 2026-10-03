@@ -20,6 +20,7 @@ import {
   describeFailure,
   inspectRun,
   parseGraph,
+  readRunStats,
   refreshBeadsNodeConfigs,
   resetRun,
   transientInfraRetryPolicy,
@@ -78,6 +79,11 @@ import {
 } from "./skills.js";
 import type { SkillAgent, SkillScope } from "./skills.js";
 import { renderWatchDashboard } from "./watch-renderer.js";
+import {
+  formatCombinedStats,
+  formatRunStats,
+  type RunStatsReport,
+} from "./stats-format.js";
 
 /** Non-TTY stdout is data; interactive watch may redraw a human dashboard. */
 export interface CliIo {
@@ -153,6 +159,12 @@ Commands:
                                       unfinished run, lines prefixed by run;
                                       else the latest run)
   status [--store <db>] [--json]      List persisted runs
+  stats [<run-id>...] [--all] [--store <db>] [--json]
+                                      Where a run's time went: critical path
+                                      by phase, phase durations, review
+                                      rounds, idle time with no worker running
+                                      (default: the latest run; --all: every
+                                      run, plus totals)
   watch [<run-id>] [--store <db>] [--json] [--interval <ms>] [--repo <path>]
                                       Render the live DAG (default: every
                                       unfinished run, stacked; else the latest)
@@ -273,6 +285,14 @@ interface StatusInvocation {
   readonly json: boolean;
   readonly store: string | undefined;
 }
+interface StatsInvocation {
+  readonly command: "stats";
+  /** Empty with all=false means the latest run. */
+  readonly runIds: readonly string[];
+  readonly all: boolean;
+  readonly json: boolean;
+  readonly store: string | undefined;
+}
 interface WatchInvocation {
   readonly command: "watch";
   readonly runId: string | undefined;
@@ -330,6 +350,7 @@ type Invocation =
   | ReadInvocation
   | LogsInvocation
   | StatusInvocation
+  | StatsInvocation
   | WatchInvocation
   | ResumeInvocation
   | AbortInvocation
@@ -518,6 +539,9 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
     (command === "help" || command === "--help" || command === "-h")
   ) {
     return { command: "help" };
+  }
+  if (command === "stats") {
+    return parseStatsInvocation(rest);
   }
   const flags = parseFlags(rest);
   if (flags === undefined) return undefined;
@@ -2371,6 +2395,88 @@ function reportReset(
   return EXIT_SUCCESS;
 }
 
+function parseStatsInvocation(
+  rest: readonly string[],
+): StatsInvocation | undefined {
+  // --all is stats-only, so it is taken out before the shared flag parser.
+  const allCount = rest.filter((arg) => arg === "--all").length;
+  if (allCount > 1) return undefined;
+  const all = allCount === 1;
+  const flags = parseFlags(rest.filter((arg) => arg !== "--all"));
+  if (
+    flags === undefined ||
+    flags.runId !== undefined ||
+    flags.interval !== undefined ||
+    flags.timeout !== undefined ||
+    flags.refresh ||
+    flags.specFile !== undefined ||
+    flags.beadsRepo !== undefined ||
+    !noAgentFlags(flags) ||
+    (all && flags.positionals.length > 0)
+  ) {
+    return undefined;
+  }
+  return {
+    command: "stats",
+    runIds: flags.positionals,
+    all,
+    json: flags.json,
+    store: flags.store,
+  };
+}
+
+async function statsCommand(
+  invocation: StatsInvocation,
+  io: CliIo,
+): Promise<number> {
+  let store: RunStore | undefined;
+  try {
+    store = await openPersistentStore(invocation.store);
+    const runs = await store.listRuns();
+    let selected: readonly { runId: string; finished: boolean }[];
+    if (invocation.all) {
+      // Oldest first, so the runs read as a timeline above the totals.
+      selected = [...runs].reverse();
+    } else if (invocation.runIds.length > 0) {
+      selected = invocation.runIds.map((runId) => {
+        const run = runs.find((candidate) => candidate.runId === runId);
+        if (run === undefined) throw new Error(`unknown run: "${runId}"`);
+        return run;
+      });
+    } else {
+      const latest = runs[0];
+      if (latest === undefined) {
+        throw new Error("no persisted runs exist for the current project");
+      }
+      selected = [latest];
+    }
+    const reports: RunStatsReport[] = [];
+    for (const run of selected) {
+      reports.push({
+        runId: run.runId,
+        finished: run.finished,
+        stats: await readRunStats(store, run.runId),
+      });
+    }
+    if (invocation.json) {
+      io.stdout(stringifyJson({ version: 1, runs: reports }));
+    } else {
+      for (const report of reports) {
+        for (const line of formatRunStats(report)) io.stdout(line);
+      }
+      if (reports.length > 1) {
+        for (const line of formatCombinedStats(reports)) io.stdout(line);
+      }
+    }
+    return EXIT_SUCCESS;
+  } catch (error: unknown) {
+    io.stderr(`cannot compute stats: ${describeError(error)}`);
+    return EXIT_USAGE;
+  } finally {
+    await store?.close?.();
+  }
+}
+
 async function statusCommand(
   invocation: StatusInvocation,
   io: CliIo,
@@ -2811,6 +2917,9 @@ export async function runCli(
 
     case "status":
       return statusCommand(invocation, io);
+
+    case "stats":
+      return statsCommand(invocation, io);
 
     case "watch":
       return watchCommand(invocation, io);
