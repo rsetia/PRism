@@ -265,13 +265,15 @@ export function createCodexEngine(
       });
       const onOutput = input.onOutput;
       const stallDetection = stallTimeoutMs > 0 && onOutput !== undefined;
-      let lastProgress = Date.now();
+      // Monotonic: a host that sleeps mid-session must not wake up to a
+      // healthy session that looks silent for the whole time it was asleep.
+      let lastProgress = performance.now();
       const outputDrained = captureChildOutput(
         child,
         onOutput === undefined
           ? undefined
           : (chunk) => {
-              lastProgress = Date.now();
+              lastProgress = performance.now();
               onOutput(chunk);
             },
         redact,
@@ -305,7 +307,7 @@ export function createCodexEngine(
           );
           if (observedPhase !== lastPhase) {
             lastPhase = observedPhase;
-            lastProgress = Date.now();
+            lastProgress = performance.now();
           }
           const resultRead = await readWorkerResult(resultPath);
           if (resultRead.kind === "valid") {
@@ -326,7 +328,10 @@ export function createCodexEngine(
           }
 
           const now = Date.now();
-          if (stallDetection && now - lastProgress >= stallTimeoutMs) {
+          if (
+            stallDetection &&
+            performance.now() - lastProgress >= stallTimeoutMs
+          ) {
             await terminateProcess(child, settled, killGraceMs);
             await outputDrained;
             // A result written during the grace period still wins.
@@ -338,7 +343,7 @@ export function createCodexEngine(
             }
             return persistInfrastructureFailure(
               resultPath,
-              `codex produced no output or phase change for ${describeDuration(stallTimeoutMs)}; terminated as stalled`,
+              `codex produced no output or phase change for ${describeDuration(stallTimeoutMs)}; terminated as stalled (raise or disable with --codex-stall-timeout-minutes)`,
             );
           }
           if (now - lastHeartbeat >= heartbeatIntervalMs) {

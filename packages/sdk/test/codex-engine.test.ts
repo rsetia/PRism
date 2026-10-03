@@ -352,7 +352,7 @@ describe("createCodexEngine stall detection", () => {
     expect(result).toEqual({
       status: "failed",
       error:
-        "codex produced no output or phase change for 150 ms; terminated as stalled",
+        "codex produced no output or phase change for 150 ms; terminated as stalled (raise or disable with --codex-stall-timeout-minutes)",
       failureClass: "transient_infra",
     });
     expect(output.join("")).toContain("fake codex stdout");
@@ -373,6 +373,19 @@ describe("createCodexEngine stall detection", () => {
       });
     },
   );
+
+  test("a result written during the kill grace period wins", async () => {
+    const result = await engine({ stallTimeoutMs: 150 }).execute({
+      ...paths(),
+      spec: spec("stall-then-result-on-term"),
+      contract,
+      onOutput: () => undefined,
+    });
+    expect(result).toEqual({
+      status: "succeeded",
+      output: { task: "fix it" },
+    });
+  });
 
   test("never declares a session with unobserved output stalled", async () => {
     const controller = new AbortController();
