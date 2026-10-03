@@ -165,6 +165,8 @@ try {
   const smokeHome = path.join(workDir, "prism-home");
   await mkdir(smokeHome);
   process.env.PRISM_HOME = smokeHome;
+  // The smoke run must not raise desktop notifications.
+  process.env.PRISM_NOTIFY = "0";
 
   const pack = async (packageName) => {
     const { stdout } = await run(

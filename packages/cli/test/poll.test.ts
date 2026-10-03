@@ -122,6 +122,7 @@ function startPoll(
     PRISM_HOME: prismHome,
     // A killed poller's leases gate the restart; keep that window short.
     PRISM_LEASE_DURATION_MS: "1000",
+    PRISM_NOTIFY: "0",
   };
   delete childEnv["LINEAR_API_KEY"];
   delete childEnv["LINEAR_TOKEN"];
