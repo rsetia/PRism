@@ -41,6 +41,7 @@ import {
   type ReconcileOutcome,
   type ReconciledState,
 } from "./reconcile.js";
+import { isDirectlyMergeable, type DirectMerger } from "./direct-merge.js";
 
 /**
  * How a worker-declared failure is adjudicated against external state.
@@ -116,6 +117,13 @@ export interface CodexExecutorOptions {
    * session. Requires `reconciler`. Absent means worker failures are final.
    */
   readonly adjudication?: FailureAdjudicationOptions;
+  /**
+   * `merge_resolve` only: when reconciliation finds the pull request cleanly
+   * mergeable, merge it directly and skip the agent session. A failed merge,
+   * or one that reconciliation cannot confirm, falls back to the agent.
+   * Requires `reconciler`. Ignored by other executor names.
+   */
+  readonly directMerger?: DirectMerger;
 }
 
 /**
@@ -290,7 +298,42 @@ export function createCodexExecutor(
           onOutput?.(describeReconciliation(outcome));
           return outcome;
         };
-        const reconciled = await reconcile();
+        let reconciled = await reconcile();
+        const directMerger = options.directMerger;
+        if (
+          name === "merge_resolve" &&
+          directMerger !== undefined &&
+          reconciled?.kind === "resume" &&
+          reconciled.state.pullRequest !== undefined &&
+          isDirectlyMergeable(reconciled.state.pullRequest)
+        ) {
+          const pullRequest = reconciled.state.pullRequest;
+          await context.reportPhase("merge");
+          const merge = await directMerger.merge({
+            pullRequest,
+            mergeMethod:
+              parseMergeResolveConfig(spec.config ?? undefined).mergeMethod ??
+              "squash",
+            worktreeDir,
+            signal: context.signal,
+          });
+          onOutput?.(
+            merge.merged
+              ? `[prism] direct merge: merged pull request #${String(pullRequest.number)} without an agent session\n`
+              : `[prism] direct merge: ${merge.reason}; falling back to the agent session\n`,
+          );
+          if (merge.merged) {
+            const after = await reconcile();
+            if (after !== undefined && after.kind !== "fresh") {
+              reconciled = after;
+            }
+            if (reconciled.kind !== "satisfied") {
+              onOutput?.(
+                "[prism] direct merge: reconciliation did not confirm the merge; falling back to the agent session\n",
+              );
+            }
+          }
+        }
         if (reconciled?.kind === "resume") {
           contract = withReconciledState(baseContract, reconciled.state);
         }
