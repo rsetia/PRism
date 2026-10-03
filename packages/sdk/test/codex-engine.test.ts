@@ -352,7 +352,7 @@ describe("createCodexEngine stall detection", () => {
     expect(result).toEqual({
       status: "failed",
       error:
-        "codex produced no output or phase change for 150 ms; terminated as stalled (raise or disable with --codex-stall-timeout-minutes)",
+        "codex produced no output or phase change for 150 ms; terminated as stalled (raise or disable the stall timeout if this session was healthy)",
       failureClass: "transient_infra",
     });
     expect(output.join("")).toContain("fake codex stdout");

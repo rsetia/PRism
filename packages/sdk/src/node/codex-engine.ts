@@ -267,6 +267,7 @@ export function createCodexEngine(
       const stallDetection = stallTimeoutMs > 0 && onOutput !== undefined;
       // Monotonic: a host that sleeps mid-session must not wake up to a
       // healthy session that looks silent for the whole time it was asleep.
+      // The heartbeat cadence stays on Date.now(); it only paces writes.
       let lastProgress = performance.now();
       const outputDrained = captureChildOutput(
         child,
@@ -343,7 +344,7 @@ export function createCodexEngine(
             }
             return persistInfrastructureFailure(
               resultPath,
-              `codex produced no output or phase change for ${describeDuration(stallTimeoutMs)}; terminated as stalled (raise or disable with --codex-stall-timeout-minutes)`,
+              `codex produced no output or phase change for ${describeDuration(stallTimeoutMs)}; terminated as stalled (raise or disable the stall timeout if this session was healthy)`,
             );
           }
           if (now - lastHeartbeat >= heartbeatIntervalMs) {
