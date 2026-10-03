@@ -106,6 +106,8 @@ export interface OperatorAlertsInput {
   /** Events below this sequence predate this process (resume); skip them. */
   readonly fromSeq: number;
   readonly now?: () => number;
+  /** Bound on finish()'s drain wait. Default DRAIN_TIMEOUT_MS. */
+  readonly drainTimeoutMs?: number;
 }
 
 export interface OperatorAlerts {
@@ -186,7 +188,10 @@ export function followOperatorAlerts(
       await Promise.race([
         following,
         new Promise<void>((resolveDrain) => {
-          timer = setTimeout(resolveDrain, DRAIN_TIMEOUT_MS);
+          timer = setTimeout(
+            resolveDrain,
+            input.drainTimeoutMs ?? DRAIN_TIMEOUT_MS,
+          );
         }),
       ]);
       if (timer !== undefined) clearTimeout(timer);

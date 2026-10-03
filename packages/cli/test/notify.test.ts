@@ -217,6 +217,29 @@ describe("followOperatorAlerts teardown", () => {
     ]);
   });
 
+  test("finish gives up on a cursor that never drains", async () => {
+    let clock = 0;
+    const { notifier, sent } = recordingNotifier();
+    const alerts = followOperatorAlerts({
+      notifier,
+      runId: "run-tail",
+      fromSeq: 0,
+      events: {
+        [Symbol.asyncIterator]: () => ({
+          next: () =>
+            new Promise<IteratorResult<PersistedRunEvent>>(() => undefined),
+        }),
+      },
+      now: () => clock,
+      drainTimeoutMs: 10,
+    });
+    clock = RUN_FINISHED_NOTIFY_AFTER_MS;
+    await alerts.finish({ status: "succeeded", output: null });
+    expect(sent.map((notification) => notification.title)).toEqual([
+      "Prism run succeeded · run-tail",
+    ]);
+  });
+
   test("stop ends a live cursor that never yields again", async () => {
     let returned = false;
     const { notifier, sent } = recordingNotifier();
