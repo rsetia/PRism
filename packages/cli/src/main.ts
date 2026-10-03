@@ -5,6 +5,7 @@
  */
 import { EXIT_INTERNAL, runCli } from "./cli.js";
 import { startKeepAwake } from "./keep-awake.js";
+import { createDesktopNotifier, notificationsDisabledByEnv } from "./notify.js";
 
 const io = {
   stdout: (line: string): void => {
@@ -20,6 +21,9 @@ const io = {
   columns: process.stdout.columns,
   rows: process.stdout.rows,
   color: process.env["NO_COLOR"] === undefined,
+  ...(notificationsDisabledByEnv()
+    ? {}
+    : { notifier: createDesktopNotifier() }),
 };
 
 try {

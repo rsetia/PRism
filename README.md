@@ -67,6 +67,12 @@ as stalled and retried or continued from its pull request;
 On macOS, `run`, `resume`, and `poll` keep the host awake while they execute;
 pass `--allow-sleep` to opt out. Worker log lines are timestamped.
 
+While `run`, `resume`, or `poll` drives a run, Prism notifies you (desktop
+notification on macOS or Linux, plus the terminal bell) when a node fails
+after its retries or stops on a blocker that needs your input, and when a run
+finishes after more than a minute in this process. On other platforms only the
+bell rings. `--no-notify` or `PRISM_NOTIFY=0` turns this off.
+
 If both production and staging Greptile apps review the same pull requests,
 select the production GitHub App for the whole run:
 
