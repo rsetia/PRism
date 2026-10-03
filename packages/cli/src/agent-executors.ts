@@ -28,6 +28,11 @@ import { resolvePrismProjectPaths } from "./prism-home.js";
 
 export const DEFAULT_CODEX_MODEL = "gpt-5.6-terra";
 export const DEFAULT_CODEX_REASONING_EFFORT = "medium";
+/**
+ * A Codex session silent this long is terminated as stalled. Reviews finish
+ * in minutes and workers poll every 60-90 seconds, which produces output.
+ */
+export const DEFAULT_CODEX_STALL_TIMEOUT_MINUTES = 30;
 
 export interface AgentExecutorRegistryOptions {
   /** Git repository Codex implement/merge nodes mutate. Default cwd. */
@@ -44,6 +49,11 @@ export interface AgentExecutorRegistryOptions {
   readonly codexReasoningEffort?: string;
   /** Worker transport. Default "exec"; "app-server" enables durable threads. */
   readonly codexBackend?: "exec" | "app-server";
+  /**
+   * Terminate an exec-backend session with no output or phase change for
+   * this long. Default 30 minutes; 0 disables.
+   */
+  readonly codexStallTimeoutMs?: number;
   /** Selects a structured backend when embedding the CLI registry. */
   readonly sessionBackend?: AgentSessionBackend;
   /** Operator-facing poll progress lines (stderr in the CLI). */
@@ -89,6 +99,9 @@ export function createAgentExecutorRegistry(
     model: options.codexModel ?? DEFAULT_CODEX_MODEL,
     reasoningEffort:
       options.codexReasoningEffort ?? DEFAULT_CODEX_REASONING_EFFORT,
+    stallTimeoutMs:
+      options.codexStallTimeoutMs ??
+      DEFAULT_CODEX_STALL_TIMEOUT_MINUTES * 60_000,
   });
   const appServerClient: CodexAppServerClient | undefined =
     options.sessionBackend === undefined &&

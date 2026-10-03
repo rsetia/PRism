@@ -113,6 +113,9 @@ and largest waits; `inspect --json` exposes the same timing data for tools.
 Codex-backed nodes default to `gpt-5.6-terra` with `medium` reasoning. Both
 `run` and `resume` accept `--codex-model <id>` and
 `--codex-reasoning-effort <level>` overrides.
+A Codex session that produces no output or phase change for 30 minutes is
+terminated as stalled and handled like any transient infrastructure failure;
+`--codex-stall-timeout-minutes <n>` changes the limit (0 disables).
 
 Prism executors run real commands (`codex`, `gh`, `bd`, your validation
 commands) with no sandbox — see

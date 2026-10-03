@@ -58,6 +58,7 @@ import {
   createPollSources,
   DEFAULT_CODEX_MODEL,
   DEFAULT_CODEX_REASONING_EFFORT,
+  DEFAULT_CODEX_STALL_TIMEOUT_MINUTES,
 } from "./agent-executors.js";
 import {
   generateBeadsDag,
@@ -131,13 +132,15 @@ Commands:
              [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
              [--codex-reasoning-effort <level>] [--codex-backend exec|app-server]
              [--greptile-app-slug <slug>] [--max-transient-retries <n>]
+             [--codex-stall-timeout-minutes <n>]
                                       Execute the graph (transient infrastructure
-                                      failures, e.g. git lock races, are retried
-                                      in-run; --max-transient-retries 0 disables)
+                                      failures, e.g. git lock races or stalled
+                                      Codex sessions, are retried in-run;
+                                      --max-transient-retries 0 disables)
   poll <config> [--json] [--store <db>] [--run-id <id>] [--repo <path>]
               [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
               [--codex-reasoning-effort <level>] [--codex-backend exec|app-server]
-              [--max-transient-retries <n>]
+              [--max-transient-retries <n>] [--codex-stall-timeout-minutes <n>]
                                       Watch a source (Linear) and implement every
                                       newly matching item; restarting resumes the
                                       same poll run (default id poll-<name>)
@@ -156,7 +159,7 @@ Commands:
   resume <run-id> [--store <db>] [--json] [--repo <path>]
          [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
          [--codex-reasoning-effort <level>] [--codex-backend exec|app-server]
-         [--max-transient-retries <n>]
+         [--max-transient-retries <n>] [--codex-stall-timeout-minutes <n>]
                                       Continue an interrupted run to completion
                                       (a finished run is reopened to re-run
                                       transient_infra failures, e.g. git lock
@@ -190,7 +193,8 @@ Defaults:
   Maximum concurrency                   ${String(DEFAULT_MAX_CONCURRENCY)}
   Codex model                           ${DEFAULT_CODEX_MODEL}
   Codex reasoning effort                ${DEFAULT_CODEX_REASONING_EFFORT}
-  Codex backend                         exec`;
+  Codex backend                         exec
+  Codex stall timeout                   ${String(DEFAULT_CODEX_STALL_TIMEOUT_MINUTES)} minutes without output (0 disables)`;
 
 interface ValidateInvocation {
   readonly command: "validate";
@@ -343,6 +347,8 @@ interface AgentInvocationOptions {
   readonly worktreeDir: string | undefined;
   /** Automatic in-run retries of transient_infra failures; 0 disables. */
   readonly maxTransientRetries: number;
+  /** Minutes a Codex session may go without output; 0 disables. */
+  readonly codexStallTimeoutMinutes: number;
 }
 
 interface ParsedFlags {
@@ -360,6 +366,7 @@ interface ParsedFlags {
   readonly worktreeDir: string | undefined;
   readonly greptileAppSlug: string | undefined;
   readonly maxTransientRetries: string | undefined;
+  readonly codexStallTimeoutMinutes: string | undefined;
   readonly timeout: string | undefined;
   readonly refresh: boolean;
   readonly specFile: string | undefined;
@@ -382,6 +389,7 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
   let worktreeDir: string | undefined;
   let greptileAppSlug: string | undefined;
   let maxTransientRetries: string | undefined;
+  let codexStallTimeoutMinutes: string | undefined;
   let timeout: string | undefined;
   let refresh = false;
   let specFile: string | undefined;
@@ -408,6 +416,7 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
       arg === "--worktree-dir" ||
       arg === "--greptile-app-slug" ||
       arg === "--max-transient-retries" ||
+      arg === "--codex-stall-timeout-minutes" ||
       arg === "--timeout" ||
       arg === "--spec-file" ||
       arg === "--beads-repo"
@@ -448,6 +457,9 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
       } else if (arg === "--max-transient-retries") {
         if (maxTransientRetries !== undefined) return undefined;
         maxTransientRetries = value;
+      } else if (arg === "--codex-stall-timeout-minutes") {
+        if (codexStallTimeoutMinutes !== undefined) return undefined;
+        codexStallTimeoutMinutes = value;
       } else if (arg === "--timeout") {
         if (timeout !== undefined) return undefined;
         timeout = value;
@@ -485,6 +497,7 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
     worktreeDir,
     greptileAppSlug,
     maxTransientRetries,
+    codexStallTimeoutMinutes,
     timeout,
     refresh,
     specFile,
@@ -732,6 +745,7 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
 function noAgentFlags(flags: ParsedFlags): boolean {
   return (
     flags.maxTransientRetries === undefined &&
+    flags.codexStallTimeoutMinutes === undefined &&
     flags.repo === undefined &&
     flags.maxConcurrency === undefined &&
     flags.codexCommand === undefined &&
@@ -746,6 +760,7 @@ function noAgentFlags(flags: ParsedFlags): boolean {
 function noWorkerFlags(flags: ParsedFlags): boolean {
   return (
     flags.maxTransientRetries === undefined &&
+    flags.codexStallTimeoutMinutes === undefined &&
     flags.maxConcurrency === undefined &&
     flags.codexCommand === undefined &&
     flags.codexModel === undefined &&
@@ -777,8 +792,19 @@ function parseAgentOptions(
   if (!Number.isSafeInteger(maxTransientRetries) || maxTransientRetries < 0) {
     return undefined;
   }
+  const codexStallTimeoutMinutes =
+    flags.codexStallTimeoutMinutes === undefined
+      ? DEFAULT_CODEX_STALL_TIMEOUT_MINUTES
+      : Number(flags.codexStallTimeoutMinutes);
+  if (
+    !Number.isSafeInteger(codexStallTimeoutMinutes) ||
+    codexStallTimeoutMinutes < 0
+  ) {
+    return undefined;
+  }
   return {
     maxTransientRetries,
+    codexStallTimeoutMinutes,
     repo: flags.repo,
     maxConcurrency,
     codexCommand: flags.codexCommand,
@@ -1309,6 +1335,7 @@ async function runGraph(
             codexReasoningEffort: invocation.agent.codexReasoningEffort,
           }),
       codexBackend: invocation.agent.codexBackend,
+      codexStallTimeoutMs: invocation.agent.codexStallTimeoutMinutes * 60_000,
     });
     const engine = createEngine({
       store,
@@ -1785,6 +1812,7 @@ async function resumeCommand(
             codexReasoningEffort: invocation.agent.codexReasoningEffort,
           }),
       codexBackend: invocation.agent.codexBackend,
+      codexStallTimeoutMs: invocation.agent.codexStallTimeoutMinutes * 60_000,
     });
     const engine = createEngine({
       store,
@@ -1826,6 +1854,7 @@ function agentRegistryFor(
       ? {}
       : { codexReasoningEffort: agent.codexReasoningEffort }),
     codexBackend: agent.codexBackend,
+    codexStallTimeoutMs: agent.codexStallTimeoutMinutes * 60_000,
     ...(pollLog === undefined ? {} : { pollLog }),
   });
 }

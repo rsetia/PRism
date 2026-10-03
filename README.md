@@ -61,6 +61,9 @@ prism run <graph-file>
 Codex-backed nodes use `gpt-5.6-terra` with `medium` reasoning by default.
 Override either setting for a run or resume with `--codex-model <id>` and
 `--codex-reasoning-effort <level>`.
+A session that goes 30 minutes without output or a phase change is terminated
+as stalled and retried or continued from its pull request;
+`--codex-stall-timeout-minutes <n>` changes the limit (0 disables).
 
 If both production and staging Greptile apps review the same pull requests,
 select the production GitHub App for the whole run:
