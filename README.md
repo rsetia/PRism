@@ -163,6 +163,7 @@ $PRISM_HOME/
 prism skills list
 prism status
 prism inspect <run-id>
+prism stats [<run-id>...] [--all]
 prism resume <run-id>
 prism abort <run-id>
 prism rerun-node <run-id> <node-id>
@@ -182,6 +183,28 @@ reopened for `prism resume`.
 weighted DAG critical path, resource contention, and the largest waiting
 categories. Add `--json`
 for the versioned machine-readable timing summary.
+
+`prism stats` answers what made a run take as long as it did. It walks the
+realized critical path back from the last node to succeed (always taking the
+dependency that finished last) and splits that path's time by phase, then
+lists every phase's interval count, median, p90, and total; review rounds
+per node (entries into `review_wait`); idle stretches when no worker was
+running, with the event that ended each one (usually an operator reset); and
+failed/reset/blocked counts and direct versus agent merges. With no run id
+it reports the latest run; `--all` reports every run oldest first, followed
+by totals across them, which is the before/after view for a change to the
+orchestrator. Time is measured up to a run's last event, so a live run's
+current wait is not yet counted, and only silences between events count as
+idle. "Outside them" on the critical-path line is wall time the path's
+phases do not cover: operator waits on a finished run, and on a failed or
+unfinished run also any work after its last success. A node's phases are
+summed across all its attempts, so a node that was reset and re-run counts
+its discarded attempts on the path. A node interrupted by a killed
+orchestrator still counts as running until the log mentions it again, so the
+wait before a `prism resume` shows up there rather than as idle. Events recorded before timestamps existed
+are skipped. The
+same numbers are available from `readRunStats` and `computeRunStats` in the
+SDK, and as JSON with `--json`.
 
 ## Trust
 

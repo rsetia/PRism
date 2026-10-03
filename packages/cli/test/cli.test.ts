@@ -1365,6 +1365,53 @@ describe("prism CLI: persisted runs", () => {
     expect(status.stderr).toContain("PRISM_HOME is not set");
   });
 
+  test("stats reports where the latest run's time went", async () => {
+    const store = db();
+    await cli("run", fixture("valid.json"), "--store", store, "--run-id", "t1");
+    const stats = await cli("stats", "--store", store);
+    expect(stats.code).toBe(0);
+    expect(stats.stdout).toMatch(/^t1 \(finished\)$/mu);
+    expect(stats.stdout).toContain("critical path: 2 node(s), 0 implement");
+    expect(stats.stdout).toContain(
+      "phases (intervals · median · p90 · total):",
+    );
+    expect(stats.stdout).toContain("review rounds: none");
+    expect(stats.stdout).toContain("idle (no worker running):");
+    expect(stats.stdout).toContain("events: 0 failed");
+  });
+
+  test("stats --all --json covers every run, oldest first", async () => {
+    const store = db();
+    await cli("run", fixture("valid.json"), "--store", store, "--run-id", "t2");
+    await cli("run", fixture("valid.json"), "--store", store, "--run-id", "t3");
+    const stats = await cli("stats", "--all", "--store", store, "--json");
+    expect(stats.code).toBe(0);
+    const parsed = JSON.parse(stats.stdout) as {
+      version: number;
+      runs: { runId: string; stats: { criticalPath: { nodeIds: string[] } } }[];
+    };
+    expect(parsed.version).toBe(1);
+    expect(parsed.runs.map((run) => run.runId)).toEqual(["t2", "t3"]);
+    expect(parsed.runs[0]?.stats.criticalPath.nodeIds).toEqual([
+      "first",
+      "second",
+    ]);
+
+    const text = await cli("stats", "t2", "t3", "t2", "--store", store);
+    // A repeated id is reported once.
+    expect(text.stdout).toMatch(/^all runs \(2 timed of 2\)$/mu);
+  });
+
+  test("stats rejects an unknown run and --all with run ids", async () => {
+    const store = db();
+    await cli("run", fixture("valid.json"), "--store", store, "--run-id", "t4");
+    const unknown = await cli("stats", "ghost", "--store", store);
+    expect(unknown.code).toBe(2);
+    expect(unknown.stderr).toContain('unknown run: "ghost"');
+    expect((await cli("stats", "--all", "t4", "--store", store)).code).toBe(2);
+    expect((await cli("stats", "--store", "--all")).code).toBe(2);
+  });
+
   test("watch emits a finished JSON snapshot and exits successfully", async () => {
     const store = db();
     await cli(
