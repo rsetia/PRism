@@ -120,8 +120,8 @@ terminated as stalled and handled like any transient infrastructure failure;
 While `run`, `resume`, or `poll` drives a run, Prism notifies you (desktop
 notification on macOS or Linux, plus the terminal bell) when a node fails
 after its retries or stops on a blocker that needs your input, and when a run
-finishes after more than a minute in this process. On other platforms only the bell rings. `--no-notify` or `PRISM_NOTIFY=0`
-turns this off.
+finishes after more than a minute in this process. On other platforms only the
+bell rings. `--no-notify` or `PRISM_NOTIFY=0` turns this off.
 
 Prism executors run real commands (`codex`, `gh`, `bd`, your validation
 commands) with no sandbox — see

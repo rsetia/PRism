@@ -1385,6 +1385,8 @@ async function runGraph(
       outcome = await handle.result;
       await alerts?.finish(outcome);
     } catch (error: unknown) {
+      // A rejected run is an error the operator sees directly; pending
+      // notifications are not worth delaying the error for.
       alerts?.stop();
       if (isDuplicateRunError(error)) {
         io.stderr(`cannot start run "${handle.id}": run already exists`);

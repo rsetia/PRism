@@ -11,8 +11,9 @@ import {
  * sat idle for 2-10 hours before anyone noticed. The process driving the
  * run tells the operator the moment their attention is needed.
  *
- * Delivery is best effort. A notifier that throws, hangs, or is missing
- * never affects the run.
+ * Delivery is best effort. A notifier that throws or is missing never
+ * affects the run; the desktop notifier also bounds each command at 10s.
+ * An injected notifier must settle, since finish() awaits it.
  */
 
 export interface OperatorNotification {
