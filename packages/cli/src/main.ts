@@ -4,6 +4,7 @@
  * that reaches here is by definition an unexpected internal error.
  */
 import { EXIT_INTERNAL, runCli } from "./cli.js";
+import { startKeepAwake } from "./keep-awake.js";
 import { createDesktopNotifier, notificationsDisabledByEnv } from "./notify.js";
 
 const io = {
@@ -26,7 +27,9 @@ const io = {
 };
 
 try {
-  process.exitCode = await runCli(process.argv.slice(2), io);
+  process.exitCode = await runCli(process.argv.slice(2), io, {
+    keepAwake: () => startKeepAwake({ onUnavailable: io.stderr }),
+  });
 } catch (error) {
   io.stderr(`unexpected internal error: ${String(error)}`);
   process.exitCode = EXIT_INTERNAL;

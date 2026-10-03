@@ -64,6 +64,8 @@ Override either setting for a run or resume with `--codex-model <id>` and
 A session that goes 30 minutes without output or a phase change is terminated
 as stalled and retried or continued from its pull request;
 `--codex-stall-timeout-minutes <n>` changes the limit (0 disables).
+On macOS, `run`, `resume`, and `poll` keep the host awake while they execute;
+pass `--allow-sleep` to opt out. Worker log lines are timestamped.
 
 While `run`, `resume`, or `poll` drives a run, Prism notifies you (desktop
 notification on macOS or Linux, plus the terminal bell) when a node fails

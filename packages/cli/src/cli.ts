@@ -77,6 +77,7 @@ import {
   resolveSkillsInstallDir,
 } from "./skills.js";
 import type { SkillAgent, SkillScope } from "./skills.js";
+import type { KeepAwake } from "./keep-awake.js";
 import { renderWatchDashboard } from "./watch-renderer.js";
 import {
   followOperatorAlerts,
@@ -95,6 +96,24 @@ export interface CliIo {
   readonly color?: boolean;
   /** Operator notifications for run/resume/poll; absent sends none. */
   readonly notifier?: OperatorNotifier;
+}
+
+/** Process-level capabilities main.ts provides; tests leave them out. */
+export interface CliOptions {
+  /** Acquire a keep-awake assertion for a command that executes work. */
+  readonly keepAwake?: () => KeepAwake;
+}
+
+async function withKeepAwake(
+  acquire: (() => KeepAwake) | undefined,
+  run: () => Promise<number>,
+): Promise<number> {
+  const held = acquire?.();
+  try {
+    return await run();
+  } finally {
+    held?.release();
+  }
 }
 
 export const EXIT_SUCCESS = 0;
@@ -139,7 +158,7 @@ Commands:
              [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
              [--codex-reasoning-effort <level>] [--codex-backend exec|app-server]
              [--greptile-app-slug <slug>] [--max-transient-retries <n>]
-             [--codex-stall-timeout-minutes <n>] [--no-notify]
+             [--codex-stall-timeout-minutes <n>] [--allow-sleep] [--no-notify]
                                       Execute the graph (transient infrastructure
                                       failures, e.g. git lock races or stalled
                                       Codex sessions, are retried in-run;
@@ -148,7 +167,7 @@ Commands:
               [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
               [--codex-reasoning-effort <level>] [--codex-backend exec|app-server]
               [--max-transient-retries <n>] [--codex-stall-timeout-minutes <n>]
-              [--no-notify]
+              [--allow-sleep] [--no-notify]
                                       Watch a source (Linear) and implement every
                                       newly matching item; restarting resumes the
                                       same poll run (default id poll-<name>)
@@ -168,7 +187,7 @@ Commands:
          [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
          [--codex-reasoning-effort <level>] [--codex-backend exec|app-server]
          [--max-transient-retries <n>] [--codex-stall-timeout-minutes <n>]
-         [--no-notify]
+         [--allow-sleep] [--no-notify]
                                       Continue an interrupted run to completion
                                       (a finished run is reopened to re-run
                                       transient_infra failures, e.g. git lock
@@ -204,6 +223,7 @@ Defaults:
   Codex reasoning effort                ${DEFAULT_CODEX_REASONING_EFFORT}
   Codex backend                         exec
   Codex stall timeout                   ${String(DEFAULT_CODEX_STALL_TIMEOUT_MINUTES)} minutes without output (0 disables)
+  Host sleep during run/resume/poll     Prevented on macOS (--allow-sleep permits it)
   Operator notifications                Desktop notification and terminal bell when
                                         a node fails or needs input, and when a run
                                         over a minute finishes (--no-notify or
@@ -362,6 +382,8 @@ interface AgentInvocationOptions {
   readonly maxTransientRetries: number;
   /** Minutes a Codex session may go without output; 0 disables. */
   readonly codexStallTimeoutMinutes: number;
+  /** --allow-sleep: do not hold a keep-awake assertion while running. */
+  readonly allowSleep: boolean;
   /** Notify the operator when a node needs them (--no-notify disables). */
   readonly notify: boolean;
 }
@@ -384,6 +406,7 @@ interface ParsedFlags {
   readonly codexStallTimeoutMinutes: string | undefined;
   readonly timeout: string | undefined;
   readonly refresh: boolean;
+  readonly allowSleep: boolean;
   readonly noNotify: boolean;
   readonly specFile: string | undefined;
   readonly beadsRepo: string | undefined;
@@ -408,6 +431,7 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
   let codexStallTimeoutMinutes: string | undefined;
   let timeout: string | undefined;
   let refresh = false;
+  let allowSleep = false;
   let noNotify = false;
   let specFile: string | undefined;
   let beadsRepo: string | undefined;
@@ -420,6 +444,9 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
     } else if (arg === "--refresh") {
       if (refresh) return undefined;
       refresh = true;
+    } else if (arg === "--allow-sleep") {
+      if (allowSleep) return undefined;
+      allowSleep = true;
     } else if (arg === "--no-notify") {
       if (noNotify) return undefined;
       noNotify = true;
@@ -520,6 +547,7 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
     codexStallTimeoutMinutes,
     timeout,
     refresh,
+    allowSleep,
     noNotify,
     specFile,
     beadsRepo,
@@ -765,6 +793,7 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
 
 function noAgentFlags(flags: ParsedFlags): boolean {
   return (
+    !flags.allowSleep &&
     !flags.noNotify &&
     flags.maxTransientRetries === undefined &&
     flags.codexStallTimeoutMinutes === undefined &&
@@ -781,6 +810,7 @@ function noAgentFlags(flags: ParsedFlags): boolean {
 
 function noWorkerFlags(flags: ParsedFlags): boolean {
   return (
+    !flags.allowSleep &&
     !flags.noNotify &&
     flags.maxTransientRetries === undefined &&
     flags.codexStallTimeoutMinutes === undefined &&
@@ -828,6 +858,7 @@ function parseAgentOptions(
   return {
     maxTransientRetries,
     codexStallTimeoutMinutes,
+    allowSleep: flags.allowSleep,
     notify: !flags.noNotify,
     repo: flags.repo,
     maxConcurrency,
@@ -2781,12 +2812,16 @@ async function skillsCommand(
 export async function runCli(
   argv: readonly string[],
   io: CliIo,
+  options: CliOptions = {},
 ): Promise<number> {
   const invocation = parseInvocation(argv);
   if (invocation === undefined) {
     io.stderr(USAGE);
     return EXIT_USAGE;
   }
+  // Commands that execute work hold the host awake for their duration.
+  const awake = (run: () => Promise<number>, allowSleep: boolean) =>
+    withKeepAwake(allowSleep ? undefined : options.keepAwake, run);
 
   switch (invocation.command) {
     // Requested help is data, not a usage error: stdout, exit 0.
@@ -2872,7 +2907,10 @@ export async function runCli(
         }
         return EXIT_SUCCESS;
       }
-      return runGraph(graph, invocation, io);
+      return awake(
+        () => runGraph(graph, invocation, io),
+        invocation.agent.allowSleep,
+      );
     }
 
     case "inspect":
@@ -2891,10 +2929,16 @@ export async function runCli(
       return watchCommand(invocation, io);
 
     case "resume":
-      return resumeCommand(invocation, io);
+      return awake(
+        () => resumeCommand(invocation, io),
+        invocation.agent.allowSleep,
+      );
 
     case "poll":
-      return pollCommand(invocation, io);
+      return awake(
+        () => pollCommand(invocation, io),
+        invocation.agent.allowSleep,
+      );
 
     case "abort":
       return abortCommand(invocation, io);
