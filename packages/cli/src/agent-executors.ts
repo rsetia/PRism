@@ -23,6 +23,7 @@ import {
   type PollSource,
   type CodexAppServerClient,
   TRUSTED_LOCAL_AGENT_EXECUTION_POLICY,
+  withLineTimestamps,
 } from "@rsetia/prism/node";
 import { resolvePrismProjectPaths } from "./prism-home.js";
 
@@ -90,7 +91,11 @@ export function createAgentExecutorRegistry(
       projectPaths.logBaseDir ??
       join(tmpdir(), "prism-logs", projectPaths.projectSlug),
   );
-  const logBackend = createFileLogBackend({ baseDir: logBaseDir });
+  // Timestamped lines let a long gap in a worker log be read as silence or
+  // as a sleeping host, instead of guessing.
+  const logBackend = withLineTimestamps(
+    createFileLogBackend({ baseDir: logBaseDir }),
+  );
   const codexEngine = createCodexEngine({
     executionPolicy: TRUSTED_LOCAL_AGENT_EXECUTION_POLICY,
     ...(options.codexCommand === undefined

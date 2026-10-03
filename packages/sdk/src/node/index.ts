@@ -83,6 +83,8 @@ export type {
 } from "../runtime/ports.js";
 export type { FileLogBackendOptions } from "./log-backend.js";
 export { createFileLogBackend } from "./log-backend.js";
+export type { LineTimestampOptions } from "./log-timestamps.js";
+export { createLineStamper, withLineTimestamps } from "./log-timestamps.js";
 export type {
   CodexEngine,
   CodexEngineOptions,

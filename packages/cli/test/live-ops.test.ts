@@ -65,7 +65,12 @@ async function cli(
       {
         timeout: 20_000,
         ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
-        env: { ...process.env, PRISM_HOME: prismHome, ...options.env },
+        env: {
+          ...process.env,
+          PRISM_HOME: prismHome,
+          PRISM_NOTIFY: "0",
+          ...options.env,
+        },
       },
     );
     return { code: 0, stdout, stderr };
