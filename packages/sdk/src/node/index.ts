@@ -115,6 +115,7 @@ export type {
   FinalizePrConfig,
   ImplementConfig,
   MergeResolveConfig,
+  RefactorConfig,
   ReviewConfig,
   WorkItem,
 } from "./codex-contracts.js";
@@ -122,10 +123,12 @@ export {
   buildFinalizePrContract,
   buildImplementContract,
   buildMergeResolveContract,
+  buildRefactorContract,
   codexContractForSpec,
   parseFinalizePrConfig,
   parseImplementConfig,
   parseMergeResolveConfig,
+  parseRefactorConfig,
 } from "./codex-contracts.js";
 export type {
   CommandResult,

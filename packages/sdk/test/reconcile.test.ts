@@ -677,6 +677,70 @@ describe("createGitHubReconciler for merge and finalize nodes", () => {
   });
 });
 
+describe("createGitHubReconciler for refactor nodes", () => {
+  const refactorSpec: WorkerSpec = {
+    runId: "run-1",
+    nodeId: "refactor-integration",
+    kind: "task",
+    executor: "refactor",
+    input: null,
+    config: {
+      targetBranch: "prism/integration",
+      baseBranch: "main",
+      branchName: "prism/integration-refactor",
+      review: { by: "none" },
+    },
+    attempt: 1,
+  };
+
+  test("starts fresh when no refactor branch was pushed", async () => {
+    const { outcome } = await reconcile(
+      [{ match: "ls-remote", result: { stdout: "" } }, prList([])],
+      refactorSpec,
+    );
+    expect(outcome.kind).toBe("fresh");
+  });
+
+  test("resumes the open refactor PR against the integration branch", async () => {
+    const { outcome } = await reconcile(
+      [
+        {
+          match: "ls-remote",
+          result: { stdout: "abc123\trefs/heads/prism/integration-refactor\n" },
+        },
+        prList([openPr]),
+        prView({
+          headRefOid: "abc123",
+          statusCheckRollup: [
+            { name: "verify", status: "IN_PROGRESS", conclusion: "" },
+          ],
+          reviews: [],
+          commits: [headCommit],
+          comments: [],
+        }),
+      ],
+      refactorSpec,
+    );
+    expect(outcome.kind).toBe("resume");
+    if (outcome.kind !== "resume") return;
+    expect(outcome.state.branch).toBe("prism/integration-refactor");
+    expect(outcome.state.targetBranch).toBe("prism/integration");
+  });
+
+  test("is satisfied once the refactor PR has merged", async () => {
+    const { outcome } = await reconcile(
+      [
+        lsRemoteHit,
+        prList([
+          { ...openPr, state: "MERGED", mergeCommit: { oid: "merge789" } },
+        ]),
+      ],
+      refactorSpec,
+    );
+    expect(outcome.kind).toBe("satisfied");
+  });
+});
+
 describe("sourceBranchFromInput", () => {
   test("reads proof-of-work, legacy metadata, and plain strings", () => {
     expect(

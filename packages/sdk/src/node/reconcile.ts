@@ -12,6 +12,7 @@ import {
   parseFinalizePrConfig,
   parseImplementConfig,
   parseMergeResolveConfig,
+  parseRefactorConfig,
   type ReviewConfig,
 } from "./codex-contracts.js";
 import type { WorkerSpec } from "./worker-protocol.js";
@@ -26,6 +27,8 @@ import type { WorkerSpec } from "./worker-protocol.js";
  *   reviewer verdict for that head.
  * - `merge_resolve`: whether the upstream pull request already merged.
  * - `finalize_pr`: the integration pull request and its review.
+ * - `refactor`: the cleanup pull request into the integration branch and
+ *   its review, like an implement node.
  *
  * The outcome is data. `satisfied` means the node's proof-of-work can be
  * reconstructed from the source system without spending an agent session.
@@ -143,6 +146,8 @@ export function createGitHubReconciler(
             return await reconcileMergeResolve(tools, input);
           case "finalize_pr":
             return await reconcileFinalizePr(tools, input);
+          case "refactor":
+            return await reconcileRefactor(tools, input);
           default:
             return fresh([
               `no reconciliation procedure for executor "${input.spec.executor}"`,
@@ -222,6 +227,19 @@ async function reconcileFinalizePr(
   const config = parseFinalizePrConfig(input.spec.config ?? undefined);
   return reconcileReviewedBranch(tools, input, {
     branch: config.sourceBranch,
+    targetBranch: config.targetBranch,
+    review: config.review,
+    requireGreenChecks: config.review.requireGreenChecks ?? true,
+  });
+}
+
+async function reconcileRefactor(
+  tools: Tools,
+  input: ReconcileInput,
+): Promise<ReconcileOutcome> {
+  const config = parseRefactorConfig(input.spec.config ?? undefined);
+  return reconcileReviewedBranch(tools, input, {
+    branch: config.branchName,
     targetBranch: config.targetBranch,
     review: config.review,
     requireGreenChecks: config.review.requireGreenChecks ?? true,

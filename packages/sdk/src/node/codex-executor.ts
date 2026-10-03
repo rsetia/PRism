@@ -27,6 +27,7 @@ import {
   parseFinalizePrConfig,
   parseImplementConfig,
   parseMergeResolveConfig,
+  parseRefactorConfig,
 } from "./codex-contracts.js";
 import type { WorkerResult } from "./worker-protocol.js";
 import type { NodePhase } from "../runtime/events.js";
@@ -42,6 +43,9 @@ import {
   type ReconciledState,
 } from "./reconcile.js";
 import { isDirectlyMergeable, type DirectMerger } from "./direct-merge.js";
+
+type CodexExecutorName =
+  "implement" | "merge_resolve" | "finalize_pr" | "refactor";
 
 /**
  * How a worker-declared failure is adjudicated against external state.
@@ -71,7 +75,7 @@ export interface FailureAdjudicationOptions {
  */
 
 export interface CodexExecutorOptions {
-  /** Registry name — "implement" or "merge_resolve". */
+  /** Registry name — "implement", "merge_resolve", "finalize_pr", or "refactor". */
   readonly name: string;
   /** The codex engine (real via createCodexEngine, or a test fake). */
   readonly engine?: CodexEngine;
@@ -660,7 +664,7 @@ function abortError(): Error {
 }
 
 function targetBranchFor(
-  name: "implement" | "merge_resolve" | "finalize_pr",
+  name: CodexExecutorName,
   config: JsonValue | null,
 ): string {
   switch (name) {
@@ -670,11 +674,13 @@ function targetBranchFor(
       return parseMergeResolveConfig(config ?? undefined).targetBranch;
     case "finalize_pr":
       return parseFinalizePrConfig(config ?? undefined).targetBranch;
+    case "refactor":
+      return parseRefactorConfig(config ?? undefined).targetBranch;
   }
 }
 
 function iterationBudget(
-  name: "implement" | "merge_resolve" | "finalize_pr",
+  name: CodexExecutorName,
   config: JsonValue | null,
 ): number {
   switch (name) {
@@ -682,6 +688,8 @@ function iterationBudget(
       return parseImplementConfig(config ?? undefined).maxIterations ?? 8;
     case "finalize_pr":
       return parseFinalizePrConfig(config ?? undefined).maxIterations ?? 8;
+    case "refactor":
+      return parseRefactorConfig(config ?? undefined).maxIterations ?? 3;
     case "merge_resolve":
       return 0;
   }
@@ -745,10 +753,11 @@ function describeReconciliation(outcome: ReconcileOutcome): string {
 }
 
 function codexExecutionPhase(
-  name: "implement" | "merge_resolve" | "finalize_pr",
+  name: CodexExecutorName,
 ): "implementation" | "integration_update" | "finalization" {
   switch (name) {
     case "implement":
+    case "refactor":
       return "implementation";
     case "merge_resolve":
       return "integration_update";
@@ -757,22 +766,21 @@ function codexExecutionPhase(
   }
 }
 
-function validateExecutorName(
-  name: string,
-): asserts name is "implement" | "merge_resolve" | "finalize_pr" {
+function validateExecutorName(name: string): asserts name is CodexExecutorName {
   if (
     name !== "implement" &&
     name !== "merge_resolve" &&
-    name !== "finalize_pr"
+    name !== "finalize_pr" &&
+    name !== "refactor"
   ) {
     throw new Error(
-      `Codex executor name must be "implement", "merge_resolve", or "finalize_pr"; received ${JSON.stringify(name)}`,
+      `Codex executor name must be "implement", "merge_resolve", "finalize_pr", or "refactor"; received ${JSON.stringify(name)}`,
     );
   }
 }
 
 function validateCodexConfig(
-  name: "implement" | "merge_resolve" | "finalize_pr",
+  name: CodexExecutorName,
   config: JsonValue | undefined,
 ): void {
   switch (name) {
@@ -784,6 +792,9 @@ function validateCodexConfig(
       return;
     case "finalize_pr":
       parseFinalizePrConfig(config);
+      return;
+    case "refactor":
+      parseRefactorConfig(config);
       return;
   }
 }

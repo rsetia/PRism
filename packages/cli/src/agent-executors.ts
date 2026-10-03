@@ -134,7 +134,9 @@ export function createAgentExecutorRegistry(
   // state that already exists, so retries and resumes never redo landed work.
   const reconciler = createGitHubReconciler();
 
-  const codexExecutor = (name: "implement" | "merge_resolve" | "finalize_pr") =>
+  const codexExecutor = (
+    name: "implement" | "merge_resolve" | "finalize_pr" | "refactor",
+  ) =>
     createCodexExecutor({
       name,
       // Preflight policy validation must run for both execution transports.
@@ -167,6 +169,7 @@ export function createAgentExecutorRegistry(
     codexExecutor("implement"),
     codexExecutor("merge_resolve"),
     codexExecutor("finalize_pr"),
+    codexExecutor("refactor"),
     // Kept for hand-authored graphs that only need deterministic PR merging.
     createMergePrExecutor({ cwd: repoDir }),
     createBeadsUpdateExecutor({ cwd: repoDir }),

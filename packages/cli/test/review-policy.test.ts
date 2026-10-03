@@ -120,6 +120,27 @@ describe("applyGreptileAppSlug", () => {
     });
   });
 
+  test("applies the slug to a Greptile refactor node", () => {
+    const compiled = compileGraph({
+      version: 1,
+      nodes: {
+        "refactor-integration": {
+          executor: "refactor",
+          dependsOn: [],
+          config: {
+            targetBranch: "prism/integration",
+            baseBranch: "main",
+            branchName: "prism/integration-refactor",
+            review: { by: "greptile" },
+          },
+        },
+      },
+    });
+    if (!compiled.ok) throw new Error("test graph did not compile");
+    const applied = applyGreptileAppSlug(compiled.graph, "greptile-apps");
+    expect(applied.nodeIds).toEqual(["refactor-integration"]);
+  });
+
   test("rejects a graph without Greptile review nodes", () => {
     expect(() =>
       applyGreptileAppSlug(

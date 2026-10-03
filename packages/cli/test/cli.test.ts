@@ -491,9 +491,60 @@ if (command === "export") {
         minConfidenceScore: 3,
         triggerComment: "@greptile-dev review",
       });
+
+      const refactorOut = join(root, "graph-refactor.json");
+      const refactored = await cliWith(
+        { prismHome },
+        "beads-dag",
+        "--repo",
+        repo,
+        "--out",
+        refactorOut,
+        "--bd-bin",
+        bd,
+        "--validation-command",
+        "npm test",
+        "--target-branch",
+        "prism/integration",
+        "--final-pr-base",
+        "main",
+        "--refactor",
+        "--refactor-frozen",
+        "CoreCommand variants, including their reply channels",
+        "--refactor-max-changes",
+        "4",
+      );
+      expect(refactored.code, refactored.stderr).toBe(0);
+      const refactorGraph = JSON.parse(
+        readFileSync(refactorOut, "utf8"),
+      ) as typeof graph & {
+        nodes: Record<string, { dependsOn?: string[] }>;
+      };
+      expect(refactorGraph.nodes["refactor-integration"]).toMatchObject({
+        executor: "refactor",
+        config: {
+          baseBranch: "main",
+          branchName: "prism/integration-refactor",
+          frozen: ["CoreCommand variants, including their reply channels"],
+          maxChanges: 4,
+          validationCommands: ["npm test"],
+        },
+      });
+      expect(refactorGraph.nodes["finalize-integration-pr"]?.dependsOn).toEqual(
+        ["merge-refactor-integration"],
+      );
     } finally {
       rmSync(root, { recursive: true, force: true });
     }
+  });
+
+  test.each([
+    [["--refactor"]],
+    [["--final-pr-base", "main", "--refactor-max-changes", "3"]],
+    [["--final-pr-base", "main", "--refactor", "--refactor-max-changes", "0"]],
+  ])("beads-dag rejects inconsistent refactor flags %j", async (flags) => {
+    const result = await cli("beads-dag", "--out", "graph.json", ...flags);
+    expect(result.code).toBe(2);
   });
 
   test("beads-dag freezes --spec-file content into every context node", async () => {

@@ -90,9 +90,22 @@ gate inherits `--min-confidence-score` and `--review-trigger-comment` when its
 reviewer matches `--reviewer`; override the trigger with
 `--final-pr-review-trigger-comment`.
 
+Add `--refactor` to clean up the whole run before the final PR. A
+`refactor-integration` node proposes refactors over the
+`<final-pr-base>...<target-branch>` diff, applies only small
+behavior-preserving ones as separately validated commits (at most
+`--refactor-max-changes`, default 8), and opens a pull request into the
+integration branch under the same review gate as implement nodes. Larger
+refactors are reported as `unresolvedRisks` for follow-up work instead of
+being attempted. A `merge-refactor-integration` node then lands it, so the
+final PR includes the cleanup. Repeat `--refactor-frozen "<constraint>"` for
+interfaces the pass must not change; `--refactor-validation-command`
+overrides the implement validation commands. `--refactor` requires
+`--final-pr-base`.
+
 The same selector can be applied globally at execution time with
 `prism run <graph> --greptile-app-slug greptile-apps`. It covers every
-Greptile-gated node, including the final integration PR. Prism rejects the
+Greptile-gated node, including the refactor pass and the final integration PR. Prism rejects the
 flag when the graph has no Greptile review nodes or a node selects a
 different app. The effective graph is saved in the run store, so `resume`
 does not accept or need the flag. Without a selector, existing broad Greptile
