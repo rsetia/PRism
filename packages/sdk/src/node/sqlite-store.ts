@@ -8,6 +8,13 @@ import {
 } from "../internal/persistence.js";
 import type { PersistedRunEvent, RunEvent } from "../runtime/events.js";
 import type {
+  AdminRequest,
+  AdminRequestAction,
+  AdminRequestResolver,
+  AdminRequestStatus,
+  EnqueueAdminRequestInput,
+  ResolveAdminRequestInput,
+  ResolveAdminRequestResult,
   RunLease,
   RunLeaseStatus,
   RunStore,
@@ -15,7 +22,7 @@ import type {
   StoredRun,
 } from "../runtime/ports.js";
 import type { RunOutcome } from "../runtime/types.js";
-import type { GraphRevision } from "../runtime/graph-revision.js";
+import type { GraphRefresh, GraphRevision } from "../runtime/graph-revision.js";
 
 export interface SqliteStoreOptions {
   /**
@@ -88,6 +95,13 @@ function openDatabase(path: string): Database {
  *
  * Reopen: constructing a new store over an existing file must expose the
  * persisted runs and events unchanged — that is what makes resume work.
+ *
+ * Admin requests live in an additive `admin_requests` table created on the
+ * first admin-request WRITE, never on open, and without a schema-version
+ * bump: an older release ignores the table, so a rollback still opens the
+ * file, and read-only opens stay byte-identical. Its nullable `refresh_json`
+ * column (rerun-node --refresh) is likewise added on the first refresh
+ * write to a table created before it existed.
  */
 export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   const schemaVersion = 2;
@@ -267,6 +281,95 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
   const selectGraphRevisionCount = db.prepare(
     "SELECT COUNT(*) AS count FROM graph_revisions WHERE run_id = ?",
   );
+
+  let hasAdminTable = tableExists("admin_requests");
+
+  function tableExists(name: string): boolean {
+    return (
+      db
+        .prepare(
+          "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?",
+        )
+        .get(name) !== undefined
+    );
+  }
+
+  function ensureAdminTable(): void {
+    if (hasAdminTable) return;
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS admin_requests (
+        request_id TEXT PRIMARY KEY,
+        run_id TEXT NOT NULL,
+        action TEXT NOT NULL CHECK (action IN ('signal', 'rerun-node')),
+        node_id TEXT NOT NULL,
+        status TEXT NOT NULL
+          CHECK (status IN ('pending', 'applied', 'rejected', 'cancelled')),
+        created_at_ms INTEGER NOT NULL,
+        resolved_by TEXT
+          CHECK (resolved_by IS NULL OR resolved_by IN ('live', 'offline')),
+        resolved_at_ms INTEGER,
+        reset_node_ids_json TEXT,
+        message TEXT,
+        refresh_json TEXT,
+        FOREIGN KEY (run_id) REFERENCES runs(run_id) ON DELETE CASCADE
+      ) STRICT;
+      CREATE INDEX IF NOT EXISTS admin_requests_by_run_status
+        ON admin_requests (run_id, status);
+    `);
+    hasAdminTable = true;
+  }
+
+  /** Tables created before refresh support lack the column; add it once. */
+  function ensureRefreshColumn(): void {
+    const columns = db
+      .prepare("PRAGMA table_info(admin_requests)")
+      .all()
+      .map((row) => readString(row, "name"));
+    if (!columns.includes("refresh_json")) {
+      db.exec("ALTER TABLE admin_requests ADD COLUMN refresh_json TEXT");
+    }
+  }
+
+  function decodeAdminRequest(row: Record<string, unknown>): AdminRequest {
+    const resetJson = readNullableString(row, "reset_node_ids_json");
+    const resolvedBy = readNullableString(row, "resolved_by");
+    const resolvedAtMs = readNullableNumber(row, "resolved_at_ms");
+    const message = readNullableString(row, "message");
+    const refreshJson = Object.hasOwn(row, "refresh_json")
+      ? readNullableString(row, "refresh_json")
+      : undefined;
+    return Object.freeze({
+      requestId: readString(row, "request_id"),
+      runId: readString(row, "run_id"),
+      action: readString(row, "action") as AdminRequestAction,
+      nodeId: readString(row, "node_id"),
+      status: readString(row, "status") as AdminRequestStatus,
+      createdAtMs: readNumber(row, "created_at_ms"),
+      ...(resolvedBy === undefined
+        ? {}
+        : { resolvedBy: resolvedBy as AdminRequestResolver }),
+      ...(resolvedAtMs === undefined ? {} : { resolvedAtMs }),
+      ...(resetJson === undefined
+        ? {}
+        : {
+            resetNodeIds: Object.freeze(
+              JSON.parse(resetJson) as readonly string[],
+            ),
+          }),
+      ...(message === undefined ? {} : { message }),
+      ...(refreshJson === undefined
+        ? {}
+        : { refresh: JSON.parse(refreshJson) as GraphRefresh }),
+    });
+  }
+
+  function selectAdminRequest(requestId: string): AdminRequest | undefined {
+    if (!hasAdminTable) return undefined;
+    const row = db
+      .prepare("SELECT * FROM admin_requests WHERE request_id = ?")
+      .get(requestId);
+    return row === undefined ? undefined : decodeAdminRequest(row);
+  }
 
   function assertOpen(): void {
     if (closed) {
@@ -710,6 +813,221 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     });
   }
 
+  function enqueueAdminRequest(
+    input: EnqueueAdminRequestInput,
+  ): Promise<AdminRequest> {
+    return capture(() => {
+      assertOpen();
+      ensureSchemaCurrent();
+      if (selectRun.get(input.runId) === undefined) {
+        throw new Error(`unknown run: "${input.runId}"`);
+      }
+      ensureAdminTable();
+      if (selectAdminRequest(input.requestId) !== undefined) {
+        throw new Error(`admin request already exists: "${input.requestId}"`);
+      }
+      if (input.refresh === undefined) {
+        db.prepare(
+          "INSERT INTO admin_requests (request_id, run_id, action, node_id, status, created_at_ms) VALUES (?, ?, ?, ?, 'pending', ?)",
+        ).run(input.requestId, input.runId, input.action, input.nodeId, now());
+      } else {
+        ensureRefreshColumn();
+        db.prepare(
+          "INSERT INTO admin_requests (request_id, run_id, action, node_id, status, created_at_ms, refresh_json) VALUES (?, ?, ?, ?, 'pending', ?, ?)",
+        ).run(
+          input.requestId,
+          input.runId,
+          input.action,
+          input.nodeId,
+          now(),
+          JSON.stringify(input.refresh),
+        );
+      }
+      const created = selectAdminRequest(input.requestId);
+      if (created === undefined) {
+        throw new Error(
+          `admin request was not persisted: "${input.requestId}"`,
+        );
+      }
+      return created;
+    });
+  }
+
+  function getAdminRequest(
+    requestId: string,
+  ): Promise<AdminRequest | undefined> {
+    return capture(() => {
+      assertOpen();
+      if (!hasAdminTable) hasAdminTable = tableExists("admin_requests");
+      return selectAdminRequest(requestId);
+    });
+  }
+
+  function listPendingAdminRequests(
+    runId: string,
+  ): Promise<readonly AdminRequest[]> {
+    return capture(() => {
+      assertOpen();
+      // Another process (the CLI) may have created the table since open.
+      if (!hasAdminTable) hasAdminTable = tableExists("admin_requests");
+      if (!hasAdminTable) return Object.freeze([]);
+      return Object.freeze(
+        db
+          .prepare(
+            "SELECT * FROM admin_requests WHERE run_id = ? AND status = 'pending' ORDER BY rowid",
+          )
+          .all(runId)
+          .map((row) => decodeAdminRequest(row)),
+      );
+    });
+  }
+
+  function resolveAdminRequest(
+    input: ResolveAdminRequestInput,
+    lease: RunLease,
+  ): Promise<ResolveAdminRequestResult> {
+    return capture(() => {
+      assertOpen();
+      ensureSchemaCurrent();
+      if (!hasAdminTable) hasAdminTable = tableExists("admin_requests");
+      db.exec("BEGIN IMMEDIATE");
+      try {
+        const request = selectAdminRequest(input.requestId);
+        if (request === undefined) {
+          throw new Error(`unknown admin request: "${input.requestId}"`);
+        }
+        const run = selectRun.get(request.runId);
+        if (run === undefined) {
+          throw new Error(`unknown run: "${request.runId}"`);
+        }
+        assertCoordinatorLease(request.runId, lease);
+        if (request.status !== "pending") {
+          db.exec("COMMIT");
+          return { resolved: false, request, persisted: [] };
+        }
+        const events = input.events ?? [];
+        const finished = readNumber(run, "finished") === 1;
+        const refresh =
+          input.status === "applied" ? input.graphRevision : undefined;
+        let persisted: readonly PersistedRunEvent[] = [];
+        let persistedRevision: GraphRevision | undefined;
+        if ((events.length > 0 || refresh !== undefined) && finished) {
+          if (input.reopen !== true) {
+            throw new Error(`run is already finished: "${request.runId}"`);
+          }
+        }
+        if (refresh !== undefined) {
+          const current = Object.hasOwn(run, "graph_revision")
+            ? readNumber(run, "graph_revision")
+            : 0;
+          if (current !== refresh.expectedGraphRevision) {
+            throw new Error(
+              `graph revision conflict: expected ${String(refresh.expectedGraphRevision)}, actual ${String(current)}`,
+            );
+          }
+          if (
+            refresh.revision.decision.status !== "accepted" ||
+            refresh.revision.graph === undefined
+          ) {
+            throw new Error("refresh revision must be accepted with a graph");
+          }
+          if (finished) reopenRunStatement.run(request.runId);
+          const count = readNumber(
+            selectGraphRevisionCount.get(request.runId),
+            "count",
+          );
+          persistedRevision = Object.freeze({
+            ...refresh.revision,
+            sequence: count,
+            graphRevision: current + 1,
+            timestampMs: now(),
+            addedNodeIds: Object.freeze([...refresh.revision.addedNodeIds]),
+          });
+          insertGraphRevision.run(
+            request.runId,
+            count,
+            refresh.revision.proposal.id,
+            JSON.stringify(persistedRevision),
+          );
+          db.prepare(
+            "UPDATE runs SET graph_json = ?, graph_revision = ? WHERE run_id = ?",
+          ).run(
+            JSON.stringify(refresh.revision.graph),
+            current + 1,
+            request.runId,
+          );
+        }
+        if (events.length > 0) {
+          let sequence = readNumber(
+            selectNextSequence.get(request.runId),
+            "next_seq",
+          );
+          if (
+            input.expectedRevision === undefined ||
+            input.expectedRevision !== sequence
+          ) {
+            throw new Error(
+              `run revision conflict: expected ${String(input.expectedRevision)}, actual ${String(sequence)}`,
+            );
+          }
+          if (finished && refresh === undefined) {
+            reopenRunStatement.run(request.runId);
+          }
+          persisted = events.map((event) => {
+            const saved = snapshotRunEvent(event, sequence, now());
+            insertEvent.run(request.runId, sequence, JSON.stringify(saved));
+            sequence += 1;
+            return saved;
+          });
+        }
+        db.prepare(
+          "UPDATE admin_requests SET status = ?, resolved_by = ?, resolved_at_ms = ?, reset_node_ids_json = ?, message = ? WHERE request_id = ? AND status = 'pending'",
+        ).run(
+          input.status,
+          input.resolvedBy,
+          now(),
+          input.resetNodeIds === undefined
+            ? null
+            : JSON.stringify(input.resetNodeIds),
+          input.message ?? null,
+          input.requestId,
+        );
+        db.exec("COMMIT");
+        if (persisted.length > 0) wakeReaders(request.runId);
+        const resolved = selectAdminRequest(input.requestId);
+        if (resolved === undefined) {
+          throw new Error(`admin request vanished: "${input.requestId}"`);
+        }
+        return {
+          resolved: true,
+          request: resolved,
+          persisted,
+          ...(persistedRevision === undefined
+            ? {}
+            : { graphRevision: persistedRevision }),
+        };
+      } catch (error: unknown) {
+        if (db.isTransaction) db.exec("ROLLBACK");
+        throw error;
+      }
+    });
+  }
+
+  function cancelAdminRequest(
+    requestId: string,
+    message: string,
+  ): Promise<AdminRequest | undefined> {
+    return capture(() => {
+      assertOpen();
+      if (!hasAdminTable) hasAdminTable = tableExists("admin_requests");
+      if (!hasAdminTable) return undefined;
+      db.prepare(
+        "UPDATE admin_requests SET status = 'cancelled', resolved_at_ms = ?, message = ? WHERE request_id = ? AND status = 'pending'",
+      ).run(now(), message, requestId);
+      return selectAdminRequest(requestId);
+    });
+  }
+
   function close(): Promise<void> {
     return capture(() => {
       if (closed) {
@@ -738,6 +1056,11 @@ export function createSqliteStore(options: SqliteStoreOptions): RunStore {
     getRunLeases,
     appendGraphRevision,
     listGraphRevisions,
+    enqueueAdminRequest,
+    getAdminRequest,
+    listPendingAdminRequests,
+    resolveAdminRequest,
+    cancelAdminRequest,
     close,
   });
 }

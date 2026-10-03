@@ -155,8 +155,17 @@ prism inspect <run-id>
 prism resume <run-id>
 prism abort <run-id>
 prism rerun-node <run-id> <node-id>
+prism rerun-node <run-id> <node-id> --refresh [--spec-file <path>]
 prism --help
 ```
+
+`rerun-node --refresh` re-reads a failed node's Bead (and, with
+`--spec-file`, a new frozen spec) and records it in the same run as an
+audited graph revision before re-running the node, so a blocked worker can
+continue with corrected task text instead of a new run. Ids, dependencies,
+review and target settings never change, and nodes that succeeded or are
+running cannot be refreshed. Live runs apply it in place; finished runs are
+reopened for `prism resume`.
 
 `prism inspect` reports per-node phase durations, total elapsed time, the
 weighted DAG critical path, resource contention, and the largest waiting

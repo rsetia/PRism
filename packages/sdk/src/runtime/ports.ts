@@ -1,5 +1,5 @@
 import type { CompiledGraph, JsonValue, NodeKind } from "../graph/types.js";
-import type { GraphRevision } from "./graph-revision.js";
+import type { GraphRefresh, GraphRevision } from "./graph-revision.js";
 import type {
   GraphExpansionProposal,
   GraphProposalResult,
@@ -165,6 +165,91 @@ export interface RunLeaseStatus {
   readonly expiresAtMs: number;
 }
 
+/** An operator request to reset a node, queued for the run's coordinator. */
+export type AdminRequestAction = "signal" | "rerun-node";
+
+/**
+ * Lifecycle of an AdminRequest: `pending` until exactly one party resolves
+ * it — the live coordinator or an offline administrator (`applied` or
+ * `rejected`), or the requester withdrawing it (`cancelled`).
+ */
+export type AdminRequestStatus =
+  "pending" | "applied" | "rejected" | "cancelled";
+
+/** Who resolved an AdminRequest. */
+export type AdminRequestResolver = "live" | "offline";
+
+/**
+ * A durable operator request (plan §16, live signal / rerun-node). The CLI
+ * writes it without taking the coordinator lease; a live coordinator applies
+ * it under its own lease, or an administrator applies it offline when no
+ * coordinator holds the run.
+ */
+export interface AdminRequest {
+  readonly requestId: string;
+  readonly runId: string;
+  readonly action: AdminRequestAction;
+  readonly nodeId: string;
+  readonly status: AdminRequestStatus;
+  readonly createdAtMs: number;
+  /** Set once resolved. */
+  readonly resolvedBy?: AdminRequestResolver;
+  readonly resolvedAtMs?: number;
+  /** Nodes reset when applied (graph order); explanation when rejected. */
+  readonly resetNodeIds?: readonly string[];
+  readonly message?: string;
+  /**
+   * `rerun-node --refresh` / `signal --refresh`: replacement frozen configs
+   * applied as an audited graph revision together with the reset. A
+   * coordinator that cannot apply a refresh must reject the request rather
+   * than reset without it.
+   */
+  readonly refresh?: GraphRefresh;
+}
+
+export interface EnqueueAdminRequestInput {
+  readonly requestId: string;
+  readonly runId: string;
+  readonly action: AdminRequestAction;
+  readonly nodeId: string;
+  readonly refresh?: GraphRefresh;
+}
+
+/**
+ * Atomically resolve a pending AdminRequest under a coordinator lease.
+ * `applied` appends `events` (node_reset audit trail) in the same
+ * transaction, reopening a finished run first when `reopen` is true.
+ */
+export interface ResolveAdminRequestInput {
+  readonly requestId: string;
+  readonly status: "applied" | "rejected";
+  readonly resolvedBy: AdminRequestResolver;
+  readonly resetNodeIds?: readonly string[];
+  readonly message?: string;
+  readonly events?: readonly RunEvent[];
+  /** Required with events: the run's next event sequence. */
+  readonly expectedRevision?: number;
+  readonly reopen?: boolean;
+  /**
+   * An accepted refresh revision persisted in the same transaction, before
+   * `events`: the run's graph snapshot is replaced only if the run is still
+   * at `expectedGraphRevision`.
+   */
+  readonly graphRevision?: {
+    readonly revision: GraphRevision;
+    readonly expectedGraphRevision: number;
+  };
+}
+
+export interface ResolveAdminRequestResult {
+  /** False when the request was no longer pending; nothing was written. */
+  readonly resolved: boolean;
+  readonly request: AdminRequest;
+  readonly persisted: readonly PersistedRunEvent[];
+  /** The persisted refresh revision, when one was applied. */
+  readonly graphRevision?: GraphRevision;
+}
+
 /**
  * Persistence port. Contract (plan §4, decided):
  * - createRun rejects a duplicate runId.
@@ -185,6 +270,14 @@ export interface RunLeaseStatus {
  *   idempotent, and rejects an unknown run. It is administrative recovery
  *   (plan §16) — the caller is responsible for the run's consistency.
  * - listRuns returns every run's summary, most-recent-created first.
+ * - Admin requests (optional; all five methods together, or none):
+ *   enqueueAdminRequest inserts a `pending` request and rejects an unknown
+ *   run or a duplicate requestId — it needs no lease. resolveAdminRequest
+ *   is a lease-fenced compare-and-set from `pending`: it either resolves
+ *   the request and appends its events atomically, or reports resolved:
+ *   false and writes nothing. cancelAdminRequest is the requester's
+ *   unfenced compare-and-set from `pending` to `cancelled`.
+ *   listPendingAdminRequests returns a run's pending requests oldest first.
  * - close releases any underlying resource (a database handle). Optional:
  *   a purely in-memory store needs nothing to release. After close, the
  *   store must not be used again.
@@ -238,6 +331,17 @@ export interface RunStore {
   ): Promise<GraphRevision>;
   /** Durable audit trail, including rejected proposals, in decision order. */
   listGraphRevisions?(runId: string): Promise<readonly GraphRevision[]>;
+  enqueueAdminRequest?(input: EnqueueAdminRequestInput): Promise<AdminRequest>;
+  getAdminRequest?(requestId: string): Promise<AdminRequest | undefined>;
+  listPendingAdminRequests?(runId: string): Promise<readonly AdminRequest[]>;
+  resolveAdminRequest?(
+    input: ResolveAdminRequestInput,
+    lease: RunLease,
+  ): Promise<ResolveAdminRequestResult>;
+  cancelAdminRequest?(
+    requestId: string,
+    message: string,
+  ): Promise<AdminRequest | undefined>;
   close?(): Promise<void>;
 }
 

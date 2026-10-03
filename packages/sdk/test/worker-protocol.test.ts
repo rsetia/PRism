@@ -21,6 +21,20 @@ describe("parseWorkerResult", () => {
     ).toEqual({ status: "failed", error: "nope", failureClass: "timeout" });
   });
 
+  test("accepts needs_input for a worker stopping on a declared blocker", () => {
+    expect(
+      parseWorkerResult({
+        status: "failed",
+        error: "blocked: the frozen contract lacks an ingress",
+        failureClass: "needs_input",
+      }),
+    ).toEqual({
+      status: "failed",
+      error: "blocked: the frozen contract lacks an ingress",
+      failureClass: "needs_input",
+    });
+  });
+
   test("rejects an unknown status", () => {
     expect(() => parseWorkerResult({ status: "weird" })).toThrow();
   });

@@ -5,6 +5,10 @@ import {
 } from "../internal/persistence.js";
 import type { PersistedRunEvent, RunEvent } from "../runtime/events.js";
 import type {
+  AdminRequest,
+  EnqueueAdminRequestInput,
+  ResolveAdminRequestInput,
+  ResolveAdminRequestResult,
   RunLease,
   RunLeaseStatus,
   RunStore,
@@ -61,6 +65,7 @@ export interface MemoryStoreOptions {
 export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
   const runs = new Map<string, MemoryRun>();
   const leases = new Map<string, RunLease>();
+  const adminRequests = new Map<string, AdminRequest>();
   let nextFencingToken = 1;
   const now = options.now ?? Date.now;
 
@@ -445,6 +450,159 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     return Promise.resolve(Object.freeze([...run.graphRevisions]));
   }
 
+  function enqueueAdminRequest(
+    input: EnqueueAdminRequestInput,
+  ): Promise<AdminRequest> {
+    if (!runs.has(input.runId)) {
+      return Promise.reject(new Error(`unknown run: "${input.runId}"`));
+    }
+    if (adminRequests.has(input.requestId)) {
+      return Promise.reject(
+        new Error(`admin request already exists: "${input.requestId}"`),
+      );
+    }
+    const request: AdminRequest = Object.freeze({
+      requestId: input.requestId,
+      runId: input.runId,
+      action: input.action,
+      nodeId: input.nodeId,
+      status: "pending",
+      createdAtMs: now(),
+      ...(input.refresh === undefined ? {} : { refresh: input.refresh }),
+    });
+    adminRequests.set(input.requestId, request);
+    return Promise.resolve(request);
+  }
+
+  function getAdminRequest(
+    requestId: string,
+  ): Promise<AdminRequest | undefined> {
+    return Promise.resolve(adminRequests.get(requestId));
+  }
+
+  function listPendingAdminRequests(
+    runId: string,
+  ): Promise<readonly AdminRequest[]> {
+    return Promise.resolve(
+      Object.freeze(
+        [...adminRequests.values()].filter(
+          (request) => request.runId === runId && request.status === "pending",
+        ),
+      ),
+    );
+  }
+
+  function resolveAdminRequest(
+    input: ResolveAdminRequestInput,
+    lease: RunLease,
+  ): Promise<ResolveAdminRequestResult> {
+    try {
+      const request = adminRequests.get(input.requestId);
+      if (request === undefined) {
+        throw new Error(`unknown admin request: "${input.requestId}"`);
+      }
+      const run = runs.get(request.runId);
+      if (run === undefined) throw new Error(`unknown run: "${request.runId}"`);
+      assertCoordinatorLease(request.runId, lease);
+      if (request.status !== "pending") {
+        return Promise.resolve({ resolved: false, request, persisted: [] });
+      }
+      const events = input.events ?? [];
+      const refresh =
+        input.status === "applied" ? input.graphRevision : undefined;
+      if (events.length > 0 || refresh !== undefined) {
+        if (run.finished && input.reopen !== true) {
+          throw new Error(`run is already finished: "${request.runId}"`);
+        }
+      }
+      if (refresh !== undefined) {
+        if (refresh.expectedGraphRevision !== run.graphRevision) {
+          throw new Error(
+            `graph revision conflict: expected ${String(refresh.expectedGraphRevision)}, actual ${String(run.graphRevision)}`,
+          );
+        }
+        if (
+          refresh.revision.decision.status !== "accepted" ||
+          refresh.revision.graph === undefined
+        ) {
+          throw new Error("refresh revision must be accepted with a graph");
+        }
+      }
+      if (events.length > 0) {
+        const nextSequence = run.events.length;
+        if (
+          input.expectedRevision === undefined ||
+          input.expectedRevision !== nextSequence
+        ) {
+          throw new Error(
+            `run revision conflict: expected ${String(input.expectedRevision)}, actual ${String(nextSequence)}`,
+          );
+        }
+      }
+      const persisted = events.map((event, index) =>
+        snapshotRunEvent(event, run.events.length + index, now()),
+      );
+      if ((events.length > 0 || refresh !== undefined) && run.finished) {
+        run.finished = false;
+        run.outcome = undefined;
+      }
+      let persistedRevision: GraphRevision | undefined;
+      if (refresh !== undefined) {
+        persistedRevision = Object.freeze({
+          ...refresh.revision,
+          sequence: run.graphRevisions.length,
+          graphRevision: run.graphRevision + 1,
+          timestampMs: now(),
+          addedNodeIds: Object.freeze([...refresh.revision.addedNodeIds]),
+        });
+        run.graphRevisions.push(persistedRevision);
+        run.graph = refresh.revision.graph as CompiledGraph;
+        run.graphRevision += 1;
+      }
+      run.events.push(...persisted);
+      const resolved: AdminRequest = Object.freeze({
+        ...request,
+        status: input.status,
+        resolvedBy: input.resolvedBy,
+        resolvedAtMs: now(),
+        ...(input.resetNodeIds === undefined
+          ? {}
+          : { resetNodeIds: Object.freeze([...input.resetNodeIds]) }),
+        ...(input.message === undefined ? {} : { message: input.message }),
+      });
+      adminRequests.set(input.requestId, resolved);
+      if (persisted.length > 0) wakeReaders(run);
+      return Promise.resolve({
+        resolved: true,
+        request: resolved,
+        persisted: Object.freeze(persisted),
+        ...(persistedRevision === undefined
+          ? {}
+          : { graphRevision: persistedRevision }),
+      });
+    } catch (error: unknown) {
+      return Promise.reject(asError(error, "admin request resolution failed"));
+    }
+  }
+
+  function cancelAdminRequest(
+    requestId: string,
+    message: string,
+  ): Promise<AdminRequest | undefined> {
+    const request = adminRequests.get(requestId);
+    if (request === undefined || request.status !== "pending") {
+      return Promise.resolve(request);
+    }
+    const cancelled: AdminRequest = Object.freeze({
+      ...request,
+      status: "cancelled",
+      resolvedAtMs: now(),
+      message,
+    });
+    adminRequests.set(requestId, cancelled);
+    return Promise.resolve(cancelled);
+  }
+
   return Object.freeze({
     createRun,
     appendEvents,
@@ -460,5 +618,10 @@ export function createMemoryStore(options: MemoryStoreOptions = {}): RunStore {
     getRunLeases,
     appendGraphRevision,
     listGraphRevisions,
+    enqueueAdminRequest,
+    getAdminRequest,
+    listPendingAdminRequests,
+    resolveAdminRequest,
+    cancelAdminRequest,
   });
 }

@@ -108,7 +108,45 @@ describe("watch dashboard", () => {
 
     expect(output).toContain("FAILED");
     expect(output).toContain("Failures");
-    expect(output).toContain('implement: {"message":"validation failed"}');
+    expect(output).toContain("✕ implement: validation failed");
+    expect(output).toContain("→ inspect the logs: prism logs failed-run");
+  });
+
+  test("lists a needs-input blocker apart from failures, with PR and next action", () => {
+    const blocked: RunInspection = {
+      runId: "blocked-run",
+      finished: false,
+      nodes: [
+        { nodeId: "context", state: "succeeded", timing: null, evidence: null },
+        { nodeId: "implement", state: "failed", timing: null, evidence: null },
+        { nodeId: "review", state: "blocked", timing: null, evidence: null },
+      ],
+      failures: [
+        {
+          nodeId: "implement",
+          cause: {
+            code: "WORKER_FAILURE_ADJUDICATED",
+            error: "remains blocked: frozen contract lacks an ingress",
+            state: { pullRequest: { url: "https://example.test/pr/6" } },
+          },
+          failureClass: "semantic_failed",
+        },
+      ],
+      timing: null,
+    };
+    const output = renderWatchDashboard(graph(), blocked, {
+      color: false,
+      columns: 180,
+    });
+    expect(output).toContain("⏸ implement");
+    expect(output).not.toContain("✕ implement");
+    expect(output).toContain(
+      "Needs your input · ⏸ implement: remains blocked: frozen contract lacks an ingress · https://example.test/pr/6",
+    );
+    expect(output).toContain(
+      "→ resolve the blocker, then: prism rerun-node blocked-run implement",
+    );
+    expect(output).not.toContain("Failures ·");
   });
 
   test("collapses generated Beads plumbing into work-item dependency lanes", () => {
@@ -204,6 +242,41 @@ describe("watch dashboard", () => {
     expect(output).toContain("MERGE WAIT ← 1 MERGE");
     expect(output).not.toContain("BUILD WAIT ←");
     expect(output.split("\n").every((line) => line.length <= 100)).toBe(true);
+  });
+});
+
+describe("refresh revisions", () => {
+  test("watch says which node's work item was refreshed, and when", () => {
+    const output = renderWatchDashboard(
+      graph(),
+      {
+        ...inspection(),
+        graphRevisions: [
+          {
+            sequence: 0,
+            graphRevision: 1,
+            timestampMs: Date.UTC(2026, 9, 1, 8, 30),
+            proposal: {
+              id: "refresh:req",
+              proposer: "operator:rerun-node --refresh",
+              nodes: {},
+              refresh: {
+                targetNodeId: "implement",
+                configs: {},
+                source: { workItemId: "xondom-kko.9" },
+              },
+            },
+            decision: { status: "accepted", policy: "operator-refresh" },
+            addedNodeIds: [],
+            refreshedNodeIds: ["context", "implement"],
+          },
+        ],
+      },
+      { columns: 120, color: false },
+    );
+    expect(output).toContain(
+      "↻ refreshed work item for implement (xondom-kko.9) at 2026-10-01T08:30:00.000Z",
+    );
   });
 });
 

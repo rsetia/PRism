@@ -103,7 +103,9 @@ adapter.
 Commands: `skills` (install the planning skill); `validate`, `graph`,
 `beads-dag`, `run` (author and execute);
 `status`, `inspect`, `events`, `watch`, `logs` (observe); `resume`, `abort`,
-`signal`, `rerun-node` (recover). Graphs may be JSON or YAML.
+`signal`, `rerun-node` (recover; `--refresh` re-snapshots a Beads node's
+work item and optional `--spec-file` into the same run). Graphs may be JSON
+or YAML.
 `inspect` includes phase durations, elapsed time, resource-contention waits,
 the weighted critical path,
 and largest waits; `inspect --json` exposes the same timing data for tools.

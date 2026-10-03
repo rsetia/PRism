@@ -17,7 +17,11 @@ export type {
   ResourceDefinition,
 } from "./graph/types.js";
 export type { GraphCompileError, GraphParseError } from "./graph/errors.js";
-export { buildBeadsGraph, parseBeadsJsonl } from "./beads/generate.js";
+export {
+  buildBeadsGraph,
+  parseBeadsJsonl,
+  refreshBeadsNodeConfigs,
+} from "./beads/generate.js";
 export type {
   Bead,
   BeadsGraphOptions,
@@ -50,12 +54,18 @@ export type {
   RunOutcome,
 } from "./runtime/types.js";
 export {
+  applyJitter,
   computeBackoffMs,
   DEFAULT_FAILURE_CLASS,
+  isAdjudicated,
+  isFailureRetryable,
+  isResumableFailure,
   isRetryable,
   NO_RETRIES,
+  RESUMABLE_FAILURE_CLASSES,
   resolveFailureClass,
   RETRY_TRANSIENT,
+  transientInfraRetryPolicy,
 } from "./runtime/retry.js";
 export type { RetryPolicy } from "./runtime/retry.js";
 export { createManualClock, createSystemClock } from "./adapters/clock.js";
@@ -75,16 +85,35 @@ export type {
   SchedulerUtilization,
   WatchRunOptions,
 } from "./runtime/inspect.js";
-export { submitGraphProposal } from "./runtime/graph-revision.js";
+export {
+  buildRefreshRevision,
+  compileRefresh,
+  isRefreshRevision,
+  submitGraphProposal,
+} from "./runtime/graph-revision.js";
 export type {
   GraphExpansionProposal,
   GraphProposalDecision,
   GraphProposalPolicy,
   GraphProposalResult,
+  GraphRefresh,
   GraphRevision,
 } from "./runtime/graph-revision.js";
-export { abortRun, resetRun } from "./runtime/admin.js";
-export type { ResetRunOptions } from "./runtime/admin.js";
+export {
+  abortRun,
+  applyAdminRequestOffline,
+  LIVE_RESETTABLE_STATES,
+  planAdminReset,
+  planRefreshReset,
+  refreshRevisionFor,
+  resetRun,
+  resumableFailedNodes,
+} from "./runtime/admin.js";
+export type {
+  AdminResetPlan,
+  OfflineAdminResult,
+  ResetRunOptions,
+} from "./runtime/admin.js";
 export type {
   NodePhase,
   PersistedRunEvent,
@@ -95,6 +124,13 @@ export type {
 export { NODE_PHASES, WORKER_PHASES } from "./runtime/events.js";
 export type { UsagePriceMetadata } from "./runtime/usage.js";
 export type {
+  AdminRequest,
+  AdminRequestAction,
+  AdminRequestResolver,
+  AdminRequestStatus,
+  EnqueueAdminRequestInput,
+  ResolveAdminRequestInput,
+  ResolveAdminRequestResult,
   Clock,
   CreateRunInput,
   ArtifactLocator,
@@ -115,6 +151,17 @@ export type {
   RunLeaseStatus,
   StoredRun,
 } from "./runtime/ports.js";
+export {
+  classifyWorkerFailure,
+  describeFailure,
+  failureDisposition,
+  isDeclaredBlocker,
+} from "./runtime/disposition.js";
+export type {
+  DescribeFailureContext,
+  FailureDescription,
+  FailureDisposition,
+} from "./runtime/disposition.js";
 export { createEngine } from "./runtime/engine.js";
 export type {
   Engine,

@@ -167,7 +167,10 @@ Worker protocol:
 - On failure, write ${input.resultPath} as JSON:
   {"status":"failed","error":"<concise message>","failureClass":"<optional failure class>"}
 - Valid failure classes are transient_infra, timeout, validation_failed, semantic_failed,
-  merge_conflict, policy_denied, and manual_review_required.
+  merge_conflict, policy_denied, manual_review_required, and needs_input.
+- Use "needs_input" when you stop on a blocker only an operator can clear (a
+  decision, a clarification, or a change you are not permitted to make, such
+  as a frozen contract). Put the blocker in one line at the start of "error".
 - Write the complete result file before finishing. Do not use stdout as the result channel.
 `;
 }
