@@ -28,6 +28,7 @@ export type {
   BeadsReviewConfig,
   BeadsSpecDocument,
   FinalPullRequestOptions,
+  RefactorPassOptions,
   ReviewGate,
 } from "./beads/generate.js";
 export {

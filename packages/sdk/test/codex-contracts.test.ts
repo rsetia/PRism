@@ -3,10 +3,12 @@ import {
   buildFinalizePrContract,
   buildImplementContract,
   buildMergeResolveContract,
+  buildRefactorContract,
   codexContractForSpec,
   parseFinalizePrConfig,
   parseImplementConfig,
   parseMergeResolveConfig,
+  parseRefactorConfig,
 } from "../src/node/index.js";
 import type { ImplementConfig, WorkerSpec } from "../src/node/index.js";
 import type { JsonValue } from "../src/index.js";
@@ -378,6 +380,90 @@ describe("finalize_pr contract", () => {
   });
 });
 
+describe("refactor contract", () => {
+  const refactorConfig = (
+    overrides: Record<string, JsonValue> = {},
+  ): JsonValue => ({
+    targetBranch: "prism/integration",
+    baseBranch: "main",
+    branchName: "prism/integration-refactor",
+    review: { by: "greptile", minConfidenceScore: 4 },
+    ...overrides,
+  });
+
+  test("parses a refactor pass configuration", () => {
+    const parsed = parseRefactorConfig(
+      refactorConfig({
+        maxChanges: 5,
+        frozen: ["CoreCommand variants"],
+        maxIterations: 2,
+        validationCommands: ["cargo test"],
+      }),
+    );
+    expect(parsed).toMatchObject({
+      targetBranch: "prism/integration",
+      baseBranch: "main",
+      branchName: "prism/integration-refactor",
+      review: { by: "greptile", minConfidenceScore: 4 },
+      maxChanges: 5,
+      frozen: ["CoreCommand variants"],
+      maxIterations: 2,
+      validationCommands: ["cargo test"],
+    });
+    expect(Object.isFrozen(parsed)).toBe(true);
+  });
+
+  test.each([
+    [{ baseBranch: "prism/integration" }, "baseBranch must differ"],
+    [{ branchName: "main" }, "branchName must differ"],
+    [{ branchName: "prism/integration" }, "branchName must differ"],
+    [{ maxChanges: 0 }, "maxChanges"],
+    [{ frozen: [""] }, "frozen[0]"],
+    [{ review: { by: "nobody" } }, "review.by"],
+  ] as const)("rejects %j", (overrides, message) => {
+    expect(() =>
+      parseRefactorConfig(
+        refactorConfig(overrides as Record<string, JsonValue>),
+      ),
+    ).toThrow(message);
+  });
+
+  test("proposes before editing, reviews the PR, and never merges it", () => {
+    const contract = buildRefactorContract(
+      parseRefactorConfig(
+        refactorConfig({
+          maxChanges: 5,
+          frozen: ["CoreCommand variants"],
+          validationCommands: ["cargo test"],
+        }),
+      ),
+    );
+    const text = contract.instructions;
+    expect(text).toContain('"origin/main...origin/prism/integration"');
+    expect(text.indexOf("Propose, without editing")).toBeLessThan(
+      text.indexOf("Apply, one candidate per commit"),
+    );
+    expect(text).toContain("keep at most 5");
+    expect(text).toContain("  - CoreCommand variants");
+    expect(text).toContain('"cargo test"');
+    expect(text).toContain("@greptile review");
+    expect(text).toContain("at least 4/5");
+    expect(text).toContain("Never merge or close the pull request");
+    expect(text).toContain("large refactor:");
+    expect(contract.extraRules).toContain(
+      "Never merge the refactor pull request; success means reviewed and ready for the merge node.",
+    );
+  });
+
+  test("merge_resolve treats an empty upstream refactor as nothing to merge", () => {
+    const contract = buildMergeResolveContract({
+      targetBranch: "prism/integration",
+      sourceBranchFrom: "refactor-integration",
+    });
+    expect(contract.instructions).toContain("there is nothing to merge");
+  });
+});
+
 describe("codexContractForSpec", () => {
   test("dispatches implement specs to the implement contract", () => {
     const contract = codexContractForSpec(spec());
@@ -410,6 +496,21 @@ describe("codexContractForSpec", () => {
       }),
     );
     expect(contract.instructions).toContain("without merging it");
+  });
+
+  test("dispatches refactor specs", () => {
+    const contract = codexContractForSpec(
+      spec({
+        executor: "refactor",
+        config: {
+          targetBranch: "prism/integration",
+          baseBranch: "main",
+          branchName: "prism/integration-refactor",
+          review: { by: "none" },
+        },
+      }),
+    );
+    expect(contract.instructions).toContain("behavior-preserving refactor");
   });
 
   test("rejects a non-codex executor", () => {

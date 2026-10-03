@@ -333,10 +333,25 @@ required fixes back to the integration branch, and leaves the ready PR open
 for human merge. Use the reviewer selected in section 5 and repeat
 `--final-pr-validation-command` for every broad check chosen in section 6.
 
+Add `--refactor` when the DAG has several Beads that touch shared modules.
+Per-bead review sees one diff at a time, so duplication and layering problems
+that only exist across Beads land unchallenged. `--refactor` inserts a
+`refactor-integration` node after the last merge: it proposes cleanups over
+the whole `<base-branch>...<target-branch>` diff, applies only small
+behavior-preserving ones (one validated commit each, at most
+`--refactor-max-changes`, default 8), opens a PR into the integration branch
+under the implementation reviewer, and reports larger refactors as unresolved
+risks for follow-up Beads. A `merge-refactor-integration` node lands it before
+the final PR. Repeat `--refactor-frozen "<constraint>"` for every contract
+section 3 froze, so the pass never proposes changing it. It reuses the
+implementation `--validation-command`s unless
+`--refactor-validation-command` is given. `--refactor` requires
+`--final-pr-base`.
+
 Pass `--greptile-app-slug <slug>` here when section 5 selected a particular
 Greptile GitHub App. As an execution-time alternative, `prism run` accepts the
-same flag and applies it to every Greptile-gated node (implementation and the
-final integration PR). That effective graph is persisted, so do not repeat the
+same flag and applies it to every Greptile-gated node (implementation, the
+refactor pass, and the final integration PR). That effective graph is persisted, so do not repeat the
 flag on `prism resume`.
 
 Use `--no-beads-update`, `--no-merge-nodes`, or

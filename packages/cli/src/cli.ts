@@ -159,6 +159,8 @@ Commands:
             [--greptile-app-slug <slug>] [--spec-file <path>]
             [--final-pr-base <branch>] [--final-pr-reviewer claude|greptile|none]
             [--final-pr-validation-command <command>] [--final-pr-draft]
+            [--refactor] [--refactor-frozen <constraint>]
+            [--refactor-max-changes <n>] [--refactor-validation-command <command>]
                                       Snapshot Beads into an agent DAG
   run <file> [--json] [--store <db>] [--run-id <id>] [--repo <path>]
              [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
@@ -299,6 +301,10 @@ interface BeadsDagInvocation {
   readonly finalPrValidationCommands: readonly string[];
   readonly finalPrMaxIterations: number;
   readonly finalPrDraft: boolean;
+  readonly refactor: boolean;
+  readonly refactorFrozen: readonly string[];
+  readonly refactorMaxChanges: number | undefined;
+  readonly refactorValidationCommands: readonly string[];
 }
 interface ReadInvocation {
   readonly command: "inspect" | "events";
@@ -993,6 +999,7 @@ function parseBeadsDagInvocation(
     "--final-pr-reviewer",
     "--final-pr-review-trigger-comment",
     "--final-pr-max-iterations",
+    "--refactor-max-changes",
   ]);
   const repeatedFlags = new Set([
     "--id",
@@ -1001,6 +1008,8 @@ function parseBeadsDagInvocation(
     "--validation-command",
     "--merge-validation-command",
     "--final-pr-validation-command",
+    "--refactor-frozen",
+    "--refactor-validation-command",
   ]);
   const switchFlags = new Set([
     "--all-statuses",
@@ -1010,6 +1019,7 @@ function parseBeadsDagInvocation(
     "--no-beads-update",
     "--no-serialize-merges",
     "--final-pr-draft",
+    "--refactor",
   ]);
 
   for (let index = 0; index < args.length; index += 1) {
@@ -1104,6 +1114,29 @@ function parseBeadsDagInvocation(
   if (finalPrBase === undefined && hasFinalPrOptions) {
     return undefined;
   }
+  // The refactor pass is scoped by the final PR's base, so it needs one.
+  const refactor = switches.has("--refactor");
+  const hasRefactorOptions =
+    scalar.has("--refactor-max-changes") ||
+    repeated.has("--refactor-frozen") ||
+    repeated.has("--refactor-validation-command");
+  if (
+    (refactor && finalPrBase === undefined) ||
+    (!refactor && hasRefactorOptions)
+  ) {
+    return undefined;
+  }
+  const refactorMaxChangesValue = scalar.get("--refactor-max-changes");
+  const refactorMaxChanges =
+    refactorMaxChangesValue === undefined
+      ? undefined
+      : Number(refactorMaxChangesValue);
+  if (
+    refactorMaxChanges !== undefined &&
+    (!Number.isSafeInteger(refactorMaxChanges) || refactorMaxChanges < 1)
+  ) {
+    return undefined;
+  }
 
   return {
     command: "beads-dag",
@@ -1140,6 +1173,11 @@ function parseBeadsDagInvocation(
       repeated.get("--final-pr-validation-command") ?? [],
     finalPrMaxIterations,
     finalPrDraft: switches.has("--final-pr-draft"),
+    refactor,
+    refactorFrozen: repeated.get("--refactor-frozen") ?? [],
+    refactorMaxChanges,
+    refactorValidationCommands:
+      repeated.get("--refactor-validation-command") ?? [],
   };
 }
 
@@ -3008,6 +3046,17 @@ export async function runCli(
                 finalPrMaxIterations: invocation.finalPrMaxIterations,
                 finalPrDraft: invocation.finalPrDraft,
               }),
+          ...(invocation.refactor
+            ? {
+                refactor: true,
+                refactorFrozen: invocation.refactorFrozen,
+                ...(invocation.refactorMaxChanges === undefined
+                  ? {}
+                  : { refactorMaxChanges: invocation.refactorMaxChanges }),
+                refactorValidationCommands:
+                  invocation.refactorValidationCommands,
+              }
+            : {}),
         });
         io.stdout(invocation.out);
         return EXIT_SUCCESS;

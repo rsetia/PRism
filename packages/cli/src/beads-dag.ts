@@ -53,6 +53,11 @@ export interface GenerateBeadsDagOptions {
   readonly finalPrValidationCommands?: readonly string[];
   readonly finalPrMaxIterations?: number;
   readonly finalPrDraft?: boolean;
+  /** Refactor the run's diff before the final PR. Requires finalPrBase. */
+  readonly refactor?: boolean;
+  readonly refactorFrozen?: readonly string[];
+  readonly refactorMaxChanges?: number;
+  readonly refactorValidationCommands?: readonly string[];
 }
 
 /**
@@ -219,6 +224,23 @@ export async function generateBeadsDag(
             draft: options.finalPrDraft ?? false,
           },
         }),
+    ...(options.refactor === true
+      ? {
+          refactor: {
+            ...(options.refactorFrozen === undefined ||
+            options.refactorFrozen.length === 0
+              ? {}
+              : { frozen: options.refactorFrozen }),
+            ...(options.refactorMaxChanges === undefined
+              ? {}
+              : { maxChanges: options.refactorMaxChanges }),
+            ...(options.refactorValidationCommands === undefined ||
+            options.refactorValidationCommands.length === 0
+              ? {}
+              : { validationCommands: options.refactorValidationCommands }),
+          },
+        }
+      : {}),
   };
   const graph = buildBeadsGraph(graphBeads, graphOptions);
   await writeGraph(options.outFile, graph);

@@ -77,6 +77,22 @@ export interface FinalPullRequestOptions {
   readonly body?: string;
 }
 
+/**
+ * A refactor pass over the whole run's diff, inserted after the last bead
+ * merges and before the final integration PR. It opens a reviewed cleanup
+ * PR into targetBranch that a merge_resolve node then lands.
+ */
+export interface RefactorPassOptions {
+  /** Most small refactors applied in one pass. Default 8 in the executor. */
+  readonly maxChanges?: number;
+  /** Constraints the pass must not violate, such as frozen contracts. */
+  readonly frozen?: readonly string[];
+  /** Default: the implement nodes' validationCommands. */
+  readonly validationCommands?: readonly string[];
+  /** Review iterations for the cleanup PR. Default 3 in the executor. */
+  readonly maxIterations?: number;
+}
+
 export interface BeadsGraphOptions {
   /** Spec document embedded into every context node as `specDocument`. */
   readonly spec?: BeadsSpecDocument;
@@ -104,6 +120,8 @@ export interface BeadsGraphOptions {
   readonly beadsRepo?: string;
   /** Append a reviewed integration PR from targetBranch into this base. */
   readonly finalPullRequest?: FinalPullRequestOptions;
+  /** Refactor the run's diff before the final PR. Requires finalPullRequest. */
+  readonly refactor?: RefactorPassOptions;
 }
 
 /**
@@ -207,6 +225,7 @@ export function buildBeadsGraph(
     options?.beadsRepo,
     options?.finalPullRequest,
   );
+  validateRefactorOptions(options?.refactor, options?.finalPullRequest);
   const reviewConfig = {
     by: review,
     ...defaultTriggerComment(review),
@@ -372,6 +391,55 @@ export function buildBeadsGraph(
   }
 
   const finalPullRequest = options?.finalPullRequest;
+  const refactor = options?.refactor;
+  if (refactor !== undefined && finalPullRequest !== undefined) {
+    const refactorNodeId = "refactor-integration";
+    const refactorMergeNodeId = "merge-refactor-integration";
+    // A bead slugged "refactor-integration" would already own the merge id.
+    if (refactorMergeNodeId in nodes) {
+      throw new Error(
+        `refactor node id "${refactorMergeNodeId}" collides with a bead node`,
+      );
+    }
+    const refactorValidationCommands =
+      refactor.validationCommands ?? validationCommands;
+    nodes[refactorNodeId] = {
+      executor: "refactor",
+      kind: "task",
+      dependsOn: [completionNode],
+      config: {
+        targetBranch,
+        baseBranch: finalPullRequest.targetBranch,
+        branchName: `${targetBranch}-refactor`,
+        review: reviewConfig,
+        ...(refactor.maxChanges === undefined
+          ? {}
+          : { maxChanges: refactor.maxChanges }),
+        ...(refactor.frozen === undefined ? {} : { frozen: refactor.frozen }),
+        ...(refactor.maxIterations === undefined
+          ? {}
+          : { maxIterations: refactor.maxIterations }),
+        ...(refactorValidationCommands === undefined
+          ? {}
+          : { validationCommands: refactorValidationCommands }),
+      },
+    };
+    nodes[refactorMergeNodeId] = {
+      executor: "merge_resolve",
+      kind: "task",
+      dependsOn: [refactorNodeId],
+      ...(serializeMerges ? { resources: ["integration-branch"] } : {}),
+      config: {
+        targetBranch,
+        sourceBranchFrom: refactorNodeId,
+        mergeMethod: "squash",
+        ...(mergeValidationCommands === undefined
+          ? {}
+          : { validationCommands: mergeValidationCommands }),
+      },
+    };
+    completionNode = refactorMergeNodeId;
+  }
   if (finalPullRequest === undefined) {
     return {
       version: 1,
@@ -827,6 +895,30 @@ function validateOptions(
       }
     }
   }
+}
+
+function validateRefactorOptions(
+  refactor: RefactorPassOptions | undefined,
+  finalPullRequest: FinalPullRequestOptions | undefined,
+): void {
+  if (refactor === undefined) {
+    return;
+  }
+  if (finalPullRequest === undefined) {
+    throw new Error(
+      "refactor requires finalPullRequest: its base branch scopes the pass to this run's diff",
+    );
+  }
+  for (const [field, value] of [
+    ["maxChanges", refactor.maxChanges],
+    ["maxIterations", refactor.maxIterations],
+  ] as const) {
+    if (value !== undefined && (!Number.isInteger(value) || value < 1)) {
+      throw new Error(`refactor.${field} must be a positive integer`);
+    }
+  }
+  validateCommands(refactor.frozen, "refactor.frozen");
+  validateCommands(refactor.validationCommands, "refactor.validationCommands");
 }
 
 function validateReviewConfig(

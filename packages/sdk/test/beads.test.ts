@@ -340,6 +340,78 @@ describe("buildBeadsGraph", () => {
     expect(compileGraph(graph).ok).toBe(true);
   });
 
+  test("inserts a reviewed refactor pass before the final PR", () => {
+    const graph = buildBeadsGraph([bead("A"), bead("B")], {
+      targetBranch: "prism/integration",
+      review: "greptile",
+      validationCommands: ["cargo test"],
+      mergeValidationCommands: ["cargo build"],
+      finalPullRequest: { targetBranch: "main", review: "claude" },
+      refactor: { maxChanges: 4, frozen: ["CoreCommand variants"] },
+    });
+    expect(graph.nodes["refactor-integration"]).toMatchObject({
+      executor: "refactor",
+      dependsOn: ["beads-final"],
+      config: {
+        targetBranch: "prism/integration",
+        baseBranch: "main",
+        branchName: "prism/integration-refactor",
+        review: { by: "greptile", triggerComment: "@greptile review" },
+        maxChanges: 4,
+        frozen: ["CoreCommand variants"],
+        validationCommands: ["cargo test"],
+      },
+    });
+    expect(graph.nodes["merge-refactor-integration"]).toMatchObject({
+      executor: "merge_resolve",
+      dependsOn: ["refactor-integration"],
+      resources: ["integration-branch"],
+      config: {
+        targetBranch: "prism/integration",
+        sourceBranchFrom: "refactor-integration",
+        validationCommands: ["cargo build"],
+      },
+    });
+    expect(graph.nodes["finalize-integration-pr"]?.dependsOn).toEqual([
+      "merge-refactor-integration",
+    ]);
+    expect(compileGraph(graph).ok).toBe(true);
+  });
+
+  test("lets the refactor pass override validation commands", () => {
+    const graph = buildBeadsGraph([bead("A")], {
+      targetBranch: "prism/integration",
+      validationCommands: ["cargo test"],
+      finalPullRequest: { targetBranch: "main", review: "none" },
+      refactor: { validationCommands: ["cargo clippy", "cargo test"] },
+    });
+    expect(graph.nodes["refactor-integration"]?.dependsOn).toEqual([
+      "update-a",
+    ]);
+    expect(graph.nodes["refactor-integration"]?.config).toMatchObject({
+      validationCommands: ["cargo clippy", "cargo test"],
+    });
+  });
+
+  test("rejects a refactor pass without a final PR base", () => {
+    expect(() =>
+      buildBeadsGraph([bead("A")], {
+        targetBranch: "prism/integration",
+        refactor: {},
+      }),
+    ).toThrow("refactor requires finalPullRequest");
+  });
+
+  test("rejects a bead whose merge node would collide with the refactor merge", () => {
+    expect(() =>
+      buildBeadsGraph([bead("refactor-integration")], {
+        targetBranch: "prism/integration",
+        finalPullRequest: { targetBranch: "main", review: "none" },
+        refactor: {},
+      }),
+    ).toThrow("collides");
+  });
+
   test("rejects a final PR whose base is the integration branch", () => {
     expect(() =>
       buildBeadsGraph([bead("A")], {

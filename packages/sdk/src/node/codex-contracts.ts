@@ -69,6 +69,29 @@ export interface FinalizePrConfig {
 }
 
 /**
+ * A structural cleanup pass over everything a run landed on its integration
+ * branch. Per-bead review sees one diff at a time, so duplication and
+ * layering problems that only exist across beads land unchallenged; this
+ * node looks at the whole run's diff before the final PR.
+ */
+export interface RefactorConfig {
+  /** Integration branch to refactor; the cleanup PR merges into it. */
+  readonly targetBranch: string;
+  /** Branch the run will land on; `base...target` is the refactor scope. */
+  readonly baseBranch: string;
+  /** Feature branch for the cleanup PR. */
+  readonly branchName: string;
+  /** Review gate the cleanup PR must pass before merge_resolve lands it. */
+  readonly review: ReviewConfig;
+  /** Most small refactors applied in one pass. Default 8. */
+  readonly maxChanges?: number;
+  /** Constraints the pass must not violate (frozen contracts, formats). */
+  readonly frozen?: readonly string[];
+  readonly maxIterations?: number;
+  readonly validationCommands?: readonly string[];
+}
+
+/**
  * Validate and extract a node's config for `implement`. Doubles as the
  * executor's preflight `validateConfig` (throws on anything invalid).
  *
@@ -267,6 +290,64 @@ export function parseFinalizePrConfig(
   });
 }
 
+/** Validate the integration refactor pass configuration. */
+export function parseRefactorConfig(
+  config: JsonValue | undefined,
+): RefactorConfig {
+  const value = expectObject(config, "config");
+  const targetBranch = expectNonEmptyString(
+    value["targetBranch"],
+    "config.targetBranch",
+  );
+  const baseBranch = expectNonEmptyString(
+    value["baseBranch"],
+    "config.baseBranch",
+  );
+  const branchName = expectNonEmptyString(
+    value["branchName"],
+    "config.branchName",
+  );
+  if (baseBranch === targetBranch) {
+    throw new Error("config.baseBranch must differ from config.targetBranch");
+  }
+  if (branchName === targetBranch || branchName === baseBranch) {
+    throw new Error(
+      "config.branchName must differ from config.targetBranch and config.baseBranch",
+    );
+  }
+  const shared = parseImplementConfig({
+    workItem: { provider: "prism", id: "integration-refactor" },
+    targetBranch,
+    branchName,
+    review: value["review"] as JsonValue,
+    ...(value["maxIterations"] === undefined
+      ? {}
+      : { maxIterations: value["maxIterations"] as JsonValue }),
+    ...(value["validationCommands"] === undefined
+      ? {}
+      : { validationCommands: value["validationCommands"] as JsonValue }),
+  });
+  const maxChanges = optionalPositiveInteger(
+    value["maxChanges"],
+    "config.maxChanges",
+  );
+  const frozen = optionalCommandList(value["frozen"], "config.frozen");
+  return Object.freeze({
+    targetBranch,
+    baseBranch,
+    branchName,
+    review: shared.review,
+    ...(maxChanges === undefined ? {} : { maxChanges }),
+    ...(frozen === undefined ? {} : { frozen }),
+    ...(shared.maxIterations === undefined
+      ? {}
+      : { maxIterations: shared.maxIterations }),
+    ...(shared.validationCommands === undefined
+      ? {}
+      : { validationCommands: shared.validationCommands }),
+  });
+}
+
 /**
  * Build the `implement` contract (plan §15, ported from PRism-py
  * executors.py `task/implement`).
@@ -383,6 +464,7 @@ export function buildMergeResolveContract(
 
 Source and pull request:
 - Read the upstream result identified by config.sourceBranchFrom (${quote(config.sourceBranchFrom)}) in spec.input. Extract the exact feature branch from its pullRequests evidence; do not treat the upstream node id as a branch name.
+- If that upstream result has empty commits and pullRequests (a refactor pass that applied nothing), there is nothing to merge: write a succeeded result whose summary says so, with every evidence array empty.
 - Find or create the GitHub pull request from that feature branch into ${quote(config.targetBranch)}.
 - If GitHub reports that the PR can merge cleanly, merge it through GitHub using the ${config.mergeMethod ?? "squash"} method.
 
@@ -475,6 +557,85 @@ Result:
 }
 
 /**
+ * Build the `refactor` contract: a behavior-preserving cleanup of the whole
+ * run's diff, opened as a reviewed pull request into the integration branch.
+ * A downstream merge_resolve node lands it, exactly as it lands a bead.
+ *
+ * Agents apply a named refactoring far more reliably than they discover
+ * one, and atomic refactorings far more reliably than compound ones. So the
+ * contract separates discovery from editing (propose every candidate first,
+ * then select), applies only small proposals one validated commit at a
+ * time, and reports large ones as follow-up work instead of attempting them.
+ */
+export function buildRefactorContract(
+  config: RefactorConfig,
+): CodexExecutorContract {
+  const validation = validationInstruction(
+    config.validationCommands,
+    "run the repository's complete relevant validation",
+    "run every configured validation command in order",
+  );
+  const maxChanges = config.maxChanges ?? 8;
+  const maxIterations = config.maxIterations ?? 3;
+  const target = quote(config.targetBranch);
+  const frozen =
+    config.frozen === undefined || config.frozen.length === 0
+      ? ""
+      : `\n- These constraints are frozen; never propose or make a change that violates them:\n${config.frozen.map((item) => `  - ${item}`).join("\n")}`;
+
+  const instructions = `Run one behavior-preserving refactor pass over the code this run added to the integration branch ${target}, and deliver it as a reviewed pull request into ${target}. Do not merge it: a later node merges it after review.
+
+Scope:
+- Fetch origin. Create the feature branch ${quote(config.branchName)} from ${quote(`origin/${config.targetBranch}`)} in the provided worktree.
+- The scope is the diff ${quote(`origin/${config.baseBranch}...origin/${config.targetBranch}`)}: the files this run added or changed. Edit code outside it only to update call sites an in-scope change requires.
+- Read the spec and work items in spec.input for intent. Interfaces, schemas, persisted formats, and wire protocols they define are requirements, not candidates.${frozen}
+
+1. Baseline:
+- Before changing anything, ${validation}. If the baseline fails, make no changes: write a succeeded result with empty commits and pullRequests and an unresolvedRisks entry starting with "baseline validation failed", so the final integration review still runs.
+
+2. Propose, without editing any file:
+- Read the entire scope diff, then make one separate pass per lens below. Use the repository's existing linters and any installed duplication or complexity tooling as evidence; do not install new tools.
+  - Duplication: repeated blocks or boilerplate that one helper or table would replace.
+  - Overlapping or dead surface: two entry points that do the same thing, unused parameters, variants, or functions, and public API used only by tests.
+  - Layering: logic in the wrong module, a thin handle or wrapper that grew orchestration, and an optional mode threaded through many call sites.
+  - Needless indirection: single-use wrappers, speculative generality, and defensive checks for states the types already rule out.
+- For each candidate record a title, file:line evidence, the exact change, the approximate lines it removes, and a size. "small" means one mechanical change that existing tests already cover and one commit expresses. "large" means it is multi-step, crosses a module boundary, changes a public or frozen interface, or needs new tests.
+- Do not propose formatting or renaming churn, comment rewrites, or any change that adds more code than it removes.
+
+3. Select:
+- Rank the small candidates by complexity removed against risk and keep at most ${String(maxChanges)}. Drop any candidate whose evidence you cannot point to. Keeping zero is a valid outcome.
+
+4. Apply, one candidate per commit:
+- Make the change, then ${validation}. If validation fails, drop that commit, record the candidate as rejected with the failure, and continue with the next one.
+- Never change observable behavior, error values, persisted or wire formats, or test assertions and expected values. A test may change only where it calls a private helper that the refactor moved or renamed.
+
+5. Pull request and review:
+- If no commit survived, do not push. Write a succeeded result with empty commits and pullRequests.
+- Otherwise push ${quote(config.branchName)} and create or update a pull request targeting ${target}. Its body lists every applied change with the lines it removed, every rejected candidate with the reason, and every large candidate as deferred follow-up work.
+${implementGateInstructions(config.review)}
+- After every push, capture the new head SHA and poll only feedback and checks for that head. Fix current-head actionable findings or drop the commit they concern, rerun validation, and push again.
+- Perform at most ${String(maxIterations)} review iterations. If the gate is still not merge-ready, fail with failureClass "manual_review_required".
+- Stop successfully when the review gate is merge-ready. Never merge or close the pull request and never push directly to ${target}.
+
+Result:
+- On success, write result.json as {"status":"succeeded","output":{"version":1,"summary":"<applied, rejected and deferred counts>","commits":[{"sha":"<commit SHA>"}],"pullRequests":[{"url":"<PR URL>","number":<number>,"branch":${quote(config.branchName)},"headSha":"<final head SHA>"}],"validations":[{"command":"<command>","status":"passed|failed"}],"reviewVerdicts":[{"reviewer":"<reviewer>","verdict":"approved|changes_requested|pending","headSha":"<reviewed head SHA>"}],"screenshots":[],"artifacts":[],"unresolvedRisks":["large refactor: <title> — <evidence> — <proposed change>"]}}.
+- Every top-level field is required. Use empty arrays for categories that do not apply, including commits and pullRequests when nothing was applied. Put each deferred large candidate in unresolvedRisks, one line each.`;
+
+  return freezeContract({
+    instructions,
+    requiredExecutionMode: "trusted-local",
+    dangerouslyBypassApprovalsAndSandbox: true,
+    allowsGitMutation: true,
+    allowsGitHubIo: true,
+    extraRules: Object.freeze([
+      ...implementExtraRules(config.review),
+      `Operate only on feature branch ${config.branchName}; never push to ${config.targetBranch} or ${config.baseBranch}.`,
+      "Never merge the refactor pull request; success means reviewed and ready for the merge node.",
+    ]),
+  });
+}
+
+/**
  * Dispatch a worker spec to its codex contract, parsing config along the
  * way. This is what a codex worker entry calls to turn spec.executor into
  * the instructions codex runs.
@@ -482,6 +643,8 @@ Result:
  * Switch on spec.executor —
  *   "implement"     -> buildImplementContract(parseImplementConfig(config))
  *   "merge_resolve" -> buildMergeResolveContract(parseMergeResolveConfig(config))
+ *   "finalize_pr"   -> buildFinalizePrContract(parseFinalizePrConfig(config))
+ *   "refactor"      -> buildRefactorContract(parseRefactorConfig(config))
  * Any other executor name is an error (a codex worker was launched for a
  * non-codex node).
  */
@@ -493,6 +656,8 @@ export function codexContractForSpec(spec: WorkerSpec): CodexExecutorContract {
       return buildMergeResolveContract(parseMergeResolveConfig(spec.config));
     case "finalize_pr":
       return buildFinalizePrContract(parseFinalizePrConfig(spec.config));
+    case "refactor":
+      return buildRefactorContract(parseRefactorConfig(spec.config));
     default:
       throw new Error(
         `Unsupported Codex executor ${quote(spec.executor)} for node ${quote(spec.nodeId)}`,

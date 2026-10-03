@@ -13,7 +13,7 @@ export interface AppliedGreptileAppSlug {
 
 /**
  * Apply one Greptile GitHub App identity to every Greptile-gated node
- * (implement and finalize_pr). Recompiling returns the same deeply frozen
+ * (implement, refactor, and finalize_pr). Recompiling returns the same deeply frozen
  * shape that graph loading does, and lets the run store persist the
  * effective policy for later resumes.
  */
@@ -42,7 +42,9 @@ export function applyGreptileAppSlug(
 
     let config = node.config;
     if (
-      (node.executor === "implement" || node.executor === "finalize_pr") &&
+      (node.executor === "implement" ||
+        node.executor === "refactor" ||
+        node.executor === "finalize_pr") &&
       isJsonObject(config)
     ) {
       const review = config["review"];
