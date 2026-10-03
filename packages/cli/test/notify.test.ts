@@ -190,6 +190,59 @@ describe("followOperatorAlerts", () => {
   });
 });
 
+describe("followOperatorAlerts teardown", () => {
+  test("finish drains the run's last failure before the outcome", async () => {
+    let clock = 0;
+    const { notifier, sent } = recordingNotifier();
+    const alerts = followOperatorAlerts({
+      notifier,
+      runId: "run-last",
+      fromSeq: 0,
+      events: eventsOf([
+        event(0, { kind: "node_started", nodeId: "a" }),
+        event(1, {
+          kind: "node_failed",
+          nodeId: "a",
+          failure: { nodeId: "a", cause: "final failure" },
+        }),
+      ]),
+      now: () => clock,
+    });
+    clock = RUN_FINISHED_NOTIFY_AFTER_MS;
+    // No settle: the run resolved before the follower read its last event.
+    await alerts.finish(failed);
+    expect(sent.map((notification) => notification.title)).toEqual([
+      "Prism node failed · run-last",
+      "Prism run failed · run-last",
+    ]);
+  });
+
+  test("stop ends a live cursor that never yields again", async () => {
+    let returned = false;
+    const { notifier, sent } = recordingNotifier();
+    const live: AsyncIterable<PersistedRunEvent> = {
+      [Symbol.asyncIterator]: () => ({
+        next: () => new Promise<IteratorResult<PersistedRunEvent>>(() => {}),
+        return: () => {
+          returned = true;
+          return Promise.resolve({ done: true, value: undefined });
+        },
+      }),
+    };
+    const alerts = followOperatorAlerts({
+      notifier,
+      runId: "run-live",
+      fromSeq: 0,
+      events: live,
+    });
+    alerts.stop();
+    alerts.stop();
+    await settle();
+    expect(returned).toBe(true);
+    expect(sent).toEqual([]);
+  });
+});
+
 describe("createDesktopNotifier", () => {
   function recordingExec(): {
     exec: (command: string, args: readonly string[]) => Promise<void>;
@@ -242,7 +295,9 @@ describe("createDesktopNotifier", () => {
       exec: linux.exec,
       bell: () => undefined,
     }).notify({ title: "t", message: "m" });
-    expect(linux.calls).toEqual([{ command: "notify-send", args: ["t", "m"] }]);
+    expect(linux.calls).toEqual([
+      { command: "notify-send", args: ["--", "t", "m"] },
+    ]);
 
     const windows = recordingExec();
     let bells = 0;

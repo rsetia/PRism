@@ -77,7 +77,8 @@ async function cliWith(
   },
   ...args: readonly string[]
 ): Promise<CliResult> {
-  const env: NodeJS.ProcessEnv = { ...process.env };
+  // Never raise real desktop notifications, whatever runner config is used.
+  const env: NodeJS.ProcessEnv = { ...process.env, PRISM_NOTIFY: "0" };
   if (options.prismHome === null) {
     delete env["PRISM_HOME"];
   } else if (options.prismHome !== undefined) {

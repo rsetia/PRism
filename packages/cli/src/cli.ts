@@ -1385,6 +1385,7 @@ async function runGraph(
       outcome = await handle.result;
       await alerts?.finish(outcome);
     } catch (error: unknown) {
+      alerts?.stop();
       if (isDuplicateRunError(error)) {
         io.stderr(`cannot start run "${handle.id}": run already exists`);
         return EXIT_USAGE;
@@ -1854,8 +1855,13 @@ async function resumeCommand(
     const handle = engine.resume(invocation.runId);
     io.stderr(`resume ${handle.id}`);
     const alerts = operatorAlertsFor(io, invocation.agent, handle, fromSeq);
-    const outcome = await handle.result;
-    await alerts?.finish(outcome);
+    let outcome: RunOutcome;
+    try {
+      outcome = await handle.result;
+      await alerts?.finish(outcome);
+    } finally {
+      alerts?.stop();
+    }
     return reportOutcome(outcome, invocation.json, io);
   } catch (error: unknown) {
     io.stderr(`cannot resume "${invocation.runId}": ${describeError(error)}`);
@@ -2107,8 +2113,13 @@ async function pollCommand(
       handle,
       existing?.revision ?? 0,
     );
-    const outcome = await handle.result;
-    await alerts?.finish(outcome);
+    let outcome: RunOutcome;
+    try {
+      outcome = await handle.result;
+      await alerts?.finish(outcome);
+    } finally {
+      alerts?.stop();
+    }
     return reportOutcome(outcome, invocation.json, io);
   } catch (error: unknown) {
     io.stderr(`cannot poll "${runId}": ${describeError(error)}`);

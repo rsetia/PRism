@@ -65,7 +65,11 @@ export function createDesktopNotifier(
           notification.message,
         ]);
       } else if (platform === "linux") {
-        await exec("notify-send", [notification.title, notification.message]);
+        await exec("notify-send", [
+          "--",
+          notification.title,
+          notification.message,
+        ]);
       }
     },
   });
@@ -105,9 +109,18 @@ export interface OperatorAlertsInput {
 }
 
 export interface OperatorAlerts {
-  /** Notify the run's outcome and stop following events. */
+  /**
+   * Notify the run's outcome. The run is finished, so its event cursor is
+   * drained first (bounded by DRAIN_TIMEOUT_MS): the failure that ended
+   * the run is usually the last event and must not be dropped.
+   */
   finish(outcome: RunOutcome): Promise<void>;
+  /** Stop following without notifying (idempotent; also after finish). */
+  stop(): void;
 }
+
+/** Longest finish() waits for a finished run's cursor to drain. */
+export const DRAIN_TIMEOUT_MS = 5_000;
 
 /**
  * Follow a run's events and notify on each node that now needs the
@@ -119,6 +132,8 @@ export function followOperatorAlerts(
   input: OperatorAlertsInput,
 ): OperatorAlerts {
   const now = input.now ?? Date.now;
+  // This process's share of the run: after a resume, a long run whose
+  // resumed segment is short finishes while the operator is watching.
   const startedAt = now();
   const label = `${input.project === undefined ? "" : `${input.project} · `}${shortRunId(input.runId)}`;
   const send = async (notification: OperatorNotification): Promise<void> => {
@@ -131,10 +146,13 @@ export function followOperatorAlerts(
 
   let stopped = false;
   let pending = Promise.resolve();
-  void (async (): Promise<void> => {
+  const iterator = input.events[Symbol.asyncIterator]();
+  const following = (async (): Promise<void> => {
     try {
-      for await (const event of input.events) {
-        if (stopped) return;
+      while (!stopped) {
+        const next = await iterator.next();
+        if (next.done === true || stopped) return;
+        const event = next.value;
         if (event.seq < input.fromSeq || event.kind !== "node_failed") {
           continue;
         }
@@ -156,11 +174,23 @@ export function followOperatorAlerts(
     }
   })();
 
+  const stop = (): void => {
+    if (stopped) return;
+    stopped = true;
+    void Promise.resolve(iterator.return?.()).catch(() => undefined);
+  };
+
   return Object.freeze({
     async finish(outcome: RunOutcome): Promise<void> {
-      stopped = true;
-      // Let failures already read go out before the outcome, without
-      // waiting on a cursor that only ends once the store closes.
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        following,
+        new Promise<void>((resolveDrain) => {
+          timer = setTimeout(resolveDrain, DRAIN_TIMEOUT_MS);
+        }),
+      ]);
+      if (timer !== undefined) clearTimeout(timer);
+      stop();
       await pending;
       if (
         outcome.status === "cancelled" ||
@@ -177,6 +207,7 @@ export function followOperatorAlerts(
             },
       );
     },
+    stop,
   });
 }
 
