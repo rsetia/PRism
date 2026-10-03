@@ -78,6 +78,11 @@ import {
 } from "./skills.js";
 import type { SkillAgent, SkillScope } from "./skills.js";
 import { renderWatchDashboard } from "./watch-renderer.js";
+import {
+  followOperatorAlerts,
+  type OperatorAlerts,
+  type OperatorNotifier,
+} from "./notify.js";
 
 /** Non-TTY stdout is data; interactive watch may redraw a human dashboard. */
 export interface CliIo {
@@ -88,6 +93,8 @@ export interface CliIo {
   readonly columns?: number;
   readonly rows?: number;
   readonly color?: boolean;
+  /** Operator notifications for run/resume/poll; absent sends none. */
+  readonly notifier?: OperatorNotifier;
 }
 
 export const EXIT_SUCCESS = 0;
@@ -132,7 +139,7 @@ Commands:
              [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
              [--codex-reasoning-effort <level>] [--codex-backend exec|app-server]
              [--greptile-app-slug <slug>] [--max-transient-retries <n>]
-             [--codex-stall-timeout-minutes <n>]
+             [--codex-stall-timeout-minutes <n>] [--no-notify]
                                       Execute the graph (transient infrastructure
                                       failures, e.g. git lock races or stalled
                                       Codex sessions, are retried in-run;
@@ -141,6 +148,7 @@ Commands:
               [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
               [--codex-reasoning-effort <level>] [--codex-backend exec|app-server]
               [--max-transient-retries <n>] [--codex-stall-timeout-minutes <n>]
+              [--no-notify]
                                       Watch a source (Linear) and implement every
                                       newly matching item; restarting resumes the
                                       same poll run (default id poll-<name>)
@@ -160,6 +168,7 @@ Commands:
          [--max-concurrency <n>] [--codex-bin <path>] [--codex-model <id>]
          [--codex-reasoning-effort <level>] [--codex-backend exec|app-server]
          [--max-transient-retries <n>] [--codex-stall-timeout-minutes <n>]
+         [--no-notify]
                                       Continue an interrupted run to completion
                                       (a finished run is reopened to re-run
                                       transient_infra failures, e.g. git lock
@@ -194,7 +203,11 @@ Defaults:
   Codex model                           ${DEFAULT_CODEX_MODEL}
   Codex reasoning effort                ${DEFAULT_CODEX_REASONING_EFFORT}
   Codex backend                         exec
-  Codex stall timeout                   ${String(DEFAULT_CODEX_STALL_TIMEOUT_MINUTES)} minutes without output (0 disables)`;
+  Codex stall timeout                   ${String(DEFAULT_CODEX_STALL_TIMEOUT_MINUTES)} minutes without output (0 disables)
+  Operator notifications                Desktop notification and terminal bell when
+                                        a node fails or needs input, and when a run
+                                        over a minute finishes (--no-notify or
+                                        PRISM_NOTIFY=0 disables)`;
 
 interface ValidateInvocation {
   readonly command: "validate";
@@ -349,6 +362,8 @@ interface AgentInvocationOptions {
   readonly maxTransientRetries: number;
   /** Minutes a Codex session may go without output; 0 disables. */
   readonly codexStallTimeoutMinutes: number;
+  /** Notify the operator when a node needs them (--no-notify disables). */
+  readonly notify: boolean;
 }
 
 interface ParsedFlags {
@@ -369,6 +384,7 @@ interface ParsedFlags {
   readonly codexStallTimeoutMinutes: string | undefined;
   readonly timeout: string | undefined;
   readonly refresh: boolean;
+  readonly noNotify: boolean;
   readonly specFile: string | undefined;
   readonly beadsRepo: string | undefined;
 }
@@ -392,6 +408,7 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
   let codexStallTimeoutMinutes: string | undefined;
   let timeout: string | undefined;
   let refresh = false;
+  let noNotify = false;
   let specFile: string | undefined;
   let beadsRepo: string | undefined;
 
@@ -403,6 +420,9 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
     } else if (arg === "--refresh") {
       if (refresh) return undefined;
       refresh = true;
+    } else if (arg === "--no-notify") {
+      if (noNotify) return undefined;
+      noNotify = true;
     } else if (
       arg === "--store" ||
       arg === "--run-id" ||
@@ -500,6 +520,7 @@ function parseFlags(rest: readonly string[]): ParsedFlags | undefined {
     codexStallTimeoutMinutes,
     timeout,
     refresh,
+    noNotify,
     specFile,
     beadsRepo,
   };
@@ -744,6 +765,7 @@ function parseInvocation(argv: readonly string[]): Invocation | undefined {
 
 function noAgentFlags(flags: ParsedFlags): boolean {
   return (
+    !flags.noNotify &&
     flags.maxTransientRetries === undefined &&
     flags.codexStallTimeoutMinutes === undefined &&
     flags.repo === undefined &&
@@ -759,6 +781,7 @@ function noAgentFlags(flags: ParsedFlags): boolean {
 
 function noWorkerFlags(flags: ParsedFlags): boolean {
   return (
+    !flags.noNotify &&
     flags.maxTransientRetries === undefined &&
     flags.codexStallTimeoutMinutes === undefined &&
     flags.maxConcurrency === undefined &&
@@ -805,6 +828,7 @@ function parseAgentOptions(
   return {
     maxTransientRetries,
     codexStallTimeoutMinutes,
+    notify: !flags.noNotify,
     repo: flags.repo,
     maxConcurrency,
     codexCommand: flags.codexCommand,
@@ -1356,8 +1380,10 @@ async function runGraph(
     // The run id is a human diagnostic (stderr) so `inspect`/`events` can
     // target it; stdout stays pure data.
     io.stderr(`run ${handle.id}`);
+    const alerts = operatorAlertsFor(io, invocation.agent, handle, 0);
     try {
       outcome = await handle.result;
+      await alerts?.finish(outcome);
     } catch (error: unknown) {
       if (isDuplicateRunError(error)) {
         io.stderr(`cannot start run "${handle.id}": run already exists`);
@@ -1824,9 +1850,12 @@ async function resumeCommand(
       ),
       clock: createSystemClock(),
     });
+    const fromSeq = (await store.getRun(invocation.runId))?.revision ?? 0;
     const handle = engine.resume(invocation.runId);
     io.stderr(`resume ${handle.id}`);
+    const alerts = operatorAlertsFor(io, invocation.agent, handle, fromSeq);
     const outcome = await handle.result;
+    await alerts?.finish(outcome);
     return reportOutcome(outcome, invocation.json, io);
   } catch (error: unknown) {
     io.stderr(`cannot resume "${invocation.runId}": ${describeError(error)}`);
@@ -2072,7 +2101,14 @@ async function pollCommand(
     io.stderr(
       `polling ${effective.source.kind} every ${String(effective.intervalSeconds)}s with up to ${String(effective.maxParallel)} implementers; follow with: prism watch ${runId}`,
     );
+    const alerts = operatorAlertsFor(
+      io,
+      invocation.agent,
+      handle,
+      existing?.revision ?? 0,
+    );
     const outcome = await handle.result;
+    await alerts?.finish(outcome);
     return reportOutcome(outcome, invocation.json, io);
   } catch (error: unknown) {
     io.stderr(`cannot poll "${runId}": ${describeError(error)}`);
@@ -2081,6 +2117,32 @@ async function pollCommand(
     await agentRegistry?.close();
     await store?.close?.();
   }
+}
+
+/** Follow a driven run for the operator; undefined when notifications are off. */
+function operatorAlertsFor(
+  io: CliIo,
+  agent: AgentInvocationOptions,
+  handle: {
+    readonly id: string;
+    readonly events: AsyncIterable<PersistedRunEvent>;
+  },
+  fromSeq: number,
+): OperatorAlerts | undefined {
+  if (!agent.notify || io.notifier === undefined) return undefined;
+  let project: string | undefined;
+  try {
+    project = resolvePrismProjectPaths(agent.repo).projectSlug;
+  } catch {
+    project = undefined;
+  }
+  return followOperatorAlerts({
+    notifier: io.notifier,
+    runId: handle.id,
+    ...(project === undefined ? {} : { project }),
+    events: handle.events,
+    fromSeq,
+  });
 }
 
 function executionPrismHomeMessage(): string {

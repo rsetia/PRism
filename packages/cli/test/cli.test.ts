@@ -127,6 +127,21 @@ describe("prism CLI", () => {
     expect(result.code).toBe(2);
   });
 
+  test("--no-notify is accepted by run and rejected where nothing runs", async () => {
+    const run = await cli("run", fixture("failing.json"), "--no-notify");
+    expect(run.code).toBe(1);
+    expect(run.stderr).toContain("doomed");
+    const validate = await cli(
+      "validate",
+      fixture("valid.json"),
+      "--no-notify",
+    );
+    expect(validate.code).toBe(2);
+    const help = await cli("help");
+    expect(help.stdout).toContain("[--no-notify]");
+    expect(help.stdout).toContain("PRISM_NOTIFY=0");
+  });
+
   test("help advertises the Greptile GitHub App selector", async () => {
     const result = await cli("help");
     expect(result.code).toBe(0);

@@ -65,6 +65,11 @@ A session that goes 30 minutes without output or a phase change is terminated
 as stalled and retried or continued from its pull request;
 `--codex-stall-timeout-minutes <n>` changes the limit (0 disables).
 
+While `run`, `resume`, or `poll` drives a run, Prism notifies you (desktop
+notification on macOS or Linux, plus the terminal bell) when a node fails
+after its retries or stops on a blocker that needs your input, and when a run
+longer than a minute finishes. `--no-notify` or `PRISM_NOTIFY=0` turns this off.
+
 If both production and staging Greptile apps review the same pull requests,
 select the production GitHub App for the whole run:
 
