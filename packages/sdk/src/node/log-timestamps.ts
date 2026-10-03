@@ -10,8 +10,11 @@ export interface LineTimestampOptions {
  * timestamp and a space. Worker output arrives in arbitrary fragments, so
  * the prefix is stamped when a line's first character is written, not when
  * the line completes; a fragment that ends mid-line leaves the next one to
- * continue it unprefixed. Reads pass through unchanged: the stored text is
- * the stamped text.
+ * continue it unprefixed. Lines that arrive in one chunk share its arrival
+ * time, so a stamp marks when output reached Prism, not when each line was
+ * produced. Reads pass through unchanged: the stored text is the stamped
+ * text. Reopening a target starts a new generation (the backend replaces
+ * the prior text), so each writer starts at a line start.
  *
  * Without timestamps a long gap in a worker log cannot be told apart from
  * a host that slept, which is exactly the question a slow run raises.
